@@ -3,11 +3,10 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { configLoads } from './config';
-import { MetaModule } from './modules/meta/meta.module';
-import { PrismaModule } from './modules/prisma/prisma.module';
 import { TaskModule } from './task/task.module';
 
 export const global_modules = [
+  ScheduleModule.forRoot(),
   BullModule.forRoot({
     redis: {
       host: process.env.REDIS_HOST,
@@ -22,13 +21,7 @@ export const global_modules = [
 ];
 
 @Module({
-  imports: [
-    ...global_modules,
-    ScheduleModule.forRoot(),
-    TaskModule,
-    PrismaModule,
-    MetaModule,
-  ],
+  imports: [...global_modules, TaskModule],
 })
 export class AppModule {
   constructor() {}

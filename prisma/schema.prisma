@@ -1,32 +1,32 @@
 generator client {
-  provider = "prisma-client-js"
+    provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "postgresql"
+    provider = "postgresql"
 }
 
 // =======================
 // ENUMS
 // =======================
 enum Role {
-  ADMIN
-  MANAGER
-  EDITOR
+    ADMIN
+    MANAGER
+    EDITOR
 }
 
 enum AccountType {
-  AD_ACCOUNT
-  PAGE
-  INSTAGRAM
-  BUSINESS_MANAGER
+    AD_ACCOUNT
+    PAGE
+    INSTAGRAM
+    BUSINESS_MANAGER
 }
 
 enum MemberRole {
-  OWNER
-  MANAGER
-  EDITOR
-  VIEWER
+    OWNER
+    MANAGER
+    EDITOR
+    VIEWER
 }
 
 /// ===============================
@@ -34,773 +34,808 @@ enum MemberRole {
 /// ===============================
 
 enum Status {
-  DRAFT
-  ACTIVE
-  PAUSED
-  DELETED
-  ARCHIVED
+    DRAFT
+    ACTIVE
+    PAUSED
+    DELETED
+    ARCHIVED
 }
 
 enum InsightRange {
-  MAX
-  DAY_7
-  DAY_3
-  DAILY
+    MAX
+    DAY_7
+    DAY_3
+    DAILY
 }
 
 enum LevelInsight {
-  AD
-  CAMPAIGN
-  ADSET
+    AD
+    CAMPAIGN
+    ADSET
 }
 
 // =======================
 // MODELS
 // =======================
 model TargetingInterest {
-  id                        String  @id @default(uuid())
-  name                      String
-  description               String?
-  audience_size_lower_bound Int?
-  audience_size_upper_bound Int?
-  path                      Json?
-  topic                     String?
+    id                        String  @id @default(uuid())
+    name                      String
+    description               String?
+    audience_size_lower_bound Int?
+    audience_size_upper_bound Int?
+    path                      Json?
+    topic                     String?
 }
 
 model CidContent {
-  id           String  @id @default(uuid())
-  code         String
-  name         String
-  project_name String?
-  ma_sanpham   String?
-  ten_sanpham  String?
+    id           String  @id @default(uuid())
+    code         String
+    name         String
+    project_name String?
+    ma_sanpham   String?
+    ten_sanpham  String?
 
-  createdAt DateTime @default(now())
+    createdAt DateTime @default(now())
 
-  @@unique([code])
-  @@unique([name])
-  @@index([code, name, ma_sanpham, ten_sanpham, project_name])
+    @@unique([code])
+    @@unique([name])
+    @@index([code, name, ma_sanpham, ten_sanpham, project_name])
 }
 
 model DropdownCategory {
-  id          String  @id @default(uuid())
-  key         String  @unique
-  name        String
-  description String?
+    id          String  @id @default(uuid())
+    key         String  @unique
+    name        String
+    description String?
 
-  isActive    Boolean   @default(true)
-  createdAt   DateTime  @default(now())
-  createdById String?
-  updatedAt   DateTime  @updatedAt
-  updatedById String?
-  deletedAt   DateTime?
+    isActive    Boolean   @default(true)
+    createdAt   DateTime  @default(now())
+    createdById String?
+    updatedAt   DateTime  @updatedAt
+    updatedById String?
+    deletedAt   DateTime?
 
-  items DropdownItem[] @relation("DropdownCategory_Items")
+    items DropdownItem[] @relation("DropdownCategory_Items")
 
-  @@index([key])
+    @@index([key])
 }
 
 model DropdownItem {
-  id          String    @id @default(uuid())
-  categoryId  String
-  externalId  String? // ví dụ: "LINK_CLICKS"
-  name        String
-  value       String?
-  description String?
-  color       String?
-  sortOrder   Int       @default(0)
-  metadata    Json?
-  isDefault   Boolean   @default(false)
-  isActive    Boolean   @default(true)
-  createdAt   DateTime  @default(now())
-  createdById String?
-  updatedAt   DateTime  @updatedAt
-  updatedById String?
-  deletedAt   DateTime?
+    id          String    @id @default(uuid())
+    categoryId  String
+    externalId  String? // ví dụ: "LINK_CLICKS"
+    name        String
+    value       String?
+    description String?
+    color       String?
+    sortOrder   Int       @default(0)
+    metadata    Json?
+    isDefault   Boolean   @default(false)
+    isActive    Boolean   @default(true)
+    createdAt   DateTime  @default(now())
+    createdById String?
+    updatedAt   DateTime  @updatedAt
+    updatedById String?
+    deletedAt   DateTime?
 
-  category DropdownCategory @relation("DropdownCategory_Items", fields: [categoryId], references: [id])
+    category DropdownCategory @relation("DropdownCategory_Items", fields: [categoryId], references: [id])
 
-  @@unique([categoryId, value])
-  @@index([categoryId])
-  @@index([externalId])
+    @@unique([categoryId, value])
+    @@index([categoryId])
+    @@index([externalId])
 }
 
 model User {
-  id          String  @id @default(uuid())
-  email       String  @unique
-  employee_id String?
-  name        String
-  password    String
-  role        Role    @default(EDITOR)
+    id          String  @id @default(uuid())
+    email       String  @unique
+    employee_id String?
+    name        String
+    password    String
+    role        Role    @default(EDITOR)
 
-  parentId String?
-  parent   User?   @relation("UserChildren", fields: [parentId], references: [id])
-  children User[]  @relation("UserChildren")
+    parentId String?
+    parent   User?   @relation("UserChildren", fields: [parentId], references: [id])
+    children User[]  @relation("UserChildren")
 
-  locale String?
+    locale String?
 
-  // relations
-  changeLogs     ChangeLog[]     @relation("change_actor")
-  accountMembers AccountMember[] @relation("UserAccountMembers")
+    // relations
+    changeLogs     ChangeLog[]     @relation("change_actor")
+    accountMembers AccountMember[] @relation("UserAccountMembers")
 
-  createdAt    DateTime      @default(now())
-  createdById  String?
-  updatedAt    DateTime      @updatedAt
-  updatedById  String?
-  deletedAt    DateTime?
-  deletedById  String?
-  userFanpages UserFanpage[]
+    createdAt    DateTime      @default(now())
+    createdById  String?
+    updatedAt    DateTime      @updatedAt
+    updatedById  String?
+    deletedAt    DateTime?
+    deletedById  String?
+    userFanpages UserFanpage[]
 }
 
 model UserFanpage {
-  id     String  @id @default(uuid())
-  userId String
-  user   User    @relation(fields: [userId], references: [id])
-  pageId String // ID của Fanpage (ví dụ từ Meta)
-  page   Fanpage @relation(fields: [pageId], references: [id])
+    id     String  @id @default(uuid())
+    userId String
+    user   User    @relation(fields: [userId], references: [id])
+    pageId String // ID của Fanpage (ví dụ từ Meta)
+    page   Fanpage @relation(fields: [pageId], references: [id])
 
-  name      String? // Tên hiển thị trong dropdown
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
+    name      String? // Tên hiển thị trong dropdown
+    isActive  Boolean  @default(true)
+    createdAt DateTime @default(now())
 
-  @@index([userId, pageId])
+    @@index([userId, pageId])
 }
 
 // [{"id": "249650921563125", "name": "Seyoul Beauty - Malaysia"}, {"id": "111534788320800", "name": "Seyoul Smooth Skin - ผิวเรียบเนียนไร้กาลเวลา"}]
 model Fanpage {
-  id           String        @id
-  name         String?
-  userFanpages UserFanpage[]
-  creatives    Creative[]
+    id           String        @id
+    name         String?
+    userFanpages UserFanpage[]
+    creatives    Creative[]
 }
 
 model Account {
-  // store as string to support "act_123", "page_123", "business_123"
-  id            String      @id
-  accountType   AccountType
-  name          String?
-  currency      String?
-  timezone      String?
-  needsReauth   Boolean     @default(false)
-  lastFetchedAt DateTime?
-  rawPayload    Json?
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
+    // store as string to support "act_123", "page_123", "business_123"
+    id            String      @id
+    accountType   AccountType
+    name          String?
+    currency      String?
+    timezone      String?
+    needsReauth   Boolean     @default(false)
+    lastFetchedAt DateTime?
+    rawPayload    Json?
+    createdAt     DateTime    @default(now())
+    updatedAt     DateTime    @updatedAt
 
-  pages  Json?
-  pixels Json?
+    pages  Json?
+    pixels Json?
 
-  // relations
-  members         AccountMember[]  @relation("AccountAccountMembers")
-  campaigns       Campaign[]
-  adSets          AdSet[]
-  ads             Ad[]
-  creatives       Creative[]
-  adImages        AdImage[]
-  adVideos        AdVideo[]
-  cidGroups       CidGroup[]
-  systemCampaigns SystemCampaign[]
-  systemAdSets    SystemAdSet[]
-  systemAds       SystemAd[]
-  systemCreatives SystemCreative[]
+    // relations
+    members         AccountMember[]  @relation("AccountAccountMembers")
+    campaigns       Campaign[]
+    adSets          AdSet[]
+    ads             Ad[]
+    creatives       Creative[]
+    adImages        AdImage[]
+    adVideos        AdVideo[]
+    cidGroups       CidGroup[]
+    systemCampaigns SystemCampaign[]
+    systemAdSets    SystemAdSet[]
+    systemAds       SystemAd[]
+    systemCreatives SystemCreative[]
 
-  @@index([accountType])
-  @@index([needsReauth])
+    @@index([accountType])
+    @@index([needsReauth])
 }
 
 model AccountMember {
-  id        String @id @default(uuid())
-  accountId String
-  userId    String
+    id        String @id @default(uuid())
+    accountId String
+    userId    String
 
-  account Account @relation("AccountAccountMembers", fields: [accountId], references: [id], onDelete: Cascade)
-  user    User    @relation("UserAccountMembers", fields: [userId], references: [id])
+    account Account @relation("AccountAccountMembers", fields: [accountId], references: [id], onDelete: Cascade)
+    user    User    @relation("UserAccountMembers", fields: [userId], references: [id])
 
-  role      MemberRole
-  createdAt DateTime   @default(now())
+    role      MemberRole
+    createdAt DateTime   @default(now())
 
-  // one membership per user per account
-  @@unique([accountId, userId])
-  @@index([accountId])
-  @@index([userId])
+    // one membership per user per account
+    @@unique([accountId, userId])
+    @@index([accountId])
+    @@index([userId])
 }
 
 model Campaign {
-  id        String  @id // store facebook id as string, e.g. "238393..."
-  accountId String
-  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+    id        String  @id // store facebook id as string, e.g. "238393..."
+    accountId String
+    account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
-  systemCampaignId String?
-  systemCampaign   SystemCampaign? @relation(fields: [systemCampaignId], references: [id], onDelete: Cascade)
+    systemCampaignId String?
+    systemCampaign   SystemCampaign? @relation(fields: [systemCampaignId], references: [id], onDelete: Cascade)
 
-  name            String?
-  status          String?
-  objective       String?
-  buyingType      String?
-  dailyBudget     Int?
-  lifetimeBudget  Int?
-  startTime       DateTime?
-  endTime         DateTime?
-  remoteUpdatedAt DateTime?
-  lastFetchedAt   DateTime?
-  rawPayload      Json?
+    name            String?
+    status          String?
+    objective       String?
+    buyingType      String?
+    dailyBudget     Int?
+    lifetimeBudget  Int?
+    startTime       DateTime?
+    endTime         DateTime?
+    remoteUpdatedAt DateTime?
+    lastFetchedAt   DateTime?
+    rawPayload      Json?
 
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  deletedAt DateTime?
+    createdAt DateTime  @default(now())
+    updatedAt DateTime  @updatedAt
+    deletedAt DateTime?
 
-  adsets           AdSet[]
-  ads              Ad[]
-  campaignInsights CampaignInsight[]
-  adSetInsights    AdSetInsight[]
+    adsets           AdSet[]
+    ads              Ad[]
+    campaignInsights CampaignInsight[]
+    adSetInsights    AdSetInsight[]
 
-  @@unique([id, systemCampaignId])
-  @@index([accountId])
-  @@index([status])
-  @@index([remoteUpdatedAt])
+    @@unique([id, systemCampaignId])
+    @@index([accountId])
+    @@index([status])
+    @@index([remoteUpdatedAt])
 }
 
 model AdSet {
-  id         String   @id
-  campaignId String
-  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+    id         String   @id
+    campaignId String
+    campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
-  accountId String
-  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+    accountId String
+    account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
-  name   String?
-  status String?
+    name   String?
+    status String?
 
-  optimizationGoal String?
-  billingEvent     String?
-  bidStrategy      String?
+    optimizationGoal String?
+    billingEvent     String?
+    bidStrategy      String?
 
-  dailyBudget     Int?
-  lifetimeBudget  Int?
-  targeting       Json?
-  startTime       DateTime?
-  endTime         DateTime?
-  remoteUpdatedAt DateTime?
+    dailyBudget     Int?
+    lifetimeBudget  Int?
+    targeting       Json?
+    startTime       DateTime?
+    endTime         DateTime?
+    remoteUpdatedAt DateTime?
 
-  lastFetchedAt DateTime?
-  rawPayload    Json?
+    lastFetchedAt DateTime?
+    rawPayload    Json?
 
-  ads Ad[]
+    ads Ad[]
 
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
-  deletedAt     DateTime?
-  adSetInsights AdSetInsight[]
+    createdAt     DateTime       @default(now())
+    updatedAt     DateTime       @updatedAt
+    deletedAt     DateTime?
+    adSetInsights AdSetInsight[]
 
-  @@index([campaignId])
-  @@index([accountId])
-  @@index([status])
+    @@index([campaignId])
+    @@index([accountId])
+    @@index([status])
 }
 
 model Ad {
-  id String @id
+    id String @id
 
-  adsetId String
-  adset   AdSet  @relation(fields: [adsetId], references: [id], onDelete: Cascade)
+    adsetId String
+    adset   AdSet  @relation(fields: [adsetId], references: [id], onDelete: Cascade)
 
-  cid      String?
-  cidGroup CidGroup? @relation(fields: [cid], references: [cid], onDelete: Cascade)
+    cid      String?
+    cidGroup CidGroup? @relation(fields: [cid], references: [cid], onDelete: Cascade)
 
-  campaignId String?
-  campaign   Campaign? @relation(fields: [campaignId], references: [id])
+    campaignId String?
+    campaign   Campaign? @relation(fields: [campaignId], references: [id])
 
-  accountId String?
-  account   Account? @relation(fields: [accountId], references: [id])
+    accountId String?
+    account   Account? @relation(fields: [accountId], references: [id])
 
-  name             String?
-  status           String?
-  effectiveStatus  String?
-  configuredStatus String?
-  creativeId       String?
-  creative         Creative?   @relation(fields: [creativeId], references: [id])
-  remoteUpdatedAt  DateTime?
-  lastFetchedAt    DateTime?
-  rawPayload       Json?
-  adInsights       AdInsight[]
+    name             String?
+    status           String?
+    effectiveStatus  String?
+    configuredStatus String?
+    creativeId       String?
+    creative         Creative?   @relation(fields: [creativeId], references: [id])
+    remoteUpdatedAt  DateTime?
+    lastFetchedAt    DateTime?
+    rawPayload       Json?
+    adInsights       AdInsight[]
 
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  deletedAt DateTime?
+    createdAt DateTime  @default(now())
+    updatedAt DateTime  @updatedAt
+    deletedAt DateTime?
 
-  @@index([adsetId])
-  @@index([creativeId])
-  @@index([accountId])
-  @@index([status])
+    @@index([adsetId])
+    @@index([creativeId])
+    @@index([accountId])
+    @@index([status])
 }
 
 enum CidStatus {
-  TEST
-  NEED_TO_SPEND
-  SCALE_P1
-  SCALE_P2
-  REVIEW
-  OFF
+    TEST
+    NEED_TO_SPEND
+    SCALE_P1
+    SCALE_P2
+    REVIEW
+    OFF
 }
 
 model CidGroup {
-  id  String @id @default(uuid())
-  cid String @unique
-  ads Ad[]
+    id  String @id @default(uuid())
+    cid String @unique
+    ads Ad[]
 
-  accountId String?
-  account   Account? @relation(fields: [accountId], references: [id])
+    accountId String?
+    account   Account? @relation(fields: [accountId], references: [id])
 
-  name        String?
-  description String?
+    name        String?
+    description String?
 
-  spentMax    Float?
-  spent7d     Float?
-  spent3d     Float?
-  roasMax     Float?
-  roas7d      Float?
-  roas3d      Float?
-  ctrMax      Float?
-  purchaseMax Float?
+    spentMax    Float?
+    spent7d     Float?
+    spent3d     Float?
+    roasMax     Float?
+    roas7d      Float?
+    roas3d      Float?
+    ctrMax      Float?
+    purchaseMax Float?
 
-  status        CidStatus? // Test / Need to Spend / Scale P1 / Scale P2 / Review / Off
-  lastUpdatedAt DateTime?
-  lastPushedAt  DateTime?
+    status        CidStatus? // Test / Need to Spend / Scale P1 / Scale P2 / Review / Off
+    lastUpdatedAt DateTime?
+    lastPushedAt  DateTime?
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
 
-  @@index([accountId])
-  @@index([status])
-  @@index([cid])
-  @@map("CID")
+    @@index([accountId])
+    @@index([status])
+    @@index([cid])
+    @@map("CID")
 }
 
 model Creative {
-  id String @id
+    id String @id
 
-  adId String? // optional backref id if you want link from ad->creative
-  ads  Ad[]
+    adId String? // optional backref id if you want link from ad->creative
+    ads  Ad[]
 
-  accountId String?
-  account   Account? @relation(fields: [accountId], references: [id])
+    accountId String?
+    account   Account? @relation(fields: [accountId], references: [id])
 
-  pageId String?
+    pageId String?
 
-  systemPageId String?
-  page         Fanpage? @relation(fields: [systemPageId], references: [id])
+    systemPageId String?
+    page         Fanpage? @relation(fields: [systemPageId], references: [id])
 
-  postId              String?
-  objectStoryId       String?
-  effectObjectStoryId String?
-  name                String?
-  creativeType        String? // IMAGE, VIDEO, CAROUSEL, LINK, ...
+    postId              String?
+    objectStoryId       String?
+    effectObjectStoryId String?
+    name                String?
+    creativeType        String? // IMAGE, VIDEO, CAROUSEL, LINK, ...
 
-  imageHash String?
-  adImage   AdImage? @relation(fields: [imageHash], references: [hash])
+    imageHash String?
+    adImage   AdImage? @relation(fields: [imageHash], references: [hash])
 
-  imageUrl     String?
-  thumbnailUrl String?
+    imageUrl     String?
+    thumbnailUrl String?
 
-  previewUrl      String?
-  remoteUpdatedAt DateTime?
-  lastFetchedAt   DateTime?
-  rawPayload      Json?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+    previewUrl      String?
+    remoteUpdatedAt DateTime?
+    lastFetchedAt   DateTime?
+    rawPayload      Json?
+    createdAt       DateTime  @default(now())
+    updatedAt       DateTime  @updatedAt
 
-  videoId String?
-  adVideo AdVideo? @relation(fields: [videoId], references: [id])
+    videoId String?
+    adVideo AdVideo? @relation(fields: [videoId], references: [id])
 
-  @@index([accountId])
-  @@index([imageHash])
-  @@index([videoId])
+    @@index([accountId])
+    @@index([imageHash])
+    @@index([videoId])
 }
 
 model AdImage {
-  id        String  @id @default(uuid())
-  accountId String
-  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+    id        String  @id @default(uuid())
+    accountId String
+    account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
-  hash          String
-  name          String?
-  url           String?
-  permalink_url String?
-  width         Int?
-  height        Int?
+    hash          String
+    name          String?
+    url           String?
+    permalink_url String?
+    width         Int?
+    height        Int?
 
-  status      String?
-  createdTime DateTime?
-  rawPayload  Json?
+    status      String?
+    createdTime DateTime?
+    rawPayload  Json?
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
 
-  creatives Creative[]
+    creatives Creative[]
 
-  @@unique([accountId, hash, id])
-  @@unique([hash])
-  @@index([accountId])
-  @@index([hash])
+    @@unique([accountId, hash, id])
+    @@unique([hash])
+    @@index([accountId])
+    @@index([hash])
 }
 
 model AdVideo {
-  id        String  @id // Meta video_id
-  accountId String
-  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+    id        String  @id // Meta video_id
+    accountId String
+    account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
-  title       String?
-  description String?
-  status      String? // READY, PROCESSING, ERROR
-  length      Int? // seconds
+    title       String?
+    description String?
+    status      String? // READY, PROCESSING, ERROR
+    length      Int? // seconds
 
-  thumbnailUrl String?
+    thumbnailUrl String?
 
-  remoteCreatedAt DateTime?
-  remoteUpdatedAt DateTime?
-  lastFetchedAt   DateTime?
+    remoteCreatedAt DateTime?
+    remoteUpdatedAt DateTime?
+    lastFetchedAt   DateTime?
 
-  rawPayload Json?
+    rawPayload Json?
 
-  createdTime DateTime?
+    createdTime DateTime?
 
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @updatedAt
-  creatives Creative[]
+    createdAt DateTime   @default(now())
+    updatedAt DateTime   @updatedAt
+    creatives Creative[]
 
-  @@index([status])
-  @@index([accountId])
+    @@index([status])
+    @@index([accountId])
 }
 
 model AdInsight {
-  id String @id @default(cuid())
+    id String @id @default(cuid())
 
-  adId String
-  ad   Ad     @relation(fields: [adId], references: [id], onDelete: Cascade)
+    adId String
+    ad   Ad     @relation(fields: [adId], references: [id], onDelete: Cascade)
 
-  adSetId    String
-  campaignId String
+    adSetId    String
+    campaignId String
 
-  level LevelInsight @default(AD)
+    level LevelInsight @default(AD)
 
-  dateStart String
-  dateStop  String
-  range     InsightRange @default(DAILY)
+    dateStart String
+    dateStop  String
+    range     InsightRange @default(DAILY)
 
-  /**
-   * ===== DELIVERY =====
-   */
-  impressions Int
-  reach       Int?
-  frequency   Float?
+    /**
+     * ===== DELIVERY =====
+     */
+    impressions Int
+    reach       Int?
+    frequency   Float?
 
-  /**
-   * ===== TRAFFIC =====
-   */
-  clicks       Int
-  uniqueClicks Int?
-  ctr          Float?
-  uniqueCtr    Float?
-  cpc          Float?
-  cpm          Float?
+    /**
+     * ===== TRAFFIC =====
+     */
+    clicks       Int
+    uniqueClicks Int?
+    ctr          Float?
+    uniqueCtr    Float?
+    cpc          Float?
+    cpm          Float?
 
-  /**
-   * ===== SPEND =====
-   */
-  spend Float
+    /**
+     * ===== SPEND =====
+     */
+    spend Float
 
-  /**
-   * ===== CONVERSION =====
-   */
-  results       Int?
-  costPerResult Float?
+    /**
+     * ===== CONVERSION =====
+     */
+    results       Int?
+    costPerResult Float?
 
-  purchases     Int?
-  purchaseValue Float?
-  roas          Float?
+    purchases     Int?
+    purchaseValue Float?
+    roas          Float?
 
-  /**
-   * ===== VIDEO =====
-   */
-  videoViews   Int?
-  thruPlays    Int?
-  avgWatchTime Float?
+    /**
+     * ===== VIDEO =====
+     */
+    videoViews   Int?
+    thruPlays    Int?
+    avgWatchTime Float?
 
-  /**
-   * ===== QUALITY =====
-   */
-  qualityRanking        String?
-  engagementRateRanking String?
-  conversionRateRanking String?
+    /**
+     * ===== QUALITY =====
+     */
+    qualityRanking        String?
+    engagementRateRanking String?
+    conversionRateRanking String?
 
-  /**
-   * ===== RAW =====
-   */
-  actions      Json?
-  actionValues Json?
-  purchaseRoas Json?
-  rawPayload   Json?
+    /**
+     * ===== RAW =====
+     */
+    actions      Json?
+    actionValues Json?
+    purchaseRoas Json?
+    rawPayload   Json?
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
 
-  @@unique([adId, dateStart, dateStop, range])
-  @@index([adId])
-  @@index([campaignId])
+    @@unique([adId, dateStart, dateStop, range])
+    @@index([adId])
+    @@index([campaignId])
 }
 
 model CampaignInsight {
-  id String @id @default(cuid())
+    id String @id @default(cuid())
 
-  campaignId String
-  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+    campaignId String
+    campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
-  level LevelInsight @default(CAMPAIGN)
+    level LevelInsight @default(CAMPAIGN)
 
-  dateStart String
-  dateStop  String
-  range     InsightRange @default(DAILY)
+    dateStart String
+    dateStop  String
+    range     InsightRange @default(DAILY)
 
-  /**
-   * ===== DELIVERY =====
-   */
-  impressions Int
-  reach       Int?
-  frequency   Float?
+    /**
+     * ===== DELIVERY =====
+     */
+    impressions Int
+    reach       Int?
+    frequency   Float?
 
-  /**
-   * ===== TRAFFIC =====
-   */
-  clicks       Int
-  uniqueClicks Int?
-  ctr          Float?
-  uniqueCtr    Float?
-  cpc          Float?
-  cpm          Float?
+    /**
+     * ===== TRAFFIC =====
+     */
+    clicks       Int
+    uniqueClicks Int?
+    ctr          Float?
+    uniqueCtr    Float?
+    cpc          Float?
+    cpm          Float?
 
-  /**
-   * ===== SPEND =====
-   */
-  spend Float
+    /**
+     * ===== SPEND =====
+     */
+    spend Float
 
-  /**
-   * ===== CONVERSION =====
-   */
-  results       Int?
-  costPerResult Float?
+    /**
+     * ===== CONVERSION =====
+     */
+    results       Int?
+    costPerResult Float?
 
-  purchases     Int?
-  purchaseValue Float?
-  roas          Float?
+    purchases     Int?
+    purchaseValue Float?
+    roas          Float?
 
-  /**
-   * ===== QUALITY =====
-   */
-  qualityRanking        String?
-  engagementRateRanking String?
-  conversionRateRanking String?
+    /**
+     * ===== QUALITY =====
+     */
+    qualityRanking        String?
+    engagementRateRanking String?
+    conversionRateRanking String?
 
-  /**
-   * ===== RAW =====
-   */
-  actions      Json?
-  actionValues Json?
-  purchaseRoas Json?
-  rawPayload   Json?
+    /**
+     * ===== RAW =====
+     */
+    actions      Json?
+    actionValues Json?
+    purchaseRoas Json?
+    rawPayload   Json?
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
 
-  @@unique([campaignId, dateStart, dateStop, range])
-  @@index([campaignId])
-  @@index([dateStart, dateStop])
+    @@unique([campaignId, dateStart, dateStop, range])
+    @@index([campaignId])
+    @@index([dateStart, dateStop])
 }
 
 model AdSetInsight {
-  id String @id @default(cuid())
+    id String @id @default(cuid())
 
-  adSetId String
-  adSet   AdSet  @relation(fields: [adSetId], references: [id], onDelete: Cascade)
+    adSetId String
+    adSet   AdSet  @relation(fields: [adSetId], references: [id], onDelete: Cascade)
 
-  campaignId String
-  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+    campaignId String
+    campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
-  level LevelInsight @default(ADSET)
+    level LevelInsight @default(ADSET)
 
-  dateStart String
-  dateStop  String
-  range     InsightRange @default(DAILY)
+    dateStart String
+    dateStop  String
+    range     InsightRange @default(DAILY)
 
-  /**
-   * ===== DELIVERY =====
-   */
-  impressions Int
-  reach       Int?
-  frequency   Float?
+    /**
+     * ===== DELIVERY =====
+     */
+    impressions Int
+    reach       Int?
+    frequency   Float?
 
-  /**
-   * ===== TRAFFIC =====
-   */
-  clicks       Int
-  uniqueClicks Int?
-  ctr          Float?
-  uniqueCtr    Float?
-  cpc          Float?
-  cpm          Float?
+    /**
+     * ===== TRAFFIC =====
+     */
+    clicks       Int
+    uniqueClicks Int?
+    ctr          Float?
+    uniqueCtr    Float?
+    cpc          Float?
+    cpm          Float?
 
-  /**
-   * ===== SPEND =====
-   */
-  spend Float
+    /**
+     * ===== SPEND =====
+     */
+    spend Float
 
-  /**
-   * ===== CONVERSION =====
-   */
-  results       Int?
-  costPerResult Float?
+    /**
+     * ===== CONVERSION =====
+     */
+    results       Int?
+    costPerResult Float?
 
-  purchases     Int?
-  purchaseValue Float?
-  roas          Float?
+    purchases     Int?
+    purchaseValue Float?
+    roas          Float?
 
-  /**
-   * ===== RAW =====
-   */
-  actions      Json?
-  actionValues Json?
-  purchaseRoas Json?
-  rawPayload   Json?
+    /**
+     * ===== RAW =====
+     */
+    actions      Json?
+    actionValues Json?
+    purchaseRoas Json?
+    rawPayload   Json?
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
 
-  @@unique([adSetId, dateStart, dateStop, range])
-  @@index([adSetId])
-  @@index([campaignId])
+    @@unique([adSetId, dateStart, dateStop, range])
+    @@index([adSetId])
+    @@index([campaignId])
 }
 
 model ChangeLog {
-  id         String   @id @default(uuid())
-  actorId    String
-  actor      User     @relation("change_actor", fields: [actorId], references: [id])
-  action     String
-  targetType String?
-  targetId   String?
-  diff       Json?
-  createdAt  DateTime @default(now())
+    id         String   @id @default(uuid())
+    actorId    String
+    actor      User     @relation("change_actor", fields: [actorId], references: [id])
+    action     String
+    targetType String?
+    targetId   String?
+    diff       Json?
+    createdAt  DateTime @default(now())
 
-  @@index([actorId])
-  @@index([targetType, targetId])
+    @@index([actorId])
+    @@index([targetType, targetId])
 }
 
 // --- MODELS ---
 model TemplateCampaign {
-  id   String @id @default(cuid())
-  name String
-  data Json?
+    id   String @id @default(cuid())
+    name String
+    data Json?
 
-  reference_id String?
+    reference_id String?
 
-  createdById String?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  deletedAt   DateTime?
+    createdById String?
+    createdAt   DateTime  @default(now())
+    updatedAt   DateTime  @updatedAt
+    deletedAt   DateTime?
 }
 
 model SystemCampaign {
-  id      String  @id @default(cuid())
-  data    Json?
-  meta_id String?
-  cid     String?
+    id      String  @id @default(cuid())
+    data    Json?
+    meta_id String?
+    cid     String?
 
-  status Status @default(DRAFT)
+    status Status @default(DRAFT)
 
-  createdById String?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  deletedAt   DateTime?
+    createdById String?
+    createdAt   DateTime  @default(now())
+    updatedAt   DateTime  @updatedAt
+    deletedAt   DateTime?
 
-  accountId String?
-  account   Account?      @relation(fields: [accountId], references: [id])
-  ad_sets   SystemAdSet[]
+    accountId String?
+    account   Account?      @relation(fields: [accountId], references: [id])
+    ad_sets   SystemAdSet[]
 
-  is_template Boolean? @default(false)
+    is_template Boolean? @default(false)
 
-  campaign_name        String?
-  campaign_objective   String?
-  campaign_budgetType  String?
-  campaign_budget      Int?
-  campaign_bidStrategy String?
-  campaign_bidAmount   Int?
-  campaign_CBO         Boolean?
-  campaigns            Campaign[]
+    campaign_name        String?
+    campaign_objective   String?
+    campaign_budgetType  String?
+    campaign_budget      Int?
+    campaign_bidStrategy String?
+    campaign_bidAmount   Int?
+    campaign_CBO         Boolean?
+    campaigns            Campaign[]
 }
 
 model SystemAdSet {
-  id      String  @id @default(cuid())
-  data    Json?
-  meta_id String?
+    id      String  @id @default(cuid())
+    data    Json?
+    meta_id String?
 
-  status Status @default(DRAFT)
+    status Status @default(DRAFT)
 
-  createdById String?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  deletedAt   DateTime?
+    createdById String?
+    createdAt   DateTime  @default(now())
+    updatedAt   DateTime  @updatedAt
+    deletedAt   DateTime?
 
-  campaignId String?
-  campaign   SystemCampaign? @relation(fields: [campaignId], references: [id])
+    campaignId String?
+    campaign   SystemCampaign? @relation(fields: [campaignId], references: [id])
 
-  accountId String?
-  account   Account? @relation(fields: [accountId], references: [id])
+    accountId String?
+    account   Account? @relation(fields: [accountId], references: [id])
 
-  ads SystemAd[]
+    ads SystemAd[]
 
-  adset_name         String?
-  adset_optimization String?
-  adset_budgetType   String?
-  adset_budget       Int?
-  adset_bidStrategy  String?
-  adset_bidAmount    Int?
+    adset_name         String?
+    adset_optimization String?
+    adset_budgetType   String?
+    adset_budget       Int?
+    adset_bidStrategy  String?
+    adset_bidAmount    Int?
 }
 
 model SystemAd {
-  id      String  @id @default(cuid())
-  data    Json?
-  meta_id String?
+    id      String  @id @default(cuid())
+    data    Json?
+    meta_id String?
 
-  status Status @default(DRAFT)
+    status Status @default(DRAFT)
 
-  createdById String?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  deletedAt   DateTime?
+    createdById String?
+    createdAt   DateTime  @default(now())
+    updatedAt   DateTime  @updatedAt
+    deletedAt   DateTime?
 
-  adSetId String?
-  adSet   SystemAdSet? @relation(fields: [adSetId], references: [id])
+    adSetId String?
+    adSet   SystemAdSet? @relation(fields: [adSetId], references: [id])
 
-  accountId String?
-  account   Account?         @relation(fields: [accountId], references: [id])
-  creative  SystemCreative[]
+    accountId String?
+    account   Account?         @relation(fields: [accountId], references: [id])
+    creative  SystemCreative[]
 }
 
 model SystemCreative {
-  id   String @id @default(cuid())
-  data Json?
+    id   String @id @default(cuid())
+    data Json?
 
-  url_json Json?
+    url_json Json?
 
-  meta_id String?
+    meta_id String?
 
-  status Status @default(DRAFT)
+    status Status @default(DRAFT)
 
-  createdById String?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  deletedAt   DateTime?
+    createdById String?
+    createdAt   DateTime  @default(now())
+    updatedAt   DateTime  @updatedAt
+    deletedAt   DateTime?
 
-  adId String?
-  ad   SystemAd? @relation(fields: [adId], references: [id])
+    adId String?
+    ad   SystemAd? @relation(fields: [adId], references: [id])
 
-  accountId String?
-  account   Account? @relation(fields: [accountId], references: [id])
+    accountId String?
+    account   Account? @relation(fields: [accountId], references: [id])
+}
+
+model Planning {
+    id          String  @id @default(cuid())
+    name        String
+    description String?
+
+    type    PlanningType
+    enabled Boolean      @default(true)
+
+    schedule Json // { every: 5, unit: "minute" } | { cron: "0 */6 * * *" }
+
+    config Json // type-specific config
+
+    status PlanningStatus @default(IDLE)
+
+    lastRunAt DateTime?
+    nextRunAt DateTime?
+
+    createdById String
+    createdAt   DateTime @default(now())
+    updatedAt   DateTime @updatedAt
+}
+
+enum PlanningType {
+    SYNC_CAMPAIGN
+    SYNC_INSIGHT
+    RULE_CAMPAIGN
+}
+
+enum PlanningStatus {
+    IDLE
+    WAITING
+    RUNNING
+    FAILED
 }

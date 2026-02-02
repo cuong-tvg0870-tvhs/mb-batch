@@ -286,6 +286,7 @@ export async function fetchAll(
     for (const item of page) {
       result.push(item._data);
     }
+    return result;
 
     while (page.hasNext()) {
       try {

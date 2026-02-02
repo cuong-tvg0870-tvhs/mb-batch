@@ -153,13 +153,13 @@ export class MetaService {
     return { success: true, accounts };
   }
 
-  async fetchCampaignData(campaignId: string): Promise<MetaCampaignTree> {
+  async fetchCampaignData(campaign: any): Promise<MetaCampaignTree> {
     this.init();
     try {
-      const campaignService = new Campaign(campaignId);
+      const campaignService = new Campaign(campaign?.id);
 
       // 1. Lấy dữ liệu Campaign với các trường bắt buộc (như special_ad_categories)
-      const campaign = await campaignService.get(CAMPAIGN_FIELDS);
+      // const campaign = await campaignService.get(CAMPAIGN_FIELDS);
 
       // 2. Lấy danh sách Ad Sets (phải bao gồm optimization_goal và promoted_object)
       const adsets = await campaignService.getAdSets(ADSET_FIELDS, {
@@ -180,7 +180,7 @@ export class MetaService {
       );
 
       const tree: MetaCampaignTree = {
-        ...campaign._data,
+        ...campaign,
         adsets: adsets.map((as) => ({
           ...as._data,
           ads: adsWithCreative.filter((ad) => ad.adset_id === as.id),
