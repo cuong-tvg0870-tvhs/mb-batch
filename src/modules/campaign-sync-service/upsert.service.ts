@@ -41,7 +41,7 @@ export class UpsertService {
 
   /* ======================= CAMPAIGN ======================= */
 
-  private upsertCampaign(
+  upsertCampaign(
     tx: Prisma.TransactionClient,
     accountId: string,
     c: MetaCampaignTree,
@@ -81,7 +81,7 @@ export class UpsertService {
 
   /* ======================= ADSET ======================= */
 
-  private upsertAdSet(
+  upsertAdSet(
     tx: Prisma.TransactionClient,
     accountId: string,
     campaignId: string,
@@ -125,7 +125,7 @@ export class UpsertService {
 
   /* ======================= ASSETS ======================= */
 
-  private async syncAdAssetsLegacy(
+  async syncAdAssetsLegacy(
     tx: Prisma.TransactionClient,
     adAccount: AdAccount,
     accountId: string,
@@ -221,7 +221,7 @@ export class UpsertService {
 
   /* ======================= CREATIVE ======================= */
 
-  private async upsertCreativeLegacy(
+  async upsertCreativeLegacy(
     tx: Prisma.TransactionClient,
     accountId: string,
     ad: MetaCreative,
@@ -276,7 +276,7 @@ export class UpsertService {
 
   /* ======================= CID ======================= */
 
-  private async syncCidLegacy(
+  async syncCidLegacy(
     tx: Prisma.TransactionClient,
     accountId: string,
     ad: MetaAd,
@@ -294,7 +294,7 @@ export class UpsertService {
 
   /* ======================= AD ======================= */
 
-  private upsertAdLegacy(
+  upsertAdLegacy(
     tx: Prisma.TransactionClient,
     accountId: string,
     campaignId: string,

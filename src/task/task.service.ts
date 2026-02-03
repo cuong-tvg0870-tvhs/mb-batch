@@ -1,18 +1,25 @@
 import { Injectable, Logger } from '@nestjs/common';
 import CronExpressionParser from 'cron-parser';
 import { AdAccount, FacebookAdsApi } from 'facebook-nodejs-business-sdk';
+import groupBy from 'lodash/groupBy';
 import { fetchAll } from 'src/common/utils';
-import { CAMPAIGN_FIELDS } from 'src/common/utils/meta-field';
+import {
+  AD_FIELDS,
+  ADSET_FIELDS,
+  CAMPAIGN_FIELDS,
+} from 'src/common/utils/meta-field';
 import { UpsertService } from 'src/modules/campaign-sync-service/upsert.service';
 import { MetaService } from 'src/modules/meta/meta.service';
+import { PrismaService } from 'src/modules/prisma/prisma.service';
 
 @Injectable()
 export class TaskService {
   private readonly logger = new Logger(TaskService.name);
 
   constructor(
-    private readonly metaService: MetaService,
+    private readonly meta: MetaService,
     private upsertDataService: UpsertService,
+    private prisma: PrismaService,
   ) {}
   private initialized = false;
 
@@ -44,47 +51,77 @@ export class TaskService {
     try {
       await this.init();
 
-      for (const accountId of accounts) {
-        const adAccount = new AdAccount(accountId);
-        this.logger.log(
-          `🔄 Sync campaigns | account=${accountId} | planning=${plan.id}`,
-        );
+      for (const acc of accounts) {
+        const adAccount = new AdAccount(acc.id);
 
         const campaignCursor = await adAccount.getCampaigns(
           CAMPAIGN_FIELDS,
-          {
-            filtering: [
-              {
-                field: 'updated_time',
-                operator: 'GREATER_THAN',
-                value: Math.floor(
-                  (Date.now() - 30 * 24 * 60 * 60 * 1000) / 1000,
-                ),
-              },
-            ],
-            limit: 1,
-          },
+          { limit: 20 },
           true,
         );
 
         const campaigns = await fetchAll(campaignCursor, {
-          context: { accountId: accountId, step: 'FETCH_CAMPAIGNS' },
+          context: { accountId: acc.id, step: 'FETCH_CAMPAIGNS' },
         });
 
-        console.log(campaigns.length);
-        return;
-        for (const c of campaigns) {
-          // fetch full tree: campaign -> adsets -> ads -> creative
-          const campaignTree = await this.metaService.fetchCampaignData(c);
+        // GET ALL ADSET
+        const adsetCursor = await adAccount.getAdSets(
+          ADSET_FIELDS,
+          { limit: 20 },
+          true,
+        );
+        const adSets = await fetchAll(adsetCursor, {
+          context: { accountId: acc.id, step: 'FETCH ADSETS' },
+        });
 
-          if (!campaignTree) continue;
+        // GET ALL AD
+        const adCursor = await adAccount.getAds(AD_FIELDS, { limit: 20 }, true);
+        const ads = await fetchAll(adCursor, {
+          context: { accountId: acc.id, step: 'FETCH Ads' },
+        });
 
-          await this.upsertDataService.syncCampaignTree(
-            accountId,
-            adAccount,
-            campaignTree,
-          );
-        }
+        const adSetsByCampaign = groupBy(adSets, (as) => as.campaign_id);
+        const adsByAdSet = groupBy(ads, (ad) => ad.adset_id);
+
+        await this.prisma.$transaction(async (tx) => {
+          const accountId = acc;
+          for (const campaign of campaigns) {
+            await this.upsertDataService.upsertCampaign(
+              tx,
+              accountId,
+              campaign,
+            );
+
+            const campaignAdSets = adSetsByCampaign[campaign.id] ?? [];
+            for (const adset of campaignAdSets) {
+              await this.upsertDataService.upsertAdSet(
+                tx,
+                accountId,
+                campaign.id,
+                adset,
+              );
+
+              const adsetAds = adsByAdSet[adset.id] ?? [];
+              for (const ad of adsetAds) {
+                await this.upsertDataService.upsertCreativeLegacy(
+                  tx,
+                  accountId,
+                  ad,
+                );
+
+                await this.upsertDataService.syncCidLegacy(tx, accountId, ad);
+
+                await this.upsertDataService.upsertAdLegacy(
+                  tx,
+                  accountId,
+                  campaign.id,
+                  adset.id,
+                  ad,
+                );
+              }
+            }
+          }
+        });
       }
 
       this.logger.log(`✅ [SYNC_CAMPAIGN] Done in ${Date.now() - start}ms`);

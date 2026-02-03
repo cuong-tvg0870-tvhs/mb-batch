@@ -31,7 +31,7 @@ export class TaskCron {
     const plans = await this.prisma.planning.findMany({
       where: {
         enabled: true,
-        status: PlanningStatus.IDLE,
+        status: { in: [PlanningStatus.IDLE, PlanningStatus.FAILED] },
         nextRunAt: {
           lte: new Date(now + lookAheadMs),
         },
@@ -79,7 +79,7 @@ export class TaskCron {
    * Reconcile zombie state
    * RUNNING / WAITING nhưng không có job
    */
-  @Cron(CronExpression.EVERY_10_MINUTES)
+  @Cron(CronExpression.EVERY_5_SECONDS)
   async reconcilePlanning() {
     const now = new Date();
     this.logger.log('🧹 Reconcile planning state...');
@@ -88,7 +88,11 @@ export class TaskCron {
       where: {
         enabled: true,
         OR: [
-          { status: { in: [PlanningStatus.WAITING, PlanningStatus.RUNNING] } },
+          {
+            status: {
+              in: [PlanningStatus.WAITING, PlanningStatus.RUNNING],
+            },
+          },
           { status: PlanningStatus.IDLE, nextRunAt: { lte: now } },
         ],
       },
