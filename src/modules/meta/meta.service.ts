@@ -20,6 +20,7 @@ import {
   fetchAll,
   getDateRange,
   isFresh,
+  LIMIT_DATA,
   parseMetaError,
 } from '../../common/utils';
 
@@ -111,8 +112,8 @@ export class MetaService {
     const me = new User('me');
 
     const [accounts, pages] = await Promise.all([
-      me.getAdAccounts([...AD_ACCOUNT_FIELDS], { limit: 100 }),
-      me.getAccounts(['id', 'name'], { limit: 100 }),
+      me.getAdAccounts([...AD_ACCOUNT_FIELDS], { limit: LIMIT_DATA }),
+      me.getAccounts(['id', 'name'], { limit: LIMIT_DATA }),
     ]);
     for (let index = 0; index < pages.length; index++) {
       const page = pages[index]?._data;
@@ -168,9 +169,11 @@ export class MetaService {
       const campaign = await campaignService.get(CAMPAIGN_FIELDS);
 
       const adsets = await campaignService.getAdSets(ADSET_FIELDS, {
-        limit: 100,
+        limit: LIMIT_DATA,
       });
-      const ads = await campaignService.getAds(AD_FIELDS, { limit: 100 });
+      const ads = await campaignService.getAds(AD_FIELDS, {
+        limit: LIMIT_DATA,
+      });
 
       const adsWithCreative = await Promise.all(
         ads?.map(async (ad) => {

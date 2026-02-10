@@ -5,15 +5,16 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { InsightRange, LevelInsight, Status } from '@prisma/client';
+import { InsightRange, LevelInsight } from '@prisma/client';
 import { Queue } from 'bull';
 import * as dayjs from 'dayjs';
 import { Ad, AdAccount, FacebookAdsApi } from 'facebook-nodejs-business-sdk';
-import groupBy from 'lodash/groupBy';
+import { groupBy } from 'lodash';
 import {
   chunk,
   extractCampaignMetrics,
   fetchAll,
+  LIMIT_DATA,
   parseMetaError,
   sleep,
 } from 'src/common/utils';
@@ -25,14 +26,12 @@ import {
 } from 'src/common/utils/meta-field';
 import { UpsertService } from 'src/modules/campaign-sync-service/upsert.service';
 import { PrismaService } from 'src/modules/prisma/prisma.service';
-import { TaskService } from './task.service';
 @Injectable()
 export class TaskCron {
   private readonly logger = new Logger(TaskCron.name);
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly taskService: TaskService,
     private upsertDataService: UpsertService,
     @InjectQueue('meta-sync')
     private readonly queue: Queue,
@@ -49,151 +48,13 @@ export class TaskCron {
 
   async onModuleInit() {
     this.logger.log('🚀 App started → scan video immediately');
-    // await this.syncDailyCampaignInsights();
-    await this.SyncCampaignService();
+    // await this.SyncCampaignService();
+    // await this.syncDailyAdsetInsights();
+    // await this.syncDailyAdInsights();
   }
 
-  // /**
-  //  * Scan planning & enqueue job đúng giờ
-  //  * IDLE → WAITING
-  //  */
-  // @Cron(CronExpression.EVERY_MINUTE)
-  // async scanPlanning() {
-  //   const now = Date.now();
-  //   const lookAheadMs = 60_000;
-
-  //   this.logger.log('⏰ Scan planning...');
-
-  //   const plans = await this.prisma.planning.findMany({
-  //     where: {
-  //       enabled: true,
-  //       status: { in: [PlanningStatus.IDLE, PlanningStatus.FAILED] },
-  //       nextRunAt: {
-  //         lte: new Date(now + lookAheadMs),
-  //       },
-  //     },
-  //   });
-
-  //   for (const plan of plans) {
-  //     const jobId = `planning:${plan.id}`;
-  //     const delay = Math.max(plan.nextRunAt.getTime() - now, 0);
-
-  //     const existingJob = await this.queue.getJob(jobId);
-  //     if (existingJob) continue;
-
-  //     const locked = await this.prisma.planning.updateMany({
-  //       where: {
-  //         id: plan.id,
-  //         enabled: true,
-  //         status: PlanningStatus.IDLE,
-  //       },
-  //       data: {
-  //         status: PlanningStatus.WAITING,
-  //         lastRunAt: new Date(),
-  //       },
-  //     });
-
-  //     if (!locked.count) continue;
-
-  //     await this.queue.add(
-  //       'run-planning',
-  //       { planningId: plan.id },
-  //       {
-  //         jobId,
-  //         delay,
-  //         attempts: 3,
-  //         backoff: { type: 'exponential', delay: 5000 },
-  //         removeOnComplete: true,
-  //       },
-  //     );
-
-  //     this.logger.log(`📤 Enqueued planning ${plan.id} (delay=${delay})`);
-  //   }
-  // }
-
-  // /**
-  //  * Reconcile zombie state
-  //  * RUNNING / WAITING nhưng không có job
-  //  */
-  // @Cron(CronExpression.EVERY_5_SECONDS)
-  // async reconcilePlanning() {
-  //   const now = new Date();
-  //   this.logger.log('🧹 Reconcile planning state...');
-
-  //   const plans = await this.prisma.planning.findMany({
-  //     where: {
-  //       enabled: true,
-  //       OR: [
-  //         {
-  //           status: {
-  //             in: [PlanningStatus.WAITING, PlanningStatus.RUNNING],
-  //           },
-  //         },
-  //         { status: PlanningStatus.IDLE, nextRunAt: { lte: now } },
-  //       ],
-  //     },
-  //   });
-
-  //   for (const plan of plans) {
-  //     const jobId = `planning:${plan.id}`;
-  //     const job = await this.queue.getJob(jobId);
-
-  //     // CASE 1: zombie WAITING / RUNNING
-  //     if (
-  //       plan.status === PlanningStatus.WAITING ||
-  //       plan.status === PlanningStatus.RUNNING
-  //     ) {
-  //       if (!job) {
-  //         await this.prisma.planning.update({
-  //           where: { id: plan.id },
-  //           data: {
-  //             status: PlanningStatus.IDLE,
-  //             nextRunAt:
-  //               plan.nextRunAt && plan.nextRunAt > now
-  //                 ? plan.nextRunAt
-  //                 : this.taskService.calculateNextRun(plan.schedule),
-  //           },
-  //         });
-
-  //         this.logger.warn(`🧟 Reset planning ${plan.id} → IDLE`);
-  //       }
-  //       continue;
-  //     }
-
-  //     // CASE 2: IDLE overdue
-  //     if (
-  //       plan.status === PlanningStatus.IDLE &&
-  //       plan.nextRunAt <= now &&
-  //       !job
-  //     ) {
-  //       const locked = await this.prisma.planning.updateMany({
-  //         where: {
-  //           id: plan.id,
-  //           enabled: true,
-  //           status: PlanningStatus.IDLE,
-  //         },
-  //         data: { status: PlanningStatus.WAITING },
-  //       });
-
-  //       if (!locked.count) continue;
-
-  //       await this.queue.add(
-  //         'run-planning',
-  //         { planningId: plan.id },
-  //         {
-  //           jobId,
-  //           delay: 0,
-  //           removeOnComplete: true,
-  //         },
-  //       );
-
-  //       this.logger.log(`⏰ Re-enqueue overdue planning ${plan.id}`);
-  //     }
-  //   }
-  // }
-
   @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT, { timeZone: 'Asia/Ho_Chi_Minh' })
-  async SyncCampaignService() {
+  async syncCampaignService() {
     this.logger.log('⏰ Sync Campaign Data...');
     await this.init();
 
@@ -209,7 +70,7 @@ export class TaskCron {
             `insights.date_preset(maximum).limit(1).level(campaign){${AD_INSIGHT_FIELDS.join(',')}}`,
           ],
           {
-            limit: 100,
+            limit: LIMIT_DATA,
             filtering: [
               {
                 field: 'created_time',
@@ -236,7 +97,7 @@ export class TaskCron {
             `insights.date_preset(maximum).limit(1).level(adset){${AD_INSIGHT_FIELDS.join(',')}}`,
           ],
           {
-            limit: 50,
+            limit: LIMIT_DATA,
             filtering: [
               {
                 field: 'created_time',
@@ -274,10 +135,10 @@ export class TaskCron {
             `insights.date_preset(maximum).limit(1).level(ad){${AD_INSIGHT_FIELDS.join(',')}}`,
           ],
           {
-            limit: 50,
+            limit: LIMIT_DATA,
             filtering: [
               {
-                field: 'updated_time',
+                field: 'created_time',
                 operator: 'GREATER_THAN',
                 value: Math.floor(
                   (Date.now() - 30 * 24 * 60 * 60 * 1000) / 1000,
@@ -288,11 +149,7 @@ export class TaskCron {
           true,
         );
         const ads = await fetchAll(adCursor, {
-          context: {
-            accountId: acc.id,
-            step: 'FETCH Ads',
-            sleep: 60000,
-          },
+          context: { accountId: acc.id, step: 'FETCH Ads', sleep: 60000 },
         });
 
         console.log('ads length', ads?.length);
@@ -366,73 +223,143 @@ export class TaskCron {
   async syncDailyCampaignInsights() {
     this.logger.log('⏰ Sync campaign daily insight');
     this.init();
-    const campaigns = await this.prisma.campaign.findMany({
+
+    const today = dayjs().startOf('day');
+
+    /**
+     * 1️⃣ Lấy MAX insight (kèm accountId)
+     */
+    const maxInsights = await this.prisma.campaignInsight.findMany({
       where: {
-        deletedAt: null,
-        status: { in: [Status.ACTIVE, Status.PAUSED] },
+        range: InsightRange.MAX,
+        level: LevelInsight.CAMPAIGN,
       },
-      select: { id: true, accountId: true, createdAt: true },
+      select: {
+        campaignId: true,
+        dateStart: true,
+        dateStop: true,
+        campaign: {
+          select: { accountId: true },
+        },
+      },
     });
-    if (!campaigns.length) {
-      this.logger.log('No campaign need sync');
+
+    if (!maxInsights.length) {
+      this.logger.log('No MAX insight found');
       return;
     }
 
     /**
-     * Group campaign by account
+     * 2️⃣ Lấy DAILY mới nhất của từng campaign
      */
-    const byAccount = campaigns.reduce<Record<string, any[]>>((acc, c) => {
-      acc[c.accountId] ||= [];
-      acc[c.accountId].push(c);
+    const dailyMax = await this.prisma.campaignInsight.groupBy({
+      by: ['campaignId'],
+      where: {
+        range: InsightRange.DAILY,
+        level: LevelInsight.CAMPAIGN,
+      },
+      _max: {
+        dateStop: true,
+      },
+    });
+
+    const dailyMap = new Map<string, string>();
+    for (const d of dailyMax) {
+      if (d._max.dateStop) {
+        dailyMap.set(d.campaignId, d._max.dateStop);
+      }
+    }
+
+    /**
+     * 3️⃣ Build fetch plan
+     */
+    const fetchPlans: {
+      campaignId: string;
+      accountId: string;
+      since: dayjs.Dayjs;
+      until: dayjs.Dayjs;
+    }[] = [];
+
+    for (const max of maxInsights) {
+      if (!max.campaign?.accountId) continue;
+
+      const maxStart = dayjs(max.dateStart);
+      const maxStop = dayjs(max.dateStop);
+
+      // MAX đã quá cũ → skip
+      if (maxStop.isBefore(today.subtract(1, 'day'))) continue;
+
+      let since: dayjs.Dayjs;
+      const dailyStop = dailyMap.get(max.campaignId);
+
+      if (dailyStop) {
+        since = dayjs(dailyStop).subtract(5, 'day');
+        if (since.isBefore(maxStart)) since = maxStart.clone();
+      } else {
+        since = maxStart.clone();
+      }
+
+      if (since.isAfter(maxStop, 'day')) continue;
+
+      fetchPlans.push({
+        campaignId: max.campaignId,
+        accountId: max.campaign.accountId,
+        since,
+        until: maxStop,
+      });
+    }
+
+    if (!fetchPlans.length) {
+      this.logger.log('No campaign need daily sync');
+      return;
+    }
+
+    /**
+     * 4️⃣ Group theo accountId
+     */
+    const byAccount = fetchPlans.reduce<
+      Record<
+        string,
+        {
+          campaignId: string;
+          since: dayjs.Dayjs;
+          until: dayjs.Dayjs;
+        }[]
+      >
+    >((acc, p) => {
+      (acc[p.accountId] ||= []).push({
+        campaignId: p.campaignId,
+        since: p.since,
+        until: p.until,
+      });
       return acc;
     }, {});
 
     /**
-     * 2️⃣ Loop từng ad account
+     * 5️⃣ Loop từng account → chunk campaign (≤50)
      */
-    for (const [accountId, list] of Object.entries(byAccount)) {
+    for (const [accountId, plans] of Object.entries(byAccount)) {
       const adAccount = new AdAccount(accountId);
 
-      /**
-       * Chunk campaign id (<= 50)
-       */
-      for (const chunkCampaigns of chunk(list, 50)) {
-        const campaignIds = chunkCampaigns.map((c) => c.id);
+      for (const chunkPlans of chunk(plans, 50)) {
+        const campaignIds = chunkPlans.map((p) => p.campaignId);
+
+        const since = dayjs(
+          Math.min(...chunkPlans.map((p) => p.since.valueOf())),
+        );
+        const until = dayjs(
+          Math.max(...chunkPlans.map((p) => p.until.valueOf())),
+        );
 
         /**
-         * 3️⃣ Tính date range
-         */
-        const latestInsight = await this.prisma.campaignInsight.findFirst({
-          where: { campaignId: { in: campaignIds } },
-          orderBy: { dateStop: 'desc' },
-          select: { dateStop: true },
-        });
-
-        const since = latestInsight
-          ? dayjs(latestInsight.dateStop).subtract(2, 'day')
-          : dayjs(
-              Math.min(
-                ...chunkCampaigns.map((c) => new Date(c.createdAt).getTime()),
-              ),
-            );
-
-        const until = dayjs();
-
-        const dates: string[] = [];
-        let d = since.clone();
-        while (d.isSame(until, 'day') || d.isBefore(until, 'day')) {
-          dates.push(d.format('YYYY-MM-DD'));
-          d = d.add(1, 'day');
-        }
-
-        /**
-         * 4️⃣ Fetch insight (NO SUMMARY)
+         * 6️⃣ Fetch DAILY insight
          */
         const cursor = await adAccount.getInsights(
           AD_INSIGHT_FIELDS,
           {
             level: 'campaign',
             time_increment: 1,
+            limit: LIMIT_DATA,
             filtering: [
               {
                 field: 'campaign.id',
@@ -450,53 +377,410 @@ export class TaskCron {
 
         const insights = await fetchAll(cursor);
 
+        if (!insights.length) continue;
+
         /**
-         * 5️⃣ Map insight theo campaign|date
+         * 7️⃣ Upsert CHỈ những ngày Meta trả về
          */
-        const insightMap = new Map<string, any>();
         for (const i of insights) {
-          insightMap.set(`${i.campaign_id}|${i.date_start}`, i);
-        }
+          const date = i.date_start;
 
-        /**
-         * 6️⃣ Upsert DB (kể cả empty day)
-         */
+          if (!i.campaign_id) continue;
+          if (dayjs(date).isAfter(today, 'day')) continue;
 
-        for (const c of chunkCampaigns) {
-          for (const date of dates) {
-            const key = `${c.id}|${date}`;
-            const insight = insightMap.get(key);
-
-            await this.prisma.campaignInsight.upsert({
-              where: {
-                campaignId_dateStart_dateStop_range: {
-                  campaignId: c.id,
-                  dateStart: date,
-                  dateStop: date,
-                  range: InsightRange.DAILY,
-                },
-              },
-              update: {
-                ...(insight ? extractCampaignMetrics(insight) : {}),
-                rawPayload: insight ?? null,
-              },
-              create: {
-                campaignId: c.id,
-                level: LevelInsight.CAMPAIGN,
-                range: InsightRange.DAILY,
+          await this.prisma.campaignInsight.upsert({
+            where: {
+              campaignId_dateStart_dateStop_range: {
+                campaignId: i.campaign_id,
                 dateStart: date,
                 dateStop: date,
-                ...(insight ? extractCampaignMetrics(insight) : {}),
-                rawPayload: insight ?? null,
+                range: InsightRange.DAILY,
               },
-            });
-          }
+            },
+            update: {
+              ...extractCampaignMetrics(i),
+              rawPayload: i,
+            },
+            create: {
+              campaignId: i.campaign_id,
+              level: LevelInsight.CAMPAIGN,
+              range: InsightRange.DAILY,
+              dateStart: date,
+              dateStop: date,
+              ...extractCampaignMetrics(i),
+              rawPayload: i,
+            },
+          });
         }
 
-        await sleep(800); // throttle
+        await sleep(800);
       }
     }
 
     this.logger.log('✅ Campaign Daily Insight DONE');
+  }
+
+  @Cron('30 6,12,18 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async syncDailyAdsetInsights() {
+    this.logger.log('⏰ Sync adset daily insight');
+    this.init();
+
+    const today = dayjs().startOf('day');
+
+    /**
+     * 1️⃣ Lấy MAX adset insight
+     */
+    const maxInsights = await this.prisma.adSetInsight.findMany({
+      where: {
+        range: InsightRange.MAX,
+        level: LevelInsight.ADSET,
+      },
+      select: {
+        adSetId: true,
+        dateStart: true,
+        dateStop: true,
+        adSet: {
+          select: { accountId: true },
+        },
+      },
+    });
+    console.log(maxInsights.length);
+    if (!maxInsights.length) return;
+
+    /**
+     * 2️⃣ DAILY mới nhất
+     */
+    const dailyMax = await this.prisma.adSetInsight.groupBy({
+      by: ['adSetId'],
+      where: {
+        range: InsightRange.DAILY,
+        level: LevelInsight.ADSET,
+      },
+      _max: {
+        dateStop: true,
+      },
+    });
+
+    const dailyMap = new Map<string, string>();
+    for (const d of dailyMax) {
+      if (d._max.dateStop) {
+        dailyMap.set(d.adSetId, d._max.dateStop);
+      }
+    }
+
+    /**
+     * 3️⃣ Build fetch plan
+     */
+    const fetchPlans: {
+      adsetId: string;
+      accountId: string;
+      since: dayjs.Dayjs;
+      until: dayjs.Dayjs;
+    }[] = [];
+
+    for (const max of maxInsights) {
+      if (!max.adSet?.accountId) continue;
+
+      const maxStart = dayjs(max.dateStart);
+      const maxStop = dayjs(max.dateStop);
+
+      if (maxStop.isBefore(today.subtract(1, 'day'))) continue;
+
+      let since: dayjs.Dayjs;
+      const dailyStop = dailyMap.get(max.adSetId);
+
+      if (dailyStop) {
+        since = dayjs(dailyStop).subtract(5, 'day');
+        if (since.isBefore(maxStart)) since = maxStart.clone();
+      } else {
+        since = maxStart.clone();
+      }
+
+      if (since.isAfter(maxStop, 'day')) continue;
+
+      fetchPlans.push({
+        adsetId: max.adSetId,
+        accountId: max.adSet.accountId,
+        since,
+        until: maxStop,
+      });
+    }
+
+    if (!fetchPlans.length) return;
+
+    /**
+     * 4️⃣ Group theo account
+     */
+    const byAccount = fetchPlans.reduce<Record<string, any[]>>((acc, p) => {
+      (acc[p.accountId] ||= []).push(p);
+      return acc;
+    }, {});
+
+    /**
+     * 5️⃣ Fetch theo chunk
+     */
+    for (const [accountId, plans] of Object.entries(byAccount)) {
+      const adAccount = new AdAccount(accountId);
+      for (const chunkPlans of chunk(plans, 50)) {
+        const adsetIds = chunkPlans.map((p) => p.adsetId);
+
+        const since = dayjs(
+          Math.min(...chunkPlans.map((p) => p.since.valueOf())),
+        );
+        const until = dayjs(
+          Math.max(...chunkPlans.map((p) => p.until.valueOf())),
+        );
+
+        const cursor = await adAccount.getInsights(
+          AD_INSIGHT_FIELDS,
+          {
+            level: 'adset',
+            time_increment: 1,
+            limit: LIMIT_DATA,
+            filtering: [{ field: 'adset.id', operator: 'IN', value: adsetIds }],
+            time_range: {
+              since: since.format('YYYY-MM-DD'),
+              until: until.format('YYYY-MM-DD'),
+            },
+          },
+          true,
+        );
+
+        const insights = await fetchAll(cursor);
+        if (!insights.length) continue;
+
+        /**
+         * 6️⃣ Upsert DAILY
+         */
+        for (const i of insights) {
+          const date = i.date_start;
+
+          if (!i.adset_id) continue;
+          if (dayjs(date).isAfter(today, 'day')) continue;
+
+          await this.prisma.adSetInsight.upsert({
+            where: {
+              adSetId_dateStart_dateStop_range: {
+                adSetId: i.adset_id,
+                dateStart: date,
+                dateStop: date,
+                range: InsightRange.DAILY,
+              },
+            },
+            update: {
+              ...extractCampaignMetrics(i),
+              rawPayload: i,
+            },
+            create: {
+              adSetId: i.adset_id,
+              level: LevelInsight.ADSET,
+              range: InsightRange.DAILY,
+              dateStart: date,
+              dateStop: date,
+              ...extractCampaignMetrics(i),
+              rawPayload: i,
+            },
+          });
+        }
+
+        await sleep(800);
+      }
+    }
+
+    this.logger.log('✅ Adset Daily Insight DONE');
+  }
+
+  @Cron('0 7,13,19 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async syncDailyAdInsights() {
+    this.logger.log('⏰ Sync ad daily insight');
+    this.init();
+
+    const today = dayjs().startOf('day');
+
+    /**
+     * 1️⃣ Lấy MAX ad insight
+     */
+    const maxInsights = await this.prisma.adInsight.findMany({
+      where: {
+        range: InsightRange.MAX,
+        level: LevelInsight.AD,
+      },
+      select: {
+        adId: true,
+        dateStart: true,
+        dateStop: true,
+        ad: {
+          select: { accountId: true },
+        },
+      },
+    });
+
+    if (!maxInsights.length) return;
+
+    /**
+     * 2️⃣ DAILY mới nhất của từng ad
+     */
+    const dailyMax = await this.prisma.adInsight.groupBy({
+      by: ['adId'],
+      where: {
+        range: InsightRange.DAILY,
+        level: LevelInsight.AD,
+      },
+      _max: {
+        dateStop: true,
+      },
+    });
+
+    const dailyMap = new Map<string, string>();
+    for (const d of dailyMax) {
+      if (d._max.dateStop) {
+        dailyMap.set(d.adId, d._max.dateStop);
+      }
+    }
+
+    /**
+     * 3️⃣ Build fetch plan
+     */
+    const fetchPlans: {
+      adId: string;
+      accountId: string;
+      since: dayjs.Dayjs;
+      until: dayjs.Dayjs;
+    }[] = [];
+
+    for (const max of maxInsights) {
+      if (!max.ad?.accountId) continue;
+
+      const maxStart = dayjs(max.dateStart);
+      const maxStop = dayjs(max.dateStop);
+
+      // MAX đã quá cũ
+      if (maxStop.isBefore(today.subtract(1, 'day'))) continue;
+
+      let since: dayjs.Dayjs;
+      const dailyStop = dailyMap.get(max.adId);
+
+      if (dailyStop) {
+        since = dayjs(dailyStop).subtract(5, 'day');
+        if (since.isBefore(maxStart)) since = maxStart.clone();
+      } else {
+        since = maxStart.clone();
+      }
+
+      if (since.isAfter(maxStop, 'day')) continue;
+
+      fetchPlans.push({
+        adId: max.adId,
+        accountId: max.ad.accountId,
+        since,
+        until: maxStop,
+      });
+    }
+
+    if (!fetchPlans.length) return;
+
+    /**
+     * 4️⃣ Group theo accountId
+     */
+    const byAccount = fetchPlans.reduce<
+      Record<
+        string,
+        {
+          adId: string;
+          since: dayjs.Dayjs;
+          until: dayjs.Dayjs;
+        }[]
+      >
+    >((acc, p) => {
+      (acc[p.accountId] ||= []).push({
+        adId: p.adId,
+        since: p.since,
+        until: p.until,
+      });
+      return acc;
+    }, {});
+
+    /**
+     * 5️⃣ Loop từng account → chunk ads (≤50)
+     */
+    for (const [accountId, plans] of Object.entries(byAccount)) {
+      const adAccount = new AdAccount(accountId);
+
+      for (const chunkPlans of chunk(plans, 50)) {
+        const adIds = chunkPlans.map((p) => p.adId);
+
+        const since = dayjs(
+          Math.min(...chunkPlans.map((p) => p.since.valueOf())),
+        );
+        const until = dayjs(
+          Math.max(...chunkPlans.map((p) => p.until.valueOf())),
+        );
+
+        /**
+         * 6️⃣ Fetch DAILY insight
+         */
+        const cursor = await adAccount.getInsights(
+          AD_INSIGHT_FIELDS,
+          {
+            level: 'ad',
+            time_increment: 1,
+            limit: LIMIT_DATA,
+            filtering: [
+              {
+                field: 'ad.id',
+                operator: 'IN',
+                value: adIds,
+              },
+            ],
+            time_range: {
+              since: since.format('YYYY-MM-DD'),
+              until: until.format('YYYY-MM-DD'),
+            },
+          },
+          true,
+        );
+
+        const insights = await fetchAll(cursor);
+        if (!insights.length) continue;
+
+        /**
+         * 7️⃣ Upsert CHỈ những ngày Meta trả về
+         */
+        for (const i of insights) {
+          const date = i.date_start;
+
+          if (!i.ad_id) continue;
+          if (dayjs(date).isAfter(today, 'day')) continue;
+
+          await this.prisma.adInsight.upsert({
+            where: {
+              adId_dateStart_dateStop_range: {
+                adId: i.ad_id,
+                dateStart: date,
+                dateStop: date,
+                range: InsightRange.DAILY,
+              },
+            },
+            update: {
+              ...extractCampaignMetrics(i),
+              rawPayload: i,
+            },
+            create: {
+              adId: i.ad_id,
+              level: LevelInsight.AD,
+              range: InsightRange.DAILY,
+              dateStart: date,
+              dateStop: date,
+              ...extractCampaignMetrics(i),
+              rawPayload: i,
+            },
+          });
+        }
+
+        await sleep(800);
+      }
+    }
+
+    this.logger.log('✅ Ad Daily Insight DONE');
   }
 }

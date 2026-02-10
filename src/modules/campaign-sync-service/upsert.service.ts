@@ -45,12 +45,12 @@ export class UpsertService {
 
   /* ======================= CAMPAIGN ======================= */
 
-  upsertCampaign(
+  async upsertCampaign(
     tx: Prisma.TransactionClient,
     accountId: string,
     c: MetaCampaignTree,
   ) {
-    return tx.campaign.upsert({
+    const campaignUpdate = await tx.campaign.upsert({
       where: { id: c.id },
       update: {
         name: c.name,
@@ -92,17 +92,54 @@ export class UpsertService {
           : {}),
       },
     });
+
+    if (
+      campaignUpdate &&
+      c?.insights?.data &&
+      Number(c?.insights?.data?.length) > 0
+    ) {
+      const insightSumary: Record<string, any> =
+        c?.insights?.data && Number(c?.insights?.data?.length) > 0
+          ? c.insights.data[0]
+          : {};
+
+      await tx.campaignInsight.upsert({
+        where: {
+          campaignId_dateStart_dateStop_range: {
+            campaignId: c.id,
+            dateStart: insightSumary?.date_start,
+            dateStop: insightSumary?.date_stop,
+            range: 'MAX',
+          },
+        },
+        update: {
+          ...extractCampaignMetrics(insightSumary),
+          rawPayload: insightSumary,
+        },
+        create: {
+          campaignId: c.id,
+          level: 'CAMPAIGN',
+          range: 'MAX',
+          dateStart: insightSumary?.date_start,
+          dateStop: insightSumary?.date_stop,
+          ...extractCampaignMetrics(insightSumary),
+          rawPayload: insightSumary,
+        },
+      });
+    }
+
+    return campaignUpdate;
   }
 
   /* ======================= ADSET ======================= */
 
-  upsertAdSet(
+  async upsertAdSet(
     tx: Prisma.TransactionClient,
     accountId: string,
     campaignId: string,
     as: MetaAdSet,
   ) {
-    return tx.adSet.upsert({
+    const updated = await tx.adSet.upsert({
       where: { id: as.id },
       update: {
         name: as.name,
@@ -145,6 +182,42 @@ export class UpsertService {
           : {}),
       },
     });
+
+    if (
+      updated &&
+      as?.insights?.data &&
+      Number(as?.insights?.data?.length) > 0
+    ) {
+      const insightSumary: Record<string, any> =
+        as?.insights?.data && Number(as?.insights?.data?.length) > 0
+          ? as?.insights?.data[0]
+          : {};
+
+      await tx.adSetInsight.upsert({
+        where: {
+          adSetId_dateStart_dateStop_range: {
+            adSetId: as.id,
+            dateStart: insightSumary?.date_start,
+            dateStop: insightSumary?.date_stop,
+            range: 'MAX',
+          },
+        },
+        update: {
+          ...extractCampaignMetrics(insightSumary),
+          rawPayload: insightSumary,
+        },
+        create: {
+          adSetId: as.id,
+          level: 'ADSET',
+          range: 'MAX',
+          dateStart: insightSumary?.date_start,
+          dateStop: insightSumary?.date_stop,
+          ...extractCampaignMetrics(insightSumary),
+          rawPayload: insightSumary,
+        },
+      });
+    }
+    return updated;
   }
 
   /* ======================= ASSETS ======================= */
@@ -182,11 +255,13 @@ export class UpsertService {
               name: image.name,
               url: image.permalink_url || image.url,
               permalink_url: image.permalink_url,
-              createdTime: image.created_time,
               height: image.height,
               width: image.width,
               rawPayload: toPrismaJson(image),
               status: image.status,
+              createdTime: image.created_time
+                ? new Date(image.created_time)
+                : undefined,
               createdAt: image.created_time
                 ? new Date(image.created_time)
                 : undefined,
@@ -201,11 +276,14 @@ export class UpsertService {
               name: image.name,
               url: image.permalink_url || image.url,
               permalink_url: image.permalink_url,
-              createdTime: image.created_time,
+
               height: image.height,
               width: image.width,
               rawPayload: toPrismaJson(image),
               status: image.status,
+              createdTime: image.created_time
+                ? new Date(image.created_time)
+                : undefined,
               createdAt: image.created_time
                 ? new Date(image.created_time)
                 : undefined,
@@ -338,14 +416,14 @@ export class UpsertService {
 
   /* ======================= AD ======================= */
 
-  upsertAdLegacy(
+  async upsertAdLegacy(
     tx: Prisma.TransactionClient,
     accountId: string,
     campaignId: string,
     adsetId: string,
     ad: MetaAd,
   ) {
-    return tx.ad.upsert({
+    const updated = await tx.ad.upsert({
       where: { id: ad.id },
       update: {
         name: ad.name,
@@ -355,6 +433,7 @@ export class UpsertService {
         creativeId: ad.creative?.id,
         rawPayload: toPrismaJson(ad),
         lastFetchedAt: new Date(),
+
         createdAt: ad.created_time ? new Date(ad.created_time) : undefined,
         updatedAt: ad.updated_time ? new Date(ad.updated_time) : undefined,
         ...(ad?.insights?.data && Number(ad?.insights?.data?.length) > 0
@@ -380,5 +459,41 @@ export class UpsertService {
           : {}),
       },
     });
+
+    if (
+      updated &&
+      ad?.insights?.data &&
+      Number(ad?.insights?.data?.length) > 0
+    ) {
+      const insightSumary: Record<string, any> =
+        ad?.insights?.data && Number(ad?.insights?.data?.length) > 0
+          ? ad?.insights?.data[0]
+          : {};
+
+      await tx.adInsight.upsert({
+        where: {
+          adId_dateStart_dateStop_range: {
+            adId: ad.id,
+            dateStart: insightSumary?.date_start,
+            dateStop: insightSumary?.date_stop,
+            range: 'MAX',
+          },
+        },
+        update: {
+          ...extractCampaignMetrics(insightSumary),
+          rawPayload: insightSumary,
+        },
+        create: {
+          adId: ad.id,
+          level: 'AD',
+          range: 'MAX',
+          dateStart: insightSumary?.date_start,
+          dateStop: insightSumary?.date_stop,
+          ...extractCampaignMetrics(insightSumary),
+          rawPayload: insightSumary,
+        },
+      });
+    }
+    return updated;
   }
 }

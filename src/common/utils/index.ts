@@ -5,6 +5,7 @@ import { MetaFatalError, normalizeMetaError } from './meta-mapping.util';
 export * from './meta-mapping.util';
 export * from './password.util';
 
+export const LIMIT_DATA = 50;
 export enum BudgetType {
   DAILY = 'DAILY',
   LIFETIME = 'LIFETIME',
