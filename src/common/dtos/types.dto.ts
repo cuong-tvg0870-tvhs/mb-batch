@@ -13,6 +13,8 @@ export interface MetaCampaignTree {
 
   adsets?: MetaAdSet[];
 
+  insights?: Record<string, any>;
+
   systemCampaignId?: string;
 
   account_id?: string;
@@ -35,6 +37,7 @@ export interface MetaAdSet {
   updated_time?: string;
   created_time?: string;
   ads?: MetaAd[];
+  insights?: Record<string, any>;
 }
 
 /* ================= AD ================= */
@@ -49,6 +52,8 @@ export interface MetaAd {
   created_time?: string;
 
   creative?: MetaCreative;
+
+  insights?: Record<string, any>;
 }
 
 /* ================= CREATIVE ================= */
@@ -62,6 +67,8 @@ export interface MetaCreative {
   image_hash?: string;
   video_id?: string;
   updated_time?: string;
+
+  insights?: Record<string, any>;
 
   // Meta hay nhét thêm stuff → giữ mở
   [key: string]: any;

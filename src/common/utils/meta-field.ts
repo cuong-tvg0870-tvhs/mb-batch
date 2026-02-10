@@ -213,5 +213,60 @@ export const AD_INSIGHT_FIELDS = [
   AdsInsights.Fields.inline_post_engagement,
 ];
 
+export const SUMMARY_AD_INSIGHT_FIELDS = [
+  AdsInsights.Fields.date_start,
+  AdsInsights.Fields.date_stop,
+
+  // delivery
+  AdsInsights.Fields.impressions,
+  AdsInsights.Fields.reach,
+  AdsInsights.Fields.frequency,
+
+  // clicks
+  AdsInsights.Fields.clicks,
+  AdsInsights.Fields.unique_clicks,
+  AdsInsights.Fields.outbound_clicks,
+  AdsInsights.Fields.unique_outbound_clicks,
+
+  // rates & cost
+  AdsInsights.Fields.ctr,
+  AdsInsights.Fields.unique_ctr,
+  AdsInsights.Fields.cpc,
+  AdsInsights.Fields.cpm,
+  AdsInsights.Fields.cost_per_outbound_click,
+
+  // spend
+  AdsInsights.Fields.spend,
+
+  // conversion
+  AdsInsights.Fields.actions,
+  AdsInsights.Fields.unique_actions,
+  AdsInsights.Fields.action_values,
+  AdsInsights.Fields.cost_per_action_type,
+
+  AdsInsights.Fields.conversions,
+  AdsInsights.Fields.conversion_values,
+
+  AdsInsights.Fields.results,
+  AdsInsights.Fields.cost_per_result,
+
+  AdsInsights.Fields.purchase_roas,
+
+  // quality
+
+  // video
+  AdsInsights.Fields.video_play_actions,
+  AdsInsights.Fields.video_thruplay_watched_actions,
+  AdsInsights.Fields.video_avg_time_watched_actions,
+  AdsInsights.Fields.video_p25_watched_actions,
+  AdsInsights.Fields.video_p50_watched_actions,
+  AdsInsights.Fields.video_p75_watched_actions,
+  AdsInsights.Fields.video_p95_watched_actions,
+  AdsInsights.Fields.video_p100_watched_actions,
+  AdsInsights.Fields.video_30_sec_watched_actions,
+
+  AdsInsights.Fields.inline_post_engagement,
+];
+
 export const AUDIENCE_FIELDS = ['id', 'name', 'subtype', 'approximate_count'];
 export const PAGE_FIELDS = ['id', 'name', 'access_token'];

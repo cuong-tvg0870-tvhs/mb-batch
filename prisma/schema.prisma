@@ -237,6 +237,7 @@ model Campaign {
     status          String?
     objective       String?
     buyingType      String?
+    effectiveBudget Int       @default(0)
     dailyBudget     Int?
     lifetimeBudget  Int?
     startTime       DateTime?
@@ -249,10 +250,69 @@ model Campaign {
     updatedAt DateTime  @updatedAt
     deletedAt DateTime?
 
-    adsets           AdSet[]
-    ads              Ad[]
-    campaignInsights CampaignInsight[]
-    adSetInsights    AdSetInsight[]
+    adsets                   AdSet[]
+    ads                      Ad[]
+    campaignInsights         CampaignInsight[]
+    adSetInsights            AdSetInsight[]
+    creativeInsights         CreativeInsight[]
+    campaignAudienceInsights CampaignAudienceInsight[]
+
+    // INSIGHT DATA
+    impressions Int?   @default(0)
+    reach       Int?   @default(0)
+    frequency   Float? @default(0)
+
+    /**
+     * ===== TRAFFIC =====
+     */
+    clicks       Int?   @default(0)
+    uniqueClicks Int?   @default(0)
+    ctr          Float? @default(0)
+    uniqueCtr    Float? @default(0)
+    cpc          Float? @default(0)
+    cpm          Float? @default(0)
+
+    /**
+     * ===== SPEND =====
+     */
+    spend Float? @default(0)
+
+    /**
+     * ===== CONVERSION =====
+     */
+    results       Int?   @default(0)
+    costPerResult Float? @default(0)
+
+    purchases      Int?   @default(0)
+    purchaseValue  Float? @default(0)
+    roas           Float? @default(0)
+    roasMeta       Float? @default(0)
+    roasCalculated Float? @default(0)
+
+    cvr          Float? @default(0)
+    adsCostRatio Float? @default(0)
+
+    qualityRanking        String?
+    engagementRateRanking String?
+    conversionRateRanking String?
+
+    /**
+     * ===== RAW =====
+     */
+    actions      Json?
+    actionValues Json?
+    purchaseRoas Json?
+
+    videoPlay Float? @default(0)
+    video3s   Float? @default(0)
+    video100  Float? @default(0)
+
+    videoAvgWatchTime Float? @default(0)
+    videoThruplay     Int?   @default(0)
+    videoView         Int?   @default(0)
+
+    hookRate Float? @default(0)
+    holdRate Float? @default(0)
 
     @@unique([id, systemCampaignId])
     @@index([accountId])
@@ -275,8 +335,10 @@ model AdSet {
     billingEvent     String?
     bidStrategy      String?
 
+    effectiveBudget Int  @default(0)
     dailyBudget     Int?
     lifetimeBudget  Int?
+
     targeting       Json?
     startTime       DateTime?
     endTime         DateTime?
@@ -291,6 +353,64 @@ model AdSet {
     updatedAt     DateTime       @updatedAt
     deletedAt     DateTime?
     adSetInsights AdSetInsight[]
+
+    // INSIGHT
+    // INSIGHT DATA
+    impressions Int?   @default(0)
+    reach       Int?   @default(0)
+    frequency   Float? @default(0)
+
+    /**
+     * ===== TRAFFIC =====
+     */
+    clicks       Int?   @default(0)
+    uniqueClicks Int?   @default(0)
+    ctr          Float? @default(0)
+    uniqueCtr    Float? @default(0)
+    cpc          Float? @default(0)
+    cpm          Float? @default(0)
+
+    /**
+     * ===== SPEND =====
+     */
+    spend Float? @default(0)
+
+    /**
+     * ===== CONVERSION =====
+     */
+    results       Int?   @default(0)
+    costPerResult Float? @default(0)
+
+    purchases      Int?   @default(0)
+    purchaseValue  Float? @default(0)
+    roas           Float? @default(0)
+    roasMeta       Float? @default(0)
+    roasCalculated Float? @default(0)
+
+    cvr          Float? @default(0)
+    adsCostRatio Float? @default(0)
+
+    qualityRanking        String?
+    engagementRateRanking String?
+    conversionRateRanking String?
+
+    /**
+     * ===== RAW =====
+     */
+    actions      Json?
+    actionValues Json?
+    purchaseRoas Json?
+
+    videoPlay Float? @default(0)
+    video3s   Float? @default(0)
+    video100  Float? @default(0)
+
+    videoAvgWatchTime Float? @default(0)
+    videoThruplay     Int?   @default(0)
+    videoView         Int?   @default(0)
+
+    hookRate Float? @default(0)
+    holdRate Float? @default(0)
 
     @@index([campaignId])
     @@index([accountId])
@@ -326,6 +446,64 @@ model Ad {
     createdAt DateTime  @default(now())
     updatedAt DateTime  @updatedAt
     deletedAt DateTime?
+
+    // INSIGHT
+    // INSIGHT DATA
+    impressions Int?   @default(0)
+    reach       Int?   @default(0)
+    frequency   Float? @default(0)
+
+    /**
+     * ===== TRAFFIC =====
+     */
+    clicks       Int?   @default(0)
+    uniqueClicks Int?   @default(0)
+    ctr          Float? @default(0)
+    uniqueCtr    Float? @default(0)
+    cpc          Float? @default(0)
+    cpm          Float? @default(0)
+
+    /**
+     * ===== SPEND =====
+     */
+    spend Float? @default(0)
+
+    /**
+     * ===== CONVERSION =====
+     */
+    results       Int?   @default(0)
+    costPerResult Float? @default(0)
+
+    purchases      Int?   @default(0)
+    purchaseValue  Float? @default(0)
+    roas           Float? @default(0)
+    roasMeta       Float? @default(0)
+    roasCalculated Float? @default(0)
+
+    cvr          Float? @default(0)
+    adsCostRatio Float? @default(0)
+
+    qualityRanking        String?
+    engagementRateRanking String?
+    conversionRateRanking String?
+
+    /**
+     * ===== RAW =====
+     */
+    actions      Json?
+    actionValues Json?
+    purchaseRoas Json?
+
+    videoPlay Float? @default(0)
+    video3s   Float? @default(0)
+    video100  Float? @default(0)
+
+    videoAvgWatchTime Float? @default(0)
+    videoThruplay     Int?   @default(0)
+    videoView         Int?   @default(0)
+
+    hookRate Float? @default(0)
+    holdRate Float? @default(0)
 
     @@index([adsetId])
     @@index([creativeId])
@@ -408,8 +586,64 @@ model Creative {
     createdAt       DateTime  @default(now())
     updatedAt       DateTime  @updatedAt
 
-    videoId String?
-    adVideo AdVideo? @relation(fields: [videoId], references: [id])
+    videoId          String?
+    adVideo          AdVideo?          @relation(fields: [videoId], references: [id])
+    creativeInsights CreativeInsight[]
+
+    // INSIGHT DATA
+    // INSIGHT DATA
+    impressions Int?   @default(0)
+    reach       Int?   @default(0)
+    frequency   Float? @default(0)
+
+    /**
+     * ===== TRAFFIC =====
+     */
+    clicks       Int?   @default(0)
+    uniqueClicks Int?   @default(0)
+    ctr          Float? @default(0)
+    uniqueCtr    Float? @default(0)
+    cpc          Float? @default(0)
+    cpm          Float? @default(0)
+
+    /**
+     * ===== SPEND =====
+     */
+    spend Float? @default(0)
+
+    /**
+     * ===== CONVERSION =====
+     */
+    results       Int?   @default(0)
+    costPerResult Float? @default(0)
+
+    purchases     Int?   @default(0)
+    purchaseValue Float? @default(0)
+    roas          Float? @default(0)
+
+    /**
+     * ===== QUALITY =====
+     */
+    qualityRanking        String?
+    engagementRateRanking String?
+    conversionRateRanking String?
+
+    /**
+     * ===== RAW =====
+     */
+    actions      Json?
+    actionValues Json?
+    purchaseRoas Json?
+
+    roasCalculated Float? @default(0)
+    roasMeta       Float? @default(0)
+
+    cvr          Float? @default(0)
+    adsCostRatio Float? @default(0)
+
+    videoAvgWatchTime Float? @default(0)
+    videoThruplay     Int?   @default(0)
+    videoView         Int?   @default(0)
 
     @@index([accountId])
     @@index([imageHash])
@@ -449,6 +683,7 @@ model AdVideo {
     account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
     title       String?
+    source      String?
     description String?
     status      String? // READY, PROCESSING, ERROR
     length      Int? // seconds
@@ -477,57 +712,46 @@ model AdInsight {
     adId String
     ad   Ad     @relation(fields: [adId], references: [id], onDelete: Cascade)
 
-    adSetId    String
-    campaignId String
-
     level LevelInsight @default(AD)
 
-    dateStart String
-    dateStop  String
-    range     InsightRange @default(DAILY)
-
-    /**
-     * ===== DELIVERY =====
-     */
-    impressions Int
-    reach       Int?
-    frequency   Float?
+    dateStart   String
+    dateStop    String
+    range       InsightRange @default(DAILY)
+    // INSIGHT DATA
+    impressions Int?         @default(0)
+    reach       Int?         @default(0)
+    frequency   Float?       @default(0)
 
     /**
      * ===== TRAFFIC =====
      */
-    clicks       Int
-    uniqueClicks Int?
-    ctr          Float?
-    uniqueCtr    Float?
-    cpc          Float?
-    cpm          Float?
+    clicks       Int?   @default(0)
+    uniqueClicks Int?   @default(0)
+    ctr          Float? @default(0)
+    uniqueCtr    Float? @default(0)
+    cpc          Float? @default(0)
+    cpm          Float? @default(0)
 
     /**
      * ===== SPEND =====
      */
-    spend Float
+    spend Float? @default(0)
 
     /**
      * ===== CONVERSION =====
      */
-    results       Int?
-    costPerResult Float?
+    results       Int?   @default(0)
+    costPerResult Float? @default(0)
 
-    purchases     Int?
-    purchaseValue Float?
-    roas          Float?
+    purchases      Int?   @default(0)
+    purchaseValue  Float? @default(0)
+    roas           Float? @default(0)
+    roasMeta       Float? @default(0)
+    roasCalculated Float? @default(0)
 
-    /**
-     * ===== VIDEO =====
-     */
-    videoViews   Int?
-    thruPlays    Int?
-    avgWatchTime Float?
+    cvr          Float? @default(0)
+    adsCostRatio Float? @default(0)
 
-    /**
-     * ===== QUALITY =====
-     */
     qualityRanking        String?
     engagementRateRanking String?
     conversionRateRanking String?
@@ -538,14 +762,24 @@ model AdInsight {
     actions      Json?
     actionValues Json?
     purchaseRoas Json?
-    rawPayload   Json?
+
+    videoPlay Float? @default(0)
+    video3s   Float? @default(0)
+    video100  Float? @default(0)
+
+    videoAvgWatchTime Float? @default(0)
+    videoThruplay     Int?   @default(0)
+    videoView         Int?   @default(0)
+
+    hookRate   Float? @default(0)
+    holdRate   Float? @default(0)
+    rawPayload Json?
 
     createdAt DateTime @default(now())
     updatedAt DateTime @updatedAt
 
     @@unique([adId, dateStart, dateStop, range])
     @@index([adId])
-    @@index([campaignId])
 }
 
 model CampaignInsight {
@@ -560,41 +794,41 @@ model CampaignInsight {
     dateStop  String
     range     InsightRange @default(DAILY)
 
-    /**
-     * ===== DELIVERY =====
-     */
-    impressions Int
-    reach       Int?
-    frequency   Float?
+    // INSIGHT DATA
+    impressions Int?   @default(0)
+    reach       Int?   @default(0)
+    frequency   Float? @default(0)
 
     /**
      * ===== TRAFFIC =====
      */
-    clicks       Int
-    uniqueClicks Int?
-    ctr          Float?
-    uniqueCtr    Float?
-    cpc          Float?
-    cpm          Float?
+    clicks       Int?   @default(0)
+    uniqueClicks Int?   @default(0)
+    ctr          Float? @default(0)
+    uniqueCtr    Float? @default(0)
+    cpc          Float? @default(0)
+    cpm          Float? @default(0)
 
     /**
      * ===== SPEND =====
      */
-    spend Float
+    spend Float? @default(0)
 
     /**
      * ===== CONVERSION =====
      */
-    results       Int?
-    costPerResult Float?
+    results       Int?   @default(0)
+    costPerResult Float? @default(0)
 
-    purchases     Int?
-    purchaseValue Float?
-    roas          Float?
+    purchases      Int?   @default(0)
+    purchaseValue  Float? @default(0)
+    roas           Float? @default(0)
+    roasMeta       Float? @default(0)
+    roasCalculated Float? @default(0)
 
-    /**
-     * ===== QUALITY =====
-     */
+    cvr          Float? @default(0)
+    adsCostRatio Float? @default(0)
+
     qualityRanking        String?
     engagementRateRanking String?
     conversionRateRanking String?
@@ -605,7 +839,19 @@ model CampaignInsight {
     actions      Json?
     actionValues Json?
     purchaseRoas Json?
-    rawPayload   Json?
+
+    videoPlay Float? @default(0)
+    video3s   Float? @default(0)
+    video100  Float? @default(0)
+
+    videoAvgWatchTime Float? @default(0)
+    videoThruplay     Int?   @default(0)
+    videoView         Int?   @default(0)
+
+    hookRate Float? @default(0)
+    holdRate Float? @default(0)
+
+    rawPayload Json?
 
     createdAt DateTime @default(now())
     updatedAt DateTime @updatedAt
@@ -615,52 +861,56 @@ model CampaignInsight {
     @@index([dateStart, dateStop])
 }
 
-model AdSetInsight {
+model CreativeInsight {
     id String @id @default(cuid())
 
-    adSetId String
-    adSet   AdSet  @relation(fields: [adSetId], references: [id], onDelete: Cascade)
+    creativeId String
+    creative   Creative @relation(fields: [creativeId], references: [id], onDelete: Cascade)
 
-    campaignId String
-    campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-
-    level LevelInsight @default(ADSET)
+    level LevelInsight @default(AD)
 
     dateStart String
     dateStop  String
     range     InsightRange @default(DAILY)
 
-    /**
-     * ===== DELIVERY =====
-     */
-    impressions Int
-    reach       Int?
-    frequency   Float?
+    // INSIGHT DATA
+    impressions Int?   @default(0)
+    reach       Int?   @default(0)
+    frequency   Float? @default(0)
 
     /**
      * ===== TRAFFIC =====
      */
-    clicks       Int
-    uniqueClicks Int?
-    ctr          Float?
-    uniqueCtr    Float?
-    cpc          Float?
-    cpm          Float?
+    clicks       Int?   @default(0)
+    uniqueClicks Int?   @default(0)
+    ctr          Float? @default(0)
+    uniqueCtr    Float? @default(0)
+    cpc          Float? @default(0)
+    cpm          Float? @default(0)
 
     /**
      * ===== SPEND =====
      */
-    spend Float
+    spend Float? @default(0)
 
     /**
      * ===== CONVERSION =====
      */
-    results       Int?
-    costPerResult Float?
+    results       Int?   @default(0)
+    costPerResult Float? @default(0)
 
-    purchases     Int?
-    purchaseValue Float?
-    roas          Float?
+    purchases      Int?   @default(0)
+    purchaseValue  Float? @default(0)
+    roas           Float? @default(0)
+    roasMeta       Float? @default(0)
+    roasCalculated Float? @default(0)
+
+    cvr          Float? @default(0)
+    adsCostRatio Float? @default(0)
+
+    qualityRanking        String?
+    engagementRateRanking String?
+    conversionRateRanking String?
 
     /**
      * ===== RAW =====
@@ -668,14 +918,199 @@ model AdSetInsight {
     actions      Json?
     actionValues Json?
     purchaseRoas Json?
-    rawPayload   Json?
+
+    videoPlay Float? @default(0)
+    video3s   Float? @default(0)
+    video100  Float? @default(0)
+
+    videoAvgWatchTime Float? @default(0)
+    videoThruplay     Int?   @default(0)
+    videoView         Int?   @default(0)
+
+    hookRate   Float? @default(0)
+    holdRate   Float? @default(0)
+    rawPayload Json?
+
+    createdAt  DateTime  @default(now())
+    updatedAt  DateTime  @updatedAt
+    campaign   Campaign? @relation(fields: [campaignId], references: [id])
+    campaignId String?
+
+    @@unique([creativeId, dateStart, dateStop, range])
+    @@index([creativeId])
+}
+
+model AdSetInsight {
+    id String @id @default(cuid())
+
+    adSetId String
+    adSet   AdSet  @relation(fields: [adSetId], references: [id], onDelete: Cascade)
+
+    level LevelInsight @default(ADSET)
+
+    dateStart String
+    dateStop  String
+    range     InsightRange @default(DAILY)
+
+    // INSIGHT DATA
+    impressions Int?   @default(0)
+    reach       Int?   @default(0)
+    frequency   Float? @default(0)
+
+    /**
+     * ===== TRAFFIC =====
+     */
+    clicks       Int?   @default(0)
+    uniqueClicks Int?   @default(0)
+    ctr          Float? @default(0)
+    uniqueCtr    Float? @default(0)
+    cpc          Float? @default(0)
+    cpm          Float? @default(0)
+
+    /**
+     * ===== SPEND =====
+     */
+    spend Float? @default(0)
+
+    /**
+     * ===== CONVERSION =====
+     */
+    results       Int?   @default(0)
+    costPerResult Float? @default(0)
+
+    purchases      Int?   @default(0)
+    purchaseValue  Float? @default(0)
+    roas           Float? @default(0)
+    roasMeta       Float? @default(0)
+    roasCalculated Float? @default(0)
+
+    cvr          Float? @default(0)
+    adsCostRatio Float? @default(0)
+
+    qualityRanking        String?
+    engagementRateRanking String?
+    conversionRateRanking String?
+
+    /**
+     * ===== RAW =====
+     */
+    actions      Json?
+    actionValues Json?
+    purchaseRoas Json?
+
+    videoPlay Float? @default(0)
+    video3s   Float? @default(0)
+    video100  Float? @default(0)
+
+    videoAvgWatchTime Float? @default(0)
+    videoThruplay     Int?   @default(0)
+    videoView         Int?   @default(0)
+
+    hookRate Float? @default(0)
+    holdRate Float? @default(0)
+
+    rawPayload Json?
+
+    createdAt  DateTime  @default(now())
+    updatedAt  DateTime  @updatedAt
+    campaign   Campaign? @relation(fields: [campaignId], references: [id])
+    campaignId String?
+
+    @@unique([adSetId, dateStart, dateStop, range])
+    @@index([adSetId])
+}
+
+model CampaignAudienceInsight {
+    id String @id @default(cuid())
+
+    campaignId String
+    campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+    level LevelInsight @default(CAMPAIGN)
+
+    /**
+     * ===== TIME =====
+     * Không theo ngày → dùng ALL_TIME
+     * Nhưng vẫn giữ field để mở rộng
+     */
+    dateStart String?
+    dateStop  String?
+    range     InsightRange @default(MAX)
+
+    /**
+     * ===== BREAKDOWN =====
+     */
+    age    String // e.g. "18-24", "25-34"
+    gender String // "male" | "female" | "unknown"
+
+    // INSIGHT DATA
+    impressions Int?   @default(0)
+    reach       Int?   @default(0)
+    frequency   Float? @default(0)
+
+    /**
+     * ===== TRAFFIC =====
+     */
+    clicks       Int?   @default(0)
+    uniqueClicks Int?   @default(0)
+    ctr          Float? @default(0)
+    uniqueCtr    Float? @default(0)
+    cpc          Float? @default(0)
+    cpm          Float? @default(0)
+
+    /**
+     * ===== SPEND =====
+     */
+    spend Float? @default(0)
+
+    /**
+     * ===== CONVERSION =====
+     */
+    results       Int?   @default(0)
+    costPerResult Float? @default(0)
+
+    purchases      Int?   @default(0)
+    purchaseValue  Float? @default(0)
+    roas           Float? @default(0)
+    roasMeta       Float? @default(0)
+    roasCalculated Float? @default(0)
+
+    cvr          Float? @default(0)
+    adsCostRatio Float? @default(0)
+
+    qualityRanking        String?
+    engagementRateRanking String?
+    conversionRateRanking String?
+
+    /**
+     * ===== RAW =====
+     */
+    actions      Json?
+    actionValues Json?
+    purchaseRoas Json?
+
+    videoPlay Float? @default(0)
+    video3s   Float? @default(0)
+    video100  Float? @default(0)
+
+    videoAvgWatchTime Float? @default(0)
+    videoThruplay     Int?   @default(0)
+    videoView         Int?   @default(0)
+
+    hookRate Float? @default(0)
+    holdRate Float? @default(0)
+
+    rawPayload Json?
 
     createdAt DateTime @default(now())
     updatedAt DateTime @updatedAt
 
-    @@unique([adSetId, dateStart, dateStop, range])
-    @@index([adSetId])
+    /**
+     * ===== CONSTRAINT =====
+     */
+    @@unique([campaignId, age, gender, range])
     @@index([campaignId])
+    @@index([age, gender])
 }
 
 model ChangeLog {

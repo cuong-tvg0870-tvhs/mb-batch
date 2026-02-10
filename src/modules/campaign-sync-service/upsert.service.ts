@@ -7,7 +7,11 @@ import {
   MetaCampaignTree,
   MetaCreative,
 } from '../../common/dtos/types.dto';
-import { fetchAll, toPrismaJson } from '../../common/utils';
+import {
+  extractCampaignMetrics,
+  fetchAll,
+  toPrismaJson,
+} from '../../common/utils';
 import {
   AD_IMAGE_FIELDS,
   AD_VIDEO_FIELDS,
@@ -53,6 +57,7 @@ export class UpsertService {
         status: c.status,
         objective: c.objective,
         buyingType: c.buying_type,
+        effectiveBudget: Number(c.daily_budget ?? c.lifetime_budget ?? 0),
         dailyBudget: Number(c.daily_budget),
         lifetimeBudget: Number(c.lifetime_budget),
         rawPayload: toPrismaJson(c),
@@ -60,6 +65,10 @@ export class UpsertService {
         createdAt: c.created_time ? new Date(c.created_time) : undefined,
         updatedAt: c.updated_time ? new Date(c.updated_time) : undefined,
         systemCampaignId: c.systemCampaignId || undefined,
+
+        ...(c?.insights?.data && Number(c?.insights?.data?.length) > 0
+          ? extractCampaignMetrics(c.insights.data[0])
+          : {}),
       },
       create: {
         id: c.id,
@@ -69,12 +78,18 @@ export class UpsertService {
         objective: c.objective,
         buyingType: c.buying_type,
         dailyBudget: Number(c.daily_budget),
+        effectiveBudget: Number(c.daily_budget ?? c.lifetime_budget ?? 0),
         lifetimeBudget: Number(c.lifetime_budget),
         rawPayload: toPrismaJson(c),
         lastFetchedAt: new Date(),
         createdAt: c.created_time ? new Date(c.created_time) : undefined,
         updatedAt: c.updated_time ? new Date(c.updated_time) : undefined,
+
         systemCampaignId: c.systemCampaignId || undefined,
+
+        ...(c?.insights?.data && Number(c?.insights?.data?.length) > 0
+          ? extractCampaignMetrics(c.insights.data[0])
+          : {}),
       },
     });
   }
@@ -102,6 +117,10 @@ export class UpsertService {
         lastFetchedAt: new Date(),
         createdAt: as.created_time ? new Date(as.created_time) : undefined,
         updatedAt: as.updated_time ? new Date(as.updated_time) : undefined,
+        effectiveBudget: Number(as?.daily_budget || as?.lifetime_budget || 0),
+        ...(as?.insights?.data && Number(as?.insights?.data?.length) > 0
+          ? extractCampaignMetrics(as.insights.data[0])
+          : {}),
       },
       create: {
         id: as.id,
@@ -114,11 +133,16 @@ export class UpsertService {
         bidStrategy: as.bid_strategy,
         dailyBudget: Number(as.daily_budget),
         lifetimeBudget: Number(as.lifetime_budget),
+        effectiveBudget: Number(as?.daily_budget || as?.lifetime_budget || 0),
         targeting: as.targeting,
         rawPayload: toPrismaJson(as),
         lastFetchedAt: new Date(),
         createdAt: as.created_time ? new Date(as.created_time) : undefined,
         updatedAt: as.updated_time ? new Date(as.updated_time) : undefined,
+
+        ...(as?.insights?.data && Number(as?.insights?.data?.length) > 0
+          ? extractCampaignMetrics(as.insights.data[0])
+          : {}),
       },
     });
   }
@@ -156,8 +180,13 @@ export class UpsertService {
             },
             update: {
               name: image.name,
-              url: image.url,
+              url: image.permalink_url || image.url,
+              permalink_url: image.permalink_url,
+              createdTime: image.created_time,
+              height: image.height,
+              width: image.width,
               rawPayload: toPrismaJson(image),
+              status: image.status,
               createdAt: image.created_time
                 ? new Date(image.created_time)
                 : undefined,
@@ -170,8 +199,13 @@ export class UpsertService {
               accountId,
               hash: image.hash,
               name: image.name,
-              url: image.url,
+              url: image.permalink_url || image.url,
+              permalink_url: image.permalink_url,
+              createdTime: image.created_time,
+              height: image.height,
+              width: image.width,
               rawPayload: toPrismaJson(image),
+              status: image.status,
               createdAt: image.created_time
                 ? new Date(image.created_time)
                 : undefined,
@@ -195,24 +229,33 @@ export class UpsertService {
           AD_VIDEO_FIELDS,
         );
 
-        const v = videoCursor._data;
-        await tx.adVideo.upsert({
-          where: { id: v.id },
-          update: {
-            title: v.title,
-            description: v.description,
-            length: v.length,
-            thumbnailUrl: v.picture,
-            rawPayload: toPrismaJson(v),
-          },
+        const uploadResult = videoCursor._data;
+        await this.prisma.adVideo.upsert({
+          where: { id: uploadResult.id },
           create: {
-            id: v.id,
-            accountId,
-            title: v.title,
-            description: v.description,
-            length: v.length,
-            thumbnailUrl: v.picture,
-            rawPayload: toPrismaJson(v),
+            id: uploadResult.id,
+            title: uploadResult?.title,
+            accountId: adAccount?.id,
+            source:
+              uploadResult.source ||
+              `https://facebook.com/${uploadResult.permalink_url}`,
+            status: uploadResult?.status?.video_status,
+            thumbnailUrl: uploadResult?.source || uploadResult?.picture,
+            length: uploadResult.length,
+
+            rawPayload: uploadResult,
+          },
+          update: {
+            title: uploadResult?.title,
+            accountId: adAccount?.id,
+            source:
+              uploadResult.source ||
+              `https://facebook.com/${uploadResult.permalink_url}`,
+            status: uploadResult?.status?.video_status,
+            thumbnailUrl: uploadResult?.source || uploadResult?.picture,
+            length: uploadResult.length,
+
+            rawPayload: uploadResult,
           },
         });
       }
@@ -227,46 +270,47 @@ export class UpsertService {
     ad: MetaCreative,
   ) {
     if (!ad.creative?.id) return;
+    const creative = ad.creative;
 
-    const pageId = ad.creative?.effective_object_story_id?.split('_')[0];
-    const postId = ad.creative?.effective_object_story_id?.split('_')[1];
+    const pageId = creative?.effective_object_story_id?.split('_')[0];
+    const postId = creative?.effective_object_story_id?.split('_')[1];
 
     const fanpage = pageId
       ? await tx.fanpage.findUnique({ where: { id: pageId } })
       : null;
 
     await tx.creative.upsert({
-      where: { id: ad.creative.id },
+      where: { id: creative.id },
       update: {
-        name: ad.creative.name,
-        creativeType: ad.creative.object_type,
-        imageHash: ad.creative.image_hash,
-        videoId: ad.creative.video_id,
-        thumbnailUrl: ad.creative.thumbnail_url,
-        objectStoryId: ad.creative.object_story_id,
-        effectObjectStoryId: ad.creative.effective_object_story_id,
+        name: creative.name,
+        creativeType: creative.object_type,
+        imageHash: creative.image_hash,
+        videoId: creative.video_id,
+        thumbnailUrl: creative.thumbnail_url,
+        objectStoryId: creative.object_story_id,
+        effectObjectStoryId: creative.effective_object_story_id,
         pageId,
         postId,
         systemPageId: fanpage?.id,
-        rawPayload: toPrismaJson(ad.creative),
+        rawPayload: toPrismaJson(creative),
         lastFetchedAt: new Date(),
         createdAt: ad.created_time ? new Date(ad.created_time) : undefined,
         updatedAt: ad.updated_time ? new Date(ad.updated_time) : undefined,
       },
       create: {
-        id: ad.creative.id,
+        id: creative.id,
         accountId,
-        name: ad.creative.name,
-        creativeType: ad.creative.object_type,
-        imageHash: ad.creative.image_hash,
-        videoId: ad.creative.video_id,
-        thumbnailUrl: ad.creative.thumbnail_url,
-        objectStoryId: ad.creative.object_story_id,
-        effectObjectStoryId: ad.creative.effective_object_story_id,
+        name: creative.name,
+        creativeType: creative.object_type,
+        imageHash: creative.image_hash,
+        videoId: creative.video_id,
+        thumbnailUrl: creative.thumbnail_url,
+        objectStoryId: creative.object_story_id,
+        effectObjectStoryId: creative.effective_object_story_id,
         pageId,
         postId,
         systemPageId: fanpage?.id,
-        rawPayload: toPrismaJson(ad.creative),
+        rawPayload: toPrismaJson(creative),
         lastFetchedAt: new Date(),
         createdAt: ad.created_time ? new Date(ad.created_time) : undefined,
         updatedAt: ad.updated_time ? new Date(ad.updated_time) : undefined,
@@ -313,6 +357,9 @@ export class UpsertService {
         lastFetchedAt: new Date(),
         createdAt: ad.created_time ? new Date(ad.created_time) : undefined,
         updatedAt: ad.updated_time ? new Date(ad.updated_time) : undefined,
+        ...(ad?.insights?.data && Number(ad?.insights?.data?.length) > 0
+          ? extractCampaignMetrics(ad.insights.data[0])
+          : {}),
       },
       create: {
         id: ad.id,
@@ -328,6 +375,9 @@ export class UpsertService {
         lastFetchedAt: new Date(),
         createdAt: ad.created_time ? new Date(ad.created_time) : undefined,
         updatedAt: ad.updated_time ? new Date(ad.updated_time) : undefined,
+        ...(ad?.insights?.data && Number(ad?.insights?.data?.length) > 0
+          ? extractCampaignMetrics(ad.insights.data[0])
+          : {}),
       },
     });
   }

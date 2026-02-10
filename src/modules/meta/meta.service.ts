@@ -16,21 +16,28 @@ import {
   CleanObjectOrArray,
   commonKeywords,
   daysAgo,
+  extractCampaignMetrics,
   fetchAll,
+  getDateRange,
+  isFresh,
   parseMetaError,
 } from '../../common/utils';
 
 import { InsightRange, LevelInsight, SystemCampaign } from '@prisma/client';
+import FormData from 'form-data';
+import fs from 'fs';
 import { MetaCampaignTree } from '../../common/dtos/types.dto';
 import { sleep } from '../../common/utils';
 import {
   AD_ACCOUNT_FIELDS,
   AD_FIELDS,
+  AD_IMAGE_FIELDS,
   AD_INSIGHT_FIELDS,
   AD_PIXEL_FIELDS,
   ADSET_FIELDS,
   CAMPAIGN_FIELDS,
   CREATIVE_FIELDS,
+  SUMMARY_AD_INSIGHT_FIELDS,
 } from '../../common/utils/meta-field';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -153,24 +160,18 @@ export class MetaService {
     return { success: true, accounts };
   }
 
-  async fetchCampaignData(campaign: any): Promise<MetaCampaignTree> {
+  async fetchCampaignData(campaignId: string): Promise<MetaCampaignTree> {
     this.init();
     try {
-      const campaignService = new Campaign(campaign?.id);
+      const campaignService = new Campaign(campaignId);
 
-      // 1. Lấy dữ liệu Campaign với các trường bắt buộc (như special_ad_categories)
-      // const campaign = await campaignService.get(CAMPAIGN_FIELDS);
+      const campaign = await campaignService.get(CAMPAIGN_FIELDS);
 
-      // 2. Lấy danh sách Ad Sets (phải bao gồm optimization_goal và promoted_object)
       const adsets = await campaignService.getAdSets(ADSET_FIELDS, {
-        limit: 200,
+        limit: 100,
       });
+      const ads = await campaignService.getAds(AD_FIELDS, { limit: 100 });
 
-      // 3. Lấy danh sách Ads
-      const ads = await campaignService.getAds(AD_FIELDS, { limit: 200 });
-
-      // 4. XỬ LÝ QUAN TRỌNG: Await tất cả Ad Creative bằng Promise.all
-      // Bạn cần fetch chi tiết Creative để biết bài viết đó dùng object_story_id hay object_story_spec
       const adsWithCreative = await Promise.all(
         ads?.map(async (ad) => {
           const creativeSv = new AdCreative(ad?.creative?.id);
@@ -196,12 +197,16 @@ export class MetaService {
   }
 
   // SYNC INSIGHT
-
-  async getAdInsightRange(adIds: string[]) {
+  async getAdInsightRange(adIds: string[], startDate?: Date) {
     const last = await this.prisma.adInsight.findFirst({
       where: { adId: { in: adIds } },
       orderBy: { dateStop: 'desc' },
-      select: { dateStop: true, updatedAt: true, createdAt: true },
+      select: {
+        ad: { select: { campaign: { select: { createdAt: true } } } },
+        dateStop: true,
+        updatedAt: true,
+        createdAt: true,
+      },
     });
 
     const until = new Date();
@@ -209,7 +214,7 @@ export class MetaService {
     // ❌ chưa có data → 90 ngày
     if (!last) {
       return {
-        since: daysAgo(90, until),
+        since: startDate ? new Date(startDate) : daysAgo(90, until),
         until,
       };
     }
@@ -229,105 +234,565 @@ export class MetaService {
     };
   }
 
-  async syncAdInsights({ accountId, adIds, since, until }) {
+  //FETCH MANY ADS
+  async syncAdInsights({
+    accountId,
+    adIds,
+    since,
+    until,
+  }: {
+    accountId: string;
+    adIds: string[];
+    since: Date;
+    until: Date;
+  }) {
     this.init();
     const adAccount = new AdAccount(accountId);
 
     const adIdChunks = chunkArray(adIds, 50);
-
+    const dateRanges = getDateRange(since, until);
     for (const ids of adIdChunks) {
       const cursor = await adAccount.getInsights(
         AD_INSIGHT_FIELDS,
         {
           level: 'ad',
           time_increment: 1,
-          since: since.toISOString().split('T')[0],
-          until: until.toISOString().split('T')[0],
+          since: since.toISOString().slice(0, 10),
+          until: until.toISOString().slice(0, 10),
           filtering: [{ field: 'ad.id', operator: 'IN', value: ids }],
         },
         true,
       );
 
       const insights = await fetchAll(cursor);
+      /**
+       * Map để check row nào đã có data
+       * key = adId|dateStart
+       */
+      const insightMap = new Map<string, any>();
+      for (const i of insights) {
+        insightMap.set(`${i.ad_id}|${i.date_start}`, i);
+      }
+      const operations: any[] = [];
+      for (const adId of ids) {
+        for (const date of dateRanges) {
+          const key = `${adId}|${date}`;
+          const i = insightMap.get(key);
 
-      await this.prisma.$transaction(
-        insights.map((i) =>
-          this.prisma.adInsight.upsert({
-            where: {
-              adId_dateStart_dateStop_range: {
-                range: InsightRange.DAILY,
-                adId: i.ad_id,
-                dateStart: i.date_start,
-                dateStop: i.date_stop,
+          operations.push(
+            this.prisma.adInsight.upsert({
+              where: {
+                adId_dateStart_dateStop_range: {
+                  adId,
+                  dateStart: date,
+                  dateStop: date,
+                  range: InsightRange.DAILY,
+                },
               },
-            },
-            update: {
-              impressions: +i.impressions,
-              clicks: +i.clicks,
-              spend: +i.spend,
-              ctr: +i.ctr,
-              cpc: +i.cpc,
-              actions: i.actions,
-              uniqueClicks: +i.unique_clicks,
-              uniqueCtr: +i.unique_ctr,
-              cpm: +i.cpm,
-              reach: +i.reach,
-              results: +i.results,
-              frequency: +i.frequency,
-              costPerResult: +i.cost_per_result,
+              update: {
+                ...extractCampaignMetrics(i),
+                rawPayload: i ?? null,
+              },
+              create: {
+                level: LevelInsight.AD,
+                range: InsightRange.DAILY,
+                adId,
+                dateStart: date,
+                dateStop: date,
+                ...extractCampaignMetrics(i),
+                rawPayload: i ?? null,
+              },
+            }),
+          );
+        }
+      }
+      // ⚠️ Prisma transaction limit ~ 10k ops → chunk nếu lớn
+      for (const chunk of chunkArray(operations, 500)) {
+        await this.prisma.$transaction(chunk);
+      }
 
-              purchaseRoas: i.purchase_roas,
-              actionValues: i.action_values,
+      await sleep(adIdChunks.length > 10 ? 800 : 300);
+    }
+  }
 
-              qualityRanking: i.quality_ranking,
-              engagementRateRanking: i.engagement_rate_ranking,
-              conversionRateRanking: i.conversion_rate_ranking,
+  //FETCH ONE ADSET
+  async syncAdSetInsight({
+    accountId,
+    adSetId,
+    since,
+    until,
+  }: {
+    accountId: string;
+    adSetId: string;
+    since: Date;
+    until: Date;
+  }) {
+    /**
+     * 🔥 TTL CHECK
+     */
+    const latest = await this.prisma.adSetInsight.findFirst({
+      where: {
+        adSetId,
+        range: InsightRange.DAILY,
+      },
+      orderBy: { updatedAt: 'desc' },
+      select: { updatedAt: true },
+    });
 
-              rawPayload: i,
+    if (isFresh(latest?.updatedAt)) {
+      console.log(`AdSet ${adSetId} insight still fresh`);
+      return;
+    }
 
-              updatedAt: new Date(),
-            },
-            create: {
-              impressions: +i.impressions,
-              clicks: +i.clicks,
-              spend: +i.spend,
-              ctr: +i.ctr,
-              cpc: +i.cpc,
-              actions: i.actions,
-              uniqueClicks: +i.unique_clicks,
-              uniqueCtr: +i.unique_ctr,
-              cpm: +i.cpm,
-              reach: +i.reach,
-              results: +i.results,
-              frequency: +i.frequency,
-              costPerResult: +i.cost_per_result,
+    this.init();
+    const adAccount = new AdAccount(accountId);
 
-              purchaseRoas: i.purchase_roas,
-              actionValues: i.action_values,
+    const cursor = await adAccount.getInsights(
+      AD_INSIGHT_FIELDS,
+      {
+        level: 'adset',
+        time_increment: 1,
+        summary: SUMMARY_AD_INSIGHT_FIELDS,
+        filtering: [
+          {
+            field: 'adset.id',
+            operator: 'EQUAL',
+            value: adSetId,
+          },
+        ],
+        time_range: {
+          since: since.toISOString().slice(0, 10),
+          until: until.toISOString().slice(0, 10),
+        },
+      },
+      true,
+    );
 
-              qualityRanking: i.quality_ranking,
-              engagementRateRanking: i.engagement_rate_ranking,
-              conversionRateRanking: i.conversion_rate_ranking,
+    const insights = await fetchAll(cursor);
+    const summary = cursor.summary;
 
-              level: LevelInsight.AD,
-              adId: i.ad_id,
-              dateStart: i.date_start,
-              dateStop: i.date_stop,
-              range: InsightRange.DAILY,
+    if (!insights.length) return;
 
-              campaignId: i?.campaign_id,
-              adSetId: i?.adset_id,
-              purchases: i.purchases,
-              avgWatchTime: i?.video_avg_time_watched_actions,
+    for (const insight of insights) {
+      await this.prisma.adSetInsight.upsert({
+        where: {
+          adSetId_dateStart_dateStop_range: {
+            adSetId: adSetId,
+            dateStart: insight.date_start,
+            dateStop: insight.date_stop,
+            range: InsightRange.DAILY,
+          },
+        },
+        update: {
+          ...extractCampaignMetrics(insight),
+          rawPayload: insight,
+        },
+        create: {
+          adSetId: adSetId,
+          level: LevelInsight.ADSET,
+          range: InsightRange.DAILY,
+          dateStart: insight.date_start,
+          dateStop: insight.date_stop,
+          ...extractCampaignMetrics(insight),
+          rawPayload: insight,
+        },
+      });
+    }
 
-              rawPayload: i,
-              updatedAt: new Date(),
-            },
-          }),
-        ),
+    /**
+     * 🔥 Update aggregated metrics vào adset
+     */
+    if (summary) {
+      await this.prisma.adSet.update({
+        where: { id: adSetId },
+        data: {
+          ...extractCampaignMetrics(summary),
+        },
+      });
+    }
+  }
+  //FETCH ONE CAMPAIGN
+  async syncCampaignInsight({
+    accountId,
+    campaignId,
+    since,
+    until,
+  }: {
+    accountId: string;
+    campaignId: string;
+    since: Date;
+    until: Date;
+  }) {
+    /**
+     * 🔥 TTL CHECK
+     */
+    const latest = await this.prisma.campaignInsight.findFirst({
+      where: { campaignId, range: 'DAILY' },
+      orderBy: { updatedAt: 'desc' },
+      select: { updatedAt: true },
+    });
+
+    if (isFresh(latest?.updatedAt)) {
+      console.log('campaign not change data');
+      return;
+    }
+
+    this.init();
+
+    const adAccount = new AdAccount(accountId);
+
+    const cursorMax = await adAccount.getInsights(
+      AD_INSIGHT_FIELDS,
+      {
+        level: 'campaign',
+        time_increment: 1,
+        summary: SUMMARY_AD_INSIGHT_FIELDS,
+        filtering: [
+          { field: 'campaign.id', operator: 'EQUAL', value: campaignId },
+        ],
+        time_range: {
+          since: since.toISOString().slice(0, 10),
+          until: until.toISOString().slice(0, 10),
+        },
+      },
+      true,
+    );
+
+    const insights = await fetchAll(cursorMax);
+    const insightSummary = cursorMax.summary;
+
+    if (!insights.length) return;
+
+    for (const insight of insights) {
+      await this.prisma.campaignInsight.upsert({
+        where: {
+          campaignId_dateStart_dateStop_range: {
+            campaignId,
+            dateStart: insight?.date_start,
+            dateStop: insight?.date_stop,
+            range: 'DAILY',
+          },
+        },
+        update: {
+          ...extractCampaignMetrics(insight),
+          rawPayload: insight,
+        },
+        create: {
+          campaignId,
+          level: 'CAMPAIGN',
+          dateStart: insight?.date_start,
+          dateStop: insight?.date_stop,
+          range: 'DAILY',
+          ...extractCampaignMetrics(insight[0]),
+          rawPayload: insight,
+        },
+      });
+    }
+
+    await this.prisma.campaignInsight.upsert({
+      where: {
+        campaignId_dateStart_dateStop_range: {
+          campaignId,
+          dateStart: insightSummary?.date_start,
+          dateStop: insightSummary?.date_stop,
+          range: 'MAX',
+        },
+      },
+      update: {
+        ...extractCampaignMetrics(insightSummary),
+        rawPayload: insightSummary,
+      },
+      create: {
+        campaignId,
+        level: 'CAMPAIGN',
+        dateStart: insightSummary?.date_start,
+        dateStop: insightSummary?.date_stop,
+        range: 'MAX',
+        ...extractCampaignMetrics(insightSummary),
+        rawPayload: insightSummary,
+      },
+    });
+
+    await this.prisma.campaign.update({
+      where: { id: campaignId },
+      data: { ...extractCampaignMetrics(insightSummary) },
+    });
+  }
+
+  async syncCampaignAudienceInsight({
+    accountId,
+    campaignId,
+    since,
+    until,
+  }: {
+    accountId: string;
+    campaignId: string;
+    since: Date;
+    until: Date;
+  }) {
+    /**
+     * 🔥 TTL CHECK
+     */
+    const latest = await this.prisma.campaignAudienceInsight.findFirst({
+      where: { campaignId, range: 'MAX' },
+      orderBy: { updatedAt: 'desc' },
+      select: { updatedAt: true },
+    });
+
+    if (isFresh(latest?.updatedAt)) {
+      console.log('audient not change data');
+      return;
+    }
+    await this.init();
+
+    const adAccount = new AdAccount(accountId);
+
+    const cursor = await adAccount.getInsights(
+      AD_INSIGHT_FIELDS,
+      {
+        level: 'campaign',
+        breakdowns: ['age', 'gender'],
+        filtering: [
+          {
+            field: 'campaign.id',
+            operator: 'EQUAL',
+            value: campaignId,
+          },
+        ],
+        time_range: {
+          since: since.toISOString().slice(0, 10),
+          until: until.toISOString().slice(0, 10),
+        },
+      },
+      true,
+    );
+
+    const insights = await fetchAll(cursor);
+
+    for (const insight of insights) {
+      await this.prisma.campaignAudienceInsight.upsert({
+        where: {
+          campaignId_age_gender_range: {
+            campaignId,
+            age: insight.age,
+            gender: insight.gender,
+            range: 'MAX',
+          },
+        },
+        update: {
+          ...extractCampaignMetrics(insight),
+          rawPayload: insight,
+        },
+        create: {
+          campaignId,
+          level: 'CAMPAIGN',
+          age: insight.age,
+          gender: insight.gender,
+          range: 'MAX',
+          ...extractCampaignMetrics(insight),
+          rawPayload: insight,
+        },
+      });
+    }
+  }
+
+  // =========================
+  // UPLOAD VIDEO (STREAM)
+  // =========================
+  async pollVideoUntilReady(videoId: string) {
+    const maxRetry = 30; // ví dụ: tối đa 1 phút (30 * 2s)
+
+    for (let i = 0; i < maxRetry; i++) {
+      await sleep(4000);
+      const video = await axios
+        .get(
+          `https://graph.facebook.com/v24.0/${videoId}?fields=id,title,description,length,permalink_url,source,picture&access_token=${process.env.SDK_FACEBOOK_ACCESS_TOKEN}`,
+        )
+        .then((videoRes) => {
+          return videoRes.data;
+        })
+        .catch((error) => {
+          return error;
+        });
+
+      // ✅ Điều kiện ready
+      if (video?.source) {
+        return video;
+      }
+
+      console.log(
+        `[VIDEO PROCESSING] retry ${i + 1}/${maxRetry}`,
+        video?.status?.video_status,
       );
-      if (adIdChunks.length > 10) await sleep(800);
-      else await sleep(300);
+    }
+
+    throw new Error('Video processing timeout');
+  }
+
+  async uploadVideoViaCurlLike(filePath: string, adAccountId: string) {
+    const form = new FormData();
+
+    form.append('source', fs.createReadStream(filePath));
+    form.append('access_token', process.env.SDK_FACEBOOK_ACCESS_TOKEN);
+
+    try {
+      // 1️⃣ Upload video
+      const uploadRes = await axios.post(
+        `https://graph.facebook.com/v24.0/${adAccountId}/advideos`,
+        form,
+        {
+          headers: form.getHeaders(),
+          maxBodyLength: Infinity,
+          maxContentLength: Infinity,
+        },
+      );
+
+      const videoId = uploadRes.data?.id;
+      if (!videoId) throw new Error('Upload failed: no video id');
+
+      // 2️⃣ Poll video info mỗi 2s
+      const video = await this.pollVideoUntilReady(videoId);
+
+      return video;
+    } catch (error) {
+      return parseMetaError(error);
+    }
+  }
+
+  // =========================
+  // UPLOAD MEDIA
+  // =========================
+  async uploadMedia(
+    file: Express.Multer.File,
+    adAccountId: string,
+    type: 'image' | 'video',
+  ) {
+    if (!file) throw new BadRequestException('File is required');
+    if (!adAccountId) throw new BadRequestException('adAccountId is required');
+
+    this.init();
+    const account = new AdAccount(adAccountId);
+
+    // Validate mime
+    if (
+      type === 'image' &&
+      !['image/jpeg', 'image/png'].includes(file.mimetype)
+    ) {
+      throw new BadRequestException('Only JPG/PNG allowed');
+    }
+    if (type === 'video' && !file.mimetype.startsWith('video/')) {
+      throw new BadRequestException('Only video files allowed');
+    }
+
+    try {
+      // =========================
+      // IMAGE (nhỏ → memory OK)
+      // =========================
+      if (type === 'image') {
+        if (!file.buffer)
+          throw new BadRequestException('Image buffer not found');
+
+        const result = await account.createAdImage(AD_IMAGE_FIELDS, {
+          bytes: file.buffer.toString('base64'),
+          name: file.originalname,
+        });
+
+        const imageKey = Object.keys(result._data.images ?? {})[0];
+        const imageHash = result._data.images[imageKey].hash;
+
+        const imageCursor = await account.getAdImages(
+          AD_IMAGE_FIELDS,
+          { hashes: [imageHash] },
+          true,
+        );
+
+        const image = (await fetchAll(imageCursor))[0];
+
+        if (!image) throw new BadRequestException('Upload image failed');
+
+        await this.prisma.adImage.upsert({
+          where: {
+            accountId_hash_id: {
+              id: image.id,
+              accountId: adAccountId,
+              hash: image.hash,
+            },
+          },
+          update: {
+            name: image.name,
+            createdTime: image.created_time
+              ? new Date(image.created_time)
+              : null,
+
+            url: image.url,
+            rawPayload: image,
+            status: image?.status,
+            createdAt: new Date(image.created_time),
+            updatedAt: new Date(image.updated_time),
+          },
+          create: {
+            id: image.id,
+            name: image.name,
+            accountId: adAccountId,
+            createdTime: image.created_time
+              ? new Date(image.created_time)
+              : null,
+
+            hash: image.hash,
+            url: image.url,
+            rawPayload: image,
+
+            status: image?.status,
+            createdAt: new Date(image.created_time),
+            updatedAt: new Date(image.updated_time),
+          },
+        });
+
+        return { ...image, raw: result._data.images };
+      }
+
+      // =========================
+      // VIDEO (disk → stream)
+      // =========================
+      if (!file.path) {
+        throw new BadRequestException('Video file must be stored on disk');
+      }
+
+      const uploadResult = await this.uploadVideoViaCurlLike(
+        file.path,
+        adAccountId,
+      );
+
+      // cleanup file sau upload
+      fs.unlink(file.path, () => null);
+
+      // lưu DB trạng thái PROCESSING
+      await this.prisma.adVideo.upsert({
+        where: { id: uploadResult.id, accountId: adAccountId },
+        create: {
+          id: uploadResult.id,
+          title: uploadResult?.name,
+          status: uploadResult?.status?.video_status,
+          accountId: adAccountId,
+          thumbnailUrl: uploadResult?.source || uploadResult?.picture,
+          rawPayload: uploadResult,
+          createdAt: uploadResult?.created_time,
+          createdTime: uploadResult?.created_time,
+        },
+        update: {
+          title: uploadResult?.name,
+          accountId: adAccountId,
+          status: uploadResult?.status?.video_status,
+          thumbnailUrl: uploadResult?.source || uploadResult?.picture,
+          rawPayload: uploadResult,
+          createdAt: uploadResult?.created_time,
+          createdTime: uploadResult?.created_time,
+        },
+      });
+      return { type: 'video', ...uploadResult };
+    } catch (err) {
+      const metaError = parseMetaError(err);
+      throw new BadRequestException(metaError);
     }
   }
 
