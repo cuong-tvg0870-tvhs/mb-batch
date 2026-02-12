@@ -55,6 +55,9 @@ export class TaskCron {
 
   async onModuleInit() {
     this.logger.log('🚀 App started → scan video immediately');
+    // await this.syncCampaignCore();
+    await this.syncMaxInsights();
+    // await this.syncDailyInsights();
   }
 
   @Cron('0 0 0,12 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
@@ -64,9 +67,9 @@ export class TaskCron {
 
   @Cron('0 10 0,6,12,18 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncMaxInsights() {
-    await this.syncMaxCampaignInsights();
+    // await this.syncMaxCampaignInsights();
     await this.syncMaxAdsetInsights();
-    await this.syncMaxAdInsights();
+    // await this.syncMaxAdInsights();
   }
 
   @Cron('0 20 3,9,15,21 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
@@ -518,6 +521,60 @@ export class TaskCron {
           });
         }
 
+        const audientCursor = await adAccount.getInsights(
+          AD_INSIGHT_FIELDS,
+          {
+            level: 'adset',
+            date_preset: 'maximum',
+            filtering: [{ field: 'adset.id', operator: 'IN', value: idsChunk }],
+            breakdowns: ['age', 'gender'], // 👈 thêm dòng này
+          },
+          true,
+        );
+
+        const audients = await fetchAll(audientCursor);
+        for (const audient of audients) {
+          if (!audient.adset_id) continue;
+
+          await this.prisma.adsetAudienceInsight.upsert({
+            where: {
+              adsetId_age_gender_level_range_dateStart: {
+                adsetId: audient.adset_id,
+                age: audient.age,
+                gender: audient.gender,
+                level: LevelInsight.ADSET,
+                dateStart: audient.date_start,
+                range: InsightRange.MAX,
+              },
+            },
+            update: {
+              age: audient.age,
+              gender: audient.gender,
+              dateStart: audient.date_start,
+              dateStop: audient.date_stop,
+              ...extractCampaignMetrics(audient),
+              rawPayload: audient,
+            },
+            create: {
+              adsetId: audient.adset_id,
+              age: audient.age,
+              gender: audient.gender,
+              level: LevelInsight.ADSET,
+              range: InsightRange.MAX,
+
+              dateStart: audient.date_start,
+              dateStop: audient.date_stop,
+              ...extractCampaignMetrics(audient),
+              rawPayload: audient,
+            },
+          });
+
+          await this.prisma.ad.update({
+            where: { id: audient.ad_id },
+            data: { ...extractCampaignMetrics(audient) },
+          });
+        }
+
         await sleep(800);
       }
     }
@@ -633,7 +690,7 @@ export class TaskCron {
       }
     }
 
-    this.logger.log('✅ DAILY Campaign DONE');
+    this.logger.log('✅ DAILY ADSET DONE');
   }
   //
   /* =====================================================
@@ -762,7 +819,7 @@ export class TaskCron {
 
       try {
         this.logger.log(
-          `📅 Adset ${max.adId} → ${since.format(
+          `📅 AD ${max.adId} → ${since.format(
             'DD/MM/YYYY',
           )} → ${maxStop.format('DD/MM/YYYY')}`,
         );
@@ -815,7 +872,7 @@ export class TaskCron {
       }
     }
 
-    this.logger.log('✅ DAILY Campaign DONE');
+    this.logger.log('✅ DAILY AD DONE');
   }
   //
 

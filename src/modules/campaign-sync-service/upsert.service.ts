@@ -20,6 +20,9 @@ export class UpsertService {
     accountId: string,
     c: MetaCampaignTree,
   ) {
+    const systemCampaign = await tx.systemCampaign.findFirst({
+      where: { meta_id: c.id },
+    });
     const campaignUpdate = await tx.campaign.upsert({
       where: { id: c.id },
       update: {
@@ -34,7 +37,7 @@ export class UpsertService {
         lastFetchedAt: new Date(),
         createdAt: c.created_time ? new Date(c.created_time) : undefined,
         updatedAt: c.updated_time ? new Date(c.updated_time) : undefined,
-        systemCampaignId: c.systemCampaignId || undefined,
+        systemCampaignId: systemCampaign?.id || undefined,
 
         ...(c?.insights?.data && Number(c?.insights?.data?.length) > 0
           ? extractCampaignMetrics(c.insights.data[0])
@@ -55,7 +58,7 @@ export class UpsertService {
         createdAt: c.created_time ? new Date(c.created_time) : undefined,
         updatedAt: c.updated_time ? new Date(c.updated_time) : undefined,
 
-        systemCampaignId: c.systemCampaignId || undefined,
+        systemCampaignId: systemCampaign?.id || undefined,
 
         ...(c?.insights?.data && Number(c?.insights?.data?.length) > 0
           ? extractCampaignMetrics(c.insights.data[0])
