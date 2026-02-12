@@ -368,51 +368,12 @@ export function getDateRange(since: Date, until: Date): string[] {
   return dates;
 }
 
-export function mapCommonInsightFields(insight: any) {
-  return {
-    impressions: Number(insight.impressions ?? 0),
-    reach: insight.reach ? Number(insight.reach) : null,
-    frequency: insight.frequency ? Number(insight.frequency) : null,
-
-    clicks: Number(insight.clicks ?? 0),
-    uniqueClicks: insight.unique_clicks ? Number(insight.unique_clicks) : null,
-
-    ctr: insight.ctr ? Number(insight.ctr) : null,
-    uniqueCtr: insight.unique_ctr ? Number(insight.unique_ctr) : null,
-
-    cpc: insight.cpc ? Number(insight.cpc) : null,
-    cpm: insight.cpm ? Number(insight.cpm) : null,
-
-    spend: Number(insight.spend ?? 0),
-
-    results: insight.results ? Number(insight.results) : null,
-    costPerResult: insight.cost_per_result
-      ? Number(insight.cost_per_result)
-      : null,
-
-    purchases: insight.purchases ? Number(insight.purchases) : null,
-    purchaseValue: insight.purchase_value
-      ? Number(insight.purchase_value)
-      : null,
-
-    roas: insight.roas ? Number(insight.roas) : null,
-
-    qualityRanking: insight.quality_ranking ?? null,
-    engagementRateRanking: insight.engagement_rate_ranking ?? null,
-    conversionRateRanking: insight.conversion_rate_ranking ?? null,
-
-    actions: insight.actions ?? null,
-    actionValues: insight.action_values ?? null,
-    purchaseRoas: insight.purchase_roas ?? null,
-
-    rawPayload: insight,
-  };
-}
 const INSIGHT_TTL_MS = 3 * 60 * 60 * 1000;
 export function isFresh(date?: Date | null) {
   if (!date) return false;
   return Date.now() - new Date(date).getTime() < INSIGHT_TTL_MS;
 }
+
 export function extractCampaignMetrics(insight: any) {
   function toNumber(value: any, defaultValue = 0): number {
     if (value === null || value === undefined) return defaultValue;
@@ -432,12 +393,6 @@ export function extractCampaignMetrics(insight: any) {
     return toNumber(found?.value);
   }
 
-  function getPurchaseRoas(purchaseRoas: any[] | undefined) {
-    if (!purchaseRoas) return 0;
-    const found = purchaseRoas.find((r) => r.action_type?.includes('purchase'));
-    return toNumber(found?.value);
-  }
-
   function getVideoMetric(actions: any[] | undefined) {
     if (!actions || actions.length === 0) return 0;
     return toNumber(actions[0]?.value);
@@ -449,21 +404,21 @@ export function extractCampaignMetrics(insight: any) {
   const clicks = toNumber(insight?.clicks);
   const spend = toNumber(insight?.spend);
 
-  // ===== PURCHASE =====
+  // ===== PURCHASE (COUNT) =====
   const purchases = getActionValue(
     insight?.actions,
-    'offsite_conversion.fb_pixel_purchase',
+    'onsite_conversion.purchase',
   );
 
+  // ===== PURCHASE VALUE (MONEY – đã quy đổi ở tầng fetch) =====
   const purchaseValue = getActionValueFromValues(
     insight?.action_values,
-    'offsite_conversion.fb_pixel_purchase',
+    'onsite_conversion.purchase',
   );
 
-  // ===== ROAS =====
-  const roasMeta = getPurchaseRoas(insight?.purchase_roas);
+  // ===== ROAS (❗ CHUẨN CỦA CTY) =====
   const roasCalculated = spend > 0 ? purchaseValue / spend : 0;
-  const roas = roasMeta || roasCalculated;
+  const roas = roasCalculated;
 
   // ===== DERIVED =====
   const cvr = clicks > 0 ? purchases / clicks : 0;
@@ -472,22 +427,40 @@ export function extractCampaignMetrics(insight: any) {
 
   // ===== VIDEO RAW =====
   const videoPlay = getVideoMetric(insight?.video_play_actions);
-  const video3s = toNumber(
-    insight?.actions?.find((action) => action?.action_type == 'video_view')
-      ?.value,
-  );
+
+  const video3s = getActionValue(insight?.actions, 'video_view');
 
   const videoThruplay = getVideoMetric(insight?.video_thruplay_watched_actions);
+
   const video100 = getVideoMetric(insight?.video_p100_watched_actions);
+
   const videoAvgWatchTime = getVideoMetric(
     insight?.video_avg_time_watched_actions,
   );
 
-  // ===== VIDEO RATE (🔥 NEW) =====
+  // ===== VIDEO RATE =====
   const hookRate =
     videoPlay > 0 ? +((video3s / videoPlay) * 100).toFixed(2) : 0;
 
   const holdRate = video3s > 0 ? +((video100 / video3s) * 100).toFixed(2) : 0;
+
+  // ===== EXTRA ACTIONS (MATCH GAS) =====
+  const registrationComplete =
+    getActionValue(insight?.actions, 'complete_registration') +
+    getActionValue(
+      insight?.actions,
+      'offsite_conversion.complete_registration',
+    );
+
+  const messagingStarted = getActionValue(
+    insight?.actions,
+    'onsite_conversion.messaging_conversation_started_7d',
+  );
+
+  const outboundClicks = getActionValue(
+    insight?.outbound_clicks,
+    'outbound_click',
+  );
 
   return {
     impressions,
@@ -505,18 +478,20 @@ export function extractCampaignMetrics(insight: any) {
 
     spend,
 
+    // ===== RESULT =====
     results: purchases,
     costPerResult,
 
     purchases,
     purchaseValue,
-
     roas,
-    roasMeta,
-    roasCalculated,
 
     cvr,
     adsCostRatio,
+
+    registrationComplete,
+    messagingStarted,
+    outboundClicks,
 
     // ===== VIDEO =====
     videoPlay,
@@ -532,8 +507,8 @@ export function extractCampaignMetrics(insight: any) {
     engagementRateRanking: insight?.engagement_rate_ranking ?? null,
     conversionRateRanking: insight?.conversion_rate_ranking ?? null,
 
+    // DEBUG / RAW
     actions: insight?.actions ?? null,
     actionValues: insight?.action_values ?? null,
-    purchaseRoas: insight?.purchase_roas ?? null,
   };
 }

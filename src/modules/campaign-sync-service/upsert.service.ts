@@ -1,47 +1,17 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { AdAccount, AdVideo } from 'facebook-nodejs-business-sdk';
 import {
   MetaAd,
   MetaAdSet,
   MetaCampaignTree,
   MetaCreative,
 } from '../../common/dtos/types.dto';
-import {
-  extractCampaignMetrics,
-  fetchAll,
-  toPrismaJson,
-} from '../../common/utils';
-import {
-  AD_IMAGE_FIELDS,
-  AD_VIDEO_FIELDS,
-} from '../../common/utils/meta-field';
+import { extractCampaignMetrics, toPrismaJson } from '../../common/utils';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
 export class UpsertService {
   constructor(private prisma: PrismaService) {}
-
-  async syncCampaignTree(
-    accountId: string,
-    adAccount: AdAccount,
-    data: MetaCampaignTree,
-  ) {
-    return this.prisma.$transaction(async (tx) => {
-      await this.upsertCampaign(tx, accountId, data);
-
-      for (const adset of data.adsets ?? []) {
-        await this.upsertAdSet(tx, accountId, data.id, adset);
-
-        for (const ad of adset.ads ?? []) {
-          await this.syncAdAssetsLegacy(tx, adAccount, accountId, ad);
-          await this.upsertCreativeLegacy(tx, accountId, ad);
-          await this.syncCidLegacy(tx, accountId, ad);
-          await this.upsertAdLegacy(tx, accountId, data.id, adset.id, ad);
-        }
-      }
-    });
-  }
 
   /* ======================= CAMPAIGN ======================= */
 
@@ -92,41 +62,6 @@ export class UpsertService {
           : {}),
       },
     });
-
-    if (
-      campaignUpdate &&
-      c?.insights?.data &&
-      Number(c?.insights?.data?.length) > 0
-    ) {
-      const insightSumary: Record<string, any> =
-        c?.insights?.data && Number(c?.insights?.data?.length) > 0
-          ? c.insights.data[0]
-          : {};
-
-      await tx.campaignInsight.upsert({
-        where: {
-          campaignId_dateStart_dateStop_range: {
-            campaignId: c.id,
-            dateStart: insightSumary?.date_start,
-            dateStop: insightSumary?.date_stop,
-            range: 'MAX',
-          },
-        },
-        update: {
-          ...extractCampaignMetrics(insightSumary),
-          rawPayload: insightSumary,
-        },
-        create: {
-          campaignId: c.id,
-          level: 'CAMPAIGN',
-          range: 'MAX',
-          dateStart: insightSumary?.date_start,
-          dateStop: insightSumary?.date_stop,
-          ...extractCampaignMetrics(insightSumary),
-          rawPayload: insightSumary,
-        },
-      });
-    }
 
     return campaignUpdate;
   }
@@ -183,161 +118,7 @@ export class UpsertService {
       },
     });
 
-    if (
-      updated &&
-      as?.insights?.data &&
-      Number(as?.insights?.data?.length) > 0
-    ) {
-      const insightSumary: Record<string, any> =
-        as?.insights?.data && Number(as?.insights?.data?.length) > 0
-          ? as?.insights?.data[0]
-          : {};
-
-      await tx.adSetInsight.upsert({
-        where: {
-          adSetId_dateStart_dateStop_range: {
-            adSetId: as.id,
-            dateStart: insightSumary?.date_start,
-            dateStop: insightSumary?.date_stop,
-            range: 'MAX',
-          },
-        },
-        update: {
-          ...extractCampaignMetrics(insightSumary),
-          rawPayload: insightSumary,
-        },
-        create: {
-          adSetId: as.id,
-          level: 'ADSET',
-          range: 'MAX',
-          dateStart: insightSumary?.date_start,
-          dateStop: insightSumary?.date_stop,
-          ...extractCampaignMetrics(insightSumary),
-          rawPayload: insightSumary,
-        },
-      });
-    }
     return updated;
-  }
-
-  /* ======================= ASSETS ======================= */
-
-  async syncAdAssetsLegacy(
-    tx: Prisma.TransactionClient,
-    adAccount: AdAccount,
-    accountId: string,
-    ad: MetaAd,
-  ) {
-    /** IMAGE */
-    if (ad.creative?.image_hash) {
-      const exists = await tx.adImage.findFirst({
-        where: { hash: ad.creative.image_hash },
-      });
-
-      if (!exists) {
-        const cursor = await adAccount.getAdImages(
-          AD_IMAGE_FIELDS,
-          { hashes: [ad.creative.image_hash] },
-          true,
-        );
-
-        const image = (await fetchAll(cursor))[0];
-        if (image) {
-          await tx.adImage.upsert({
-            where: {
-              accountId_hash_id: {
-                id: image.id,
-                accountId,
-                hash: image.hash,
-              },
-            },
-            update: {
-              name: image.name,
-              url: image.permalink_url || image.url,
-              permalink_url: image.permalink_url,
-              height: image.height,
-              width: image.width,
-              rawPayload: toPrismaJson(image),
-              status: image.status,
-              createdTime: image.created_time
-                ? new Date(image.created_time)
-                : undefined,
-              createdAt: image.created_time
-                ? new Date(image.created_time)
-                : undefined,
-              updatedAt: image.updated_time
-                ? new Date(image.updated_time)
-                : undefined,
-            },
-            create: {
-              id: image.id,
-              accountId,
-              hash: image.hash,
-              name: image.name,
-              url: image.permalink_url || image.url,
-              permalink_url: image.permalink_url,
-
-              height: image.height,
-              width: image.width,
-              rawPayload: toPrismaJson(image),
-              status: image.status,
-              createdTime: image.created_time
-                ? new Date(image.created_time)
-                : undefined,
-              createdAt: image.created_time
-                ? new Date(image.created_time)
-                : undefined,
-              updatedAt: image.updated_time
-                ? new Date(image.updated_time)
-                : undefined,
-            },
-          });
-        }
-      }
-    }
-
-    /** VIDEO */
-    if (ad.creative?.video_id) {
-      const exists = await tx.adVideo.findFirst({
-        where: { id: ad.creative.video_id },
-      });
-
-      if (!exists) {
-        const videoCursor = await new AdVideo(ad.creative.video_id).read(
-          AD_VIDEO_FIELDS,
-        );
-
-        const uploadResult = videoCursor._data;
-        await this.prisma.adVideo.upsert({
-          where: { id: uploadResult.id },
-          create: {
-            id: uploadResult.id,
-            title: uploadResult?.title,
-            accountId: adAccount?.id,
-            source:
-              uploadResult.source ||
-              `https://facebook.com/${uploadResult.permalink_url}`,
-            status: uploadResult?.status?.video_status,
-            thumbnailUrl: uploadResult?.source || uploadResult?.picture,
-            length: uploadResult.length,
-
-            rawPayload: uploadResult,
-          },
-          update: {
-            title: uploadResult?.title,
-            accountId: adAccount?.id,
-            source:
-              uploadResult.source ||
-              `https://facebook.com/${uploadResult.permalink_url}`,
-            status: uploadResult?.status?.video_status,
-            thumbnailUrl: uploadResult?.source || uploadResult?.picture,
-            length: uploadResult.length,
-
-            rawPayload: uploadResult,
-          },
-        });
-      }
-    }
   }
 
   /* ======================= CREATIVE ======================= */
@@ -396,24 +177,6 @@ export class UpsertService {
     });
   }
 
-  /* ======================= CID ======================= */
-
-  async syncCidLegacy(
-    tx: Prisma.TransactionClient,
-    accountId: string,
-    ad: MetaAd,
-  ) {
-    const match = ad.name?.match(/CID\d+/);
-    if (!match) return;
-
-    const cid = match[0];
-    await tx.cidGroup.upsert({
-      where: { cid },
-      update: { cid, name: cid, accountId },
-      create: { cid, name: cid, accountId },
-    });
-  }
-
   /* ======================= AD ======================= */
 
   async upsertAdLegacy(
@@ -460,40 +223,6 @@ export class UpsertService {
       },
     });
 
-    if (
-      updated &&
-      ad?.insights?.data &&
-      Number(ad?.insights?.data?.length) > 0
-    ) {
-      const insightSumary: Record<string, any> =
-        ad?.insights?.data && Number(ad?.insights?.data?.length) > 0
-          ? ad?.insights?.data[0]
-          : {};
-
-      await tx.adInsight.upsert({
-        where: {
-          adId_dateStart_dateStop_range: {
-            adId: ad.id,
-            dateStart: insightSumary?.date_start,
-            dateStop: insightSumary?.date_stop,
-            range: 'MAX',
-          },
-        },
-        update: {
-          ...extractCampaignMetrics(insightSumary),
-          rawPayload: insightSumary,
-        },
-        create: {
-          adId: ad.id,
-          level: 'AD',
-          range: 'MAX',
-          dateStart: insightSumary?.date_start,
-          dateStop: insightSumary?.date_stop,
-          ...extractCampaignMetrics(insightSumary),
-          rawPayload: insightSumary,
-        },
-      });
-    }
     return updated;
   }
 }
