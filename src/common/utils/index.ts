@@ -422,7 +422,7 @@ export function extractCampaignMetrics(insight: any) {
 
   // ===== DERIVED =====
   const cvr = clicks > 0 ? purchases / clicks : 0;
-  const costPerResult = purchases > 0 ? spend / purchases : 0;
+
   const adsCostRatio = roas > 0 ? 1 / roas : 0;
 
   // ===== VIDEO RAW =====
@@ -458,6 +458,8 @@ export function extractCampaignMetrics(insight: any) {
       insight?.action_values,
       'offsite_conversion.complete_registration',
     );
+  const results = Number(purchases) + Number(registrationComplete);
+  const costPerResult = results > 0 ? spend / results : 0;
 
   const messagingStarted = getActionValue(
     insight?.actions,
