@@ -4,7 +4,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
-import { InsightRange, LevelInsight } from '@prisma/client';
+import { CreativeStatus, InsightRange, LevelInsight } from '@prisma/client';
 import * as dayjs from 'dayjs';
 import {
   Ad,
@@ -55,8 +55,11 @@ export class TaskCron {
   async onModuleInit() {
     this.logger.log('🚀 App started → scan video immediately');
     // await this.syncCampaignCore();
-    await this.syncMaxInsights();
+    // await this.syncMaxInsights();
+    // await this.syncDailyAdInsights();
+
     // await this.syncDailyInsights();
+    await this.calculateCreativeInsightFromAdInsight();
   }
 
   @Cron('0 0 0,12 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
@@ -68,7 +71,9 @@ export class TaskCron {
   async syncMaxInsights() {
     // await this.syncMaxCampaignInsights();
     // await this.syncMaxAdsetInsights();
+    // await this.syncMaxAdsetAudientInsights();
     await this.syncMaxAdInsights();
+    await this.syncMaxAdAudientInsights();
   }
 
   @Cron('0 20 3,9,15,21 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
@@ -512,6 +517,27 @@ export class TaskCron {
           });
         }
 
+        await sleep(800);
+      }
+    }
+
+    this.logger.log('✅ MAX ADSET DONE');
+  }
+
+  async syncMaxAdsetAudientInsights() {
+    this.logger.log('🔄 Sync MAX ADSET Audient Insight');
+    this.init();
+
+    const adsets = await this.prisma.adSet.findMany({
+      select: { id: true, accountId: true },
+    });
+
+    const byAccount = this.groupByAccount(adsets);
+
+    for (const [accountId, ids] of Object.entries(byAccount)) {
+      const adAccount = new AdAccount(accountId);
+
+      for (const idsChunk of chunk(ids, 50)) {
         const audientCursor = await adAccount.getInsights(
           AD_INSIGHT_FIELDS,
           {
@@ -567,9 +593,8 @@ export class TaskCron {
       }
     }
 
-    this.logger.log('✅ MAX ADSET DONE');
+    this.logger.log('✅ MAX ADSET AUDIENT DONE');
   }
-
   /* =====================================================
      ADSET DAILY (dựa theo MAX)
   ===================================================== */
@@ -749,6 +774,78 @@ export class TaskCron {
           });
         }
 
+        // const audientCursor = await adAccount.getInsights(
+        //   AD_INSIGHT_FIELDS,
+        //   {
+        //     level: 'ad',
+        //     date_preset: 'maximum',
+        //     action_attribution_windows: '7d_click',
+        //     action_breakdowns: 'action_type',
+        //     filtering: [{ field: 'ad.id', operator: 'IN', value: idsChunk }],
+        //     breakdowns: ['age', 'gender'], // 👈 thêm dòng này
+        //   },
+        //   true,
+        // );
+
+        // const audients = await fetchAll(audientCursor);
+        // for (const audient of audients) {
+        //   if (!audient.ad_id) continue;
+
+        //   await this.prisma.adAudienceInsight.upsert({
+        //     where: {
+        //       adId_age_gender_level_range_dateStart: {
+        //         adId: audient.ad_id,
+        //         age: audient.age,
+        //         gender: audient.gender,
+        //         level: LevelInsight.AD,
+        //         dateStart: audient.date_start,
+        //         range: InsightRange.MAX,
+        //       },
+        //     },
+        //     update: {
+        //       age: audient.age,
+        //       gender: audient.gender,
+        //       dateStart: audient.date_start,
+        //       dateStop: audient.date_stop,
+        //       ...extractCampaignMetrics(audient),
+        //       rawPayload: audient,
+        //     },
+        //     create: {
+        //       adId: audient.ad_id,
+        //       age: audient.age,
+        //       gender: audient.gender,
+        //       level: LevelInsight.AD,
+        //       range: InsightRange.MAX,
+
+        //       dateStart: audient.date_start,
+        //       dateStop: audient.date_stop,
+        //       ...extractCampaignMetrics(audient),
+        //       rawPayload: audient,
+        //     },
+        //   });
+        // }
+
+        await sleep(800);
+      }
+    }
+
+    this.logger.log('✅ MAX AD DONE');
+  }
+
+  async syncMaxAdAudientInsights() {
+    this.logger.log('🔄 Sync MAX Ad Audient Insight');
+    this.init();
+
+    const ads = await this.prisma.ad.findMany({
+      select: { id: true, accountId: true },
+    });
+
+    const byAccount = this.groupByAccount(ads);
+
+    for (const [accountId, ids] of Object.entries(byAccount)) {
+      const adAccount = new AdAccount(accountId);
+
+      for (const idsChunk of chunk(ids, 50)) {
         const audientCursor = await adAccount.getInsights(
           AD_INSIGHT_FIELDS,
           {
@@ -804,7 +901,7 @@ export class TaskCron {
       }
     }
 
-    this.logger.log('✅ MAX AD DONE');
+    this.logger.log('✅ MAX AD AUDIENT DONE');
   }
 
   /* =====================================================
@@ -917,7 +1014,355 @@ export class TaskCron {
 
     this.logger.log('✅ DAILY AD DONE');
   }
-  //
+
+  async calculateCreativeInsightFromAdInsight() {
+    console.log('Start calculate CreativeInsight...');
+
+    /**
+     * 1️⃣ Lấy toàn bộ creative + ads
+     */
+    const creatives = await this.prisma.creative.findMany({
+      // where: { id: '731038106513088' },
+      select: {
+        id: true,
+        ads: {
+          select: { id: true, adInsights: true },
+        },
+      },
+    });
+
+    for (const creative of creatives) {
+      const adIds = creative.ads.map((a) => a.id);
+      if (!adIds.length) continue;
+
+      /**
+       * 2️⃣ Group AdInsight theo dateStart
+       */
+      const grouped = await this.prisma.adInsight.groupBy({
+        by: ['dateStart'],
+        where: { adId: { in: adIds }, range: 'DAILY' },
+        _sum: {
+          impressions: true,
+          reach: true,
+          clicks: true,
+          spend: true,
+          results: true,
+          purchases: true,
+          purchaseValue: true,
+          registrationComplete: true,
+          messagingStarted: true,
+          outboundClicks: true,
+          videoView: true,
+          videoThruplay: true,
+
+          registrationCompleteValue: true,
+          messagingStartedValue: true,
+          outboundClicksValue: true,
+          videoPlay: true,
+          video3s: true,
+          video100: true,
+          ctr: true,
+          uniqueCtr: true,
+          cvr: true,
+          adsCostRatio: true,
+          roas: true,
+          frequency: true,
+          hookRate: true,
+          holdRate: true,
+          cpc: true,
+          cpm: true,
+          costPerResult: true,
+        },
+      });
+
+      const groupedMax = await this.prisma.adInsight.aggregate({
+        where: {
+          adId: { in: adIds },
+          range: 'MAX',
+        },
+        _sum: {
+          impressions: true,
+          reach: true,
+          clicks: true,
+          spend: true,
+          results: true,
+          purchases: true,
+          purchaseValue: true,
+          registrationComplete: true,
+          messagingStarted: true,
+          outboundClicks: true,
+          videoView: true,
+          videoThruplay: true,
+
+          registrationCompleteValue: true,
+          messagingStartedValue: true,
+          outboundClicksValue: true,
+          videoPlay: true,
+          video3s: true,
+          video100: true,
+          ctr: true,
+          uniqueCtr: true,
+          cvr: true,
+          adsCostRatio: true,
+          roas: true,
+          frequency: true,
+          hookRate: true,
+          holdRate: true,
+          cpc: true,
+          cpm: true,
+          costPerResult: true,
+        },
+      });
+      const today = dayjs().format('YYYY-MM-DD');
+
+      const sevenDaysAgo = dayjs().subtract(6, 'day').format('YYYY-MM-DD');
+      const last7d = await this.prisma.adInsight.aggregate({
+        where: {
+          adId: { in: adIds },
+          range: 'DAILY',
+          dateStart: {
+            gte: sevenDaysAgo,
+            lte: today,
+          },
+        },
+        _sum: {
+          impressions: true,
+          reach: true,
+          clicks: true,
+          spend: true,
+          results: true,
+          purchases: true,
+          purchaseValue: true,
+          registrationComplete: true,
+          messagingStarted: true,
+          outboundClicks: true,
+          videoView: true,
+          videoThruplay: true,
+
+          registrationCompleteValue: true,
+          messagingStartedValue: true,
+          outboundClicksValue: true,
+          videoPlay: true,
+          video3s: true,
+          video100: true,
+          ctr: true,
+          uniqueCtr: true,
+          cvr: true,
+          adsCostRatio: true,
+          roas: true,
+          frequency: true,
+          hookRate: true,
+          holdRate: true,
+          cpc: true,
+          cpm: true,
+          costPerResult: true,
+        },
+      });
+
+      const threeDaysAgo = dayjs().subtract(2, 'day').format('YYYY-MM-DD');
+      const last3d = await this.prisma.adInsight.aggregate({
+        where: {
+          adId: { in: adIds },
+          range: 'DAILY',
+          dateStart: {
+            gte: sevenDaysAgo,
+            lte: today,
+          },
+        },
+        _sum: {
+          impressions: true,
+          reach: true,
+          clicks: true,
+          spend: true,
+          results: true,
+          purchases: true,
+          purchaseValue: true,
+          registrationComplete: true,
+          messagingStarted: true,
+          outboundClicks: true,
+          videoView: true,
+          videoThruplay: true,
+
+          registrationCompleteValue: true,
+          messagingStartedValue: true,
+          outboundClicksValue: true,
+          videoPlay: true,
+          video3s: true,
+          video100: true,
+          ctr: true,
+          uniqueCtr: true,
+          cvr: true,
+          adsCostRatio: true,
+          roas: true,
+          frequency: true,
+          hookRate: true,
+          holdRate: true,
+          cpc: true,
+          cpm: true,
+          costPerResult: true,
+        },
+      });
+      /**
+       * 3️⃣ Upsert từng dateStart
+       */
+      for (const row of grouped) {
+        const sum = row._sum;
+
+        await this.prisma.creativeInsight.upsert({
+          where: {
+            creativeId_dateStart_range: {
+              creativeId: creative.id,
+              dateStart: row.dateStart,
+              range: 'DAILY',
+            },
+          },
+          update: sum,
+          create: {
+            creativeId: creative.id,
+            dateStart: row.dateStart,
+            dateStop: row.dateStart,
+            range: 'DAILY',
+            ...sum,
+          },
+        });
+      }
+
+      await this.prisma.creativeInsight.upsert({
+        where: {
+          creativeId_dateStart_range: {
+            creativeId: creative.id,
+            dateStart: '1975-01-01',
+            range: 'MAX',
+          },
+        },
+        update: groupedMax._sum,
+        create: {
+          creativeId: creative.id,
+          range: 'MAX',
+          dateStart: '1975-01-01',
+          dateStop: today,
+
+          ...groupedMax._sum,
+        },
+      });
+
+      await this.prisma.creativeInsight.upsert({
+        where: {
+          creativeId_dateStart_range: {
+            creativeId: creative.id,
+            dateStart: sevenDaysAgo,
+            range: 'DAY_7',
+          },
+        },
+        update: last7d._sum,
+        create: {
+          creativeId: creative.id,
+          range: 'DAY_7',
+          dateStart: sevenDaysAgo,
+          dateStop: today,
+          ...last7d._sum,
+        },
+      });
+
+      await this.prisma.creativeInsight.upsert({
+        where: {
+          creativeId_dateStart_range: {
+            creativeId: creative.id,
+            dateStart: threeDaysAgo,
+            range: 'DAY_3',
+          },
+        },
+        update: last3d._sum,
+        create: {
+          creativeId: creative.id,
+          range: 'DAY_3',
+          dateStart: threeDaysAgo,
+          dateStop: today,
+          ...last3d._sum,
+        },
+      });
+
+      const maxSpend = groupedMax._sum.spend ?? 0;
+      const maxRevenue = groupedMax._sum.purchaseValue ?? 0;
+      const maxPurchases = groupedMax._sum.purchases ?? 0;
+      const maxClicks = groupedMax._sum.clicks ?? 0;
+      const maxImpressions = groupedMax._sum.impressions ?? 0;
+
+      const roasMax = maxSpend > 0 ? maxRevenue / maxSpend : 0;
+      const ctrMax = maxImpressions > 0 ? maxClicks / maxImpressions : 0;
+
+      const spend7d = last7d._sum.spend ?? 0;
+      const revenue7d = last7d._sum.purchaseValue ?? 0;
+      const roas7d = spend7d > 0 ? revenue7d / spend7d : 0;
+
+      const spend3d = last3d._sum.spend ?? 0;
+      const revenue3d = last3d._sum.purchaseValue ?? 0;
+      const roas3d = spend3d > 0 ? revenue3d / spend3d : 0;
+
+      let status: CreativeStatus = CreativeStatus.TEST;
+
+      // ===============================
+      // RULE ENGINE
+      // ===============================
+
+      // TEST
+      if (maxSpend === 0) {
+        status = CreativeStatus.TEST;
+      }
+
+      // NEED_SPEND
+      else if (maxSpend > 0 && maxSpend <= 100000) {
+        status = CreativeStatus.NEED_SPEND;
+      }
+
+      // SCALE_P1
+      else if (
+        (maxSpend > 100000 && maxSpend <= 500000 && roasMax >= 2) ||
+        (maxSpend > 500000 && roasMax >= 2.2) ||
+        roas7d >= 2.5
+      ) {
+        status = CreativeStatus.SCALE_P1;
+      }
+
+      // SCALE_P2
+      else if (
+        (maxSpend > 100000 && maxSpend <= 500000 && roasMax >= 1.5) ||
+        (maxSpend > 500000 && roasMax >= 1.8 && ctrMax > 0.03) ||
+        (roas7d >= 2.2 && roas3d >= 2.2)
+      ) {
+        status = CreativeStatus.SCALE_P2;
+      }
+
+      // REVIEW
+      else if (
+        (maxSpend > 100000 &&
+          maxSpend <= 500000 &&
+          maxPurchases < 1 &&
+          ctrMax > 0.03) ||
+        (maxSpend > 500000 && roasMax < 1.8 && ctrMax > 0.03)
+      ) {
+        status = CreativeStatus.REVIEW;
+      }
+
+      // OFF
+      else if (
+        (maxSpend > 100000 &&
+          maxSpend <= 500000 &&
+          maxPurchases < 1 &&
+          ctrMax < 0.03) ||
+        (maxSpend > 500000 && roasMax < 1.8 && ctrMax < 0.03)
+      ) {
+        status = CreativeStatus.OFF;
+      }
+
+      await this.prisma.creative.update({
+        where: { id: creative.id },
+        data: { performanceStatus: status, ...groupedMax._sum },
+      });
+    }
+
+    console.log('CreativeInsight updated');
+  }
 
   // HELPER
   private groupByAccount(records: any[]) {

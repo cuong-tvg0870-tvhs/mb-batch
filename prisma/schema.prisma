@@ -596,6 +596,8 @@ model Creative {
     imageUrl     String?
     thumbnailUrl String?
 
+    performanceStatus CreativeStatus?
+
     previewUrl      String?
     remoteUpdatedAt DateTime?
     lastFetchedAt   DateTime?
@@ -607,7 +609,6 @@ model Creative {
     adVideo          AdVideo?          @relation(fields: [videoId], references: [id])
     creativeInsights CreativeInsight[]
 
-    // INSIGHT DATA
     // INSIGHT DATA
     impressions Int?   @default(0)
     reach       Int?   @default(0)
@@ -639,9 +640,16 @@ model Creative {
     purchaseValue Float? @default(0)
     roas          Float? @default(0)
 
-    /**
-     * ===== QUALITY =====
-     */
+    registrationComplete      Int?   @default(0)
+    registrationCompleteValue Float? @default(0)
+    messagingStarted          Int?   @default(0)
+    messagingStartedValue     Float? @default(0)
+    outboundClicks            Int?   @default(0)
+    outboundClicksValue       Float? @default(0)
+
+    cvr          Float? @default(0)
+    adsCostRatio Float? @default(0)
+
     qualityRanking        String?
     engagementRateRanking String?
     conversionRateRanking String?
@@ -651,6 +659,65 @@ model Creative {
      */
     actions      Json?
     actionValues Json?
+
+    videoPlay Float? @default(0)
+    video3s   Float? @default(0)
+    video100  Float? @default(0)
+
+    videoAvgWatchTime Float? @default(0)
+    videoThruplay     Int?   @default(0)
+    videoView         Int?   @default(0)
+
+    hookRate Float? @default(0)
+    holdRate Float? @default(0)
+
+    @@index([accountId])
+    @@index([imageHash])
+    @@index([videoId])
+}
+
+model CreativeInsight {
+    id String @id @default(cuid())
+
+    creativeId String
+    creative   Creative @relation(fields: [creativeId], references: [id], onDelete: Cascade)
+
+    level LevelInsight @default(AD)
+
+    dateStart String?
+    dateStop  String?
+    range     InsightRange @default(DAILY)
+
+    // INSIGHT DATA
+    impressions Int?   @default(0)
+    reach       Int?   @default(0)
+    frequency   Float? @default(0)
+
+    /**
+     * ===== TRAFFIC =====
+     */
+    clicks       Int?   @default(0)
+    uniqueClicks Int?   @default(0)
+    ctr          Float? @default(0)
+    uniqueCtr    Float? @default(0)
+    cpc          Float? @default(0)
+    cpm          Float? @default(0)
+
+    /**
+     * ===== SPEND =====
+     */
+    spend Float? @default(0)
+
+    /**
+     * ===== CONVERSION =====
+     */
+    results       Int?   @default(0)
+    costPerResult Float? @default(0)
+    aov           Int?   @default(0)
+
+    purchases     Int?   @default(0)
+    purchaseValue Float? @default(0)
+    roas          Float? @default(0)
 
     registrationComplete      Int?   @default(0)
     registrationCompleteValue Float? @default(0)
@@ -662,13 +729,44 @@ model Creative {
     cvr          Float? @default(0)
     adsCostRatio Float? @default(0)
 
+    qualityRanking        String?
+    engagementRateRanking String?
+    conversionRateRanking String?
+
+    /**
+     * ===== RAW =====
+     */
+    actions      Json?
+    actionValues Json?
+
+    videoPlay Float? @default(0)
+    video3s   Float? @default(0)
+    video100  Float? @default(0)
+
     videoAvgWatchTime Float? @default(0)
     videoThruplay     Int?   @default(0)
     videoView         Int?   @default(0)
 
-    @@index([accountId])
-    @@index([imageHash])
-    @@index([videoId])
+    hookRate   Float? @default(0)
+    holdRate   Float? @default(0)
+    rawPayload Json?
+
+    createdAt  DateTime  @default(now())
+    updatedAt  DateTime  @default(now())
+    campaign   Campaign? @relation(fields: [campaignId], references: [id])
+    campaignId String?
+
+    @@unique([creativeId, dateStart, range])
+    @@index([creativeId])
+}
+
+enum CreativeStatus {
+    TEST
+    NEED_SPEND
+    SCALE_P1
+    SCALE_P2
+    REVIEW
+    OFF
 }
 
 model AdImage {
@@ -890,90 +988,6 @@ model CampaignInsight {
     @@unique([campaignId, dateStart, range])
     @@index([campaignId])
     @@index([dateStart, dateStop])
-}
-
-model CreativeInsight {
-    id String @id @default(cuid())
-
-    creativeId String
-    creative   Creative @relation(fields: [creativeId], references: [id], onDelete: Cascade)
-
-    level LevelInsight @default(AD)
-
-    dateStart String
-    dateStop  String
-    range     InsightRange @default(DAILY)
-
-    // INSIGHT DATA
-    impressions Int?   @default(0)
-    reach       Int?   @default(0)
-    frequency   Float? @default(0)
-
-    /**
-     * ===== TRAFFIC =====
-     */
-    clicks       Int?   @default(0)
-    uniqueClicks Int?   @default(0)
-    ctr          Float? @default(0)
-    uniqueCtr    Float? @default(0)
-    cpc          Float? @default(0)
-    cpm          Float? @default(0)
-
-    /**
-     * ===== SPEND =====
-     */
-    spend Float? @default(0)
-
-    /**
-     * ===== CONVERSION =====
-     */
-    results       Int?   @default(0)
-    costPerResult Float? @default(0)
-    aov           Int?   @default(0)
-
-    purchases     Int?   @default(0)
-    purchaseValue Float? @default(0)
-    roas          Float? @default(0)
-
-    registrationComplete      Int?   @default(0)
-    registrationCompleteValue Float? @default(0)
-    messagingStarted          Int?   @default(0)
-    messagingStartedValue     Float? @default(0)
-    outboundClicks            Int?   @default(0)
-    outboundClicksValue       Float? @default(0)
-
-    cvr          Float? @default(0)
-    adsCostRatio Float? @default(0)
-
-    qualityRanking        String?
-    engagementRateRanking String?
-    conversionRateRanking String?
-
-    /**
-     * ===== RAW =====
-     */
-    actions      Json?
-    actionValues Json?
-
-    videoPlay Float? @default(0)
-    video3s   Float? @default(0)
-    video100  Float? @default(0)
-
-    videoAvgWatchTime Float? @default(0)
-    videoThruplay     Int?   @default(0)
-    videoView         Int?   @default(0)
-
-    hookRate   Float? @default(0)
-    holdRate   Float? @default(0)
-    rawPayload Json?
-
-    createdAt  DateTime  @default(now())
-    updatedAt  DateTime  @default(now())
-    campaign   Campaign? @relation(fields: [campaignId], references: [id])
-    campaignId String?
-
-    @@unique([creativeId, dateStart, range])
-    @@index([creativeId])
 }
 
 model AdSetInsight {
