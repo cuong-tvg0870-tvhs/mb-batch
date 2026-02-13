@@ -452,12 +452,29 @@ export function extractCampaignMetrics(insight: any) {
       'offsite_conversion.complete_registration',
     );
 
+  const registrationCompleteValue =
+    getActionValueFromValues(insight?.action_values, 'complete_registration') +
+    getActionValueFromValues(
+      insight?.action_values,
+      'offsite_conversion.complete_registration',
+    );
+
   const messagingStarted = getActionValue(
     insight?.actions,
     'onsite_conversion.messaging_conversation_started_7d',
   );
 
+  const messagingStartedValue = getActionValueFromValues(
+    insight?.actions,
+    'onsite_conversion.messaging_conversation_started_7d',
+  );
+
   const outboundClicks = getActionValue(
+    insight?.outbound_clicks,
+    'outbound_click',
+  );
+
+  const outboundClicksValue = getActionValueFromValues(
     insight?.outbound_clicks,
     'outbound_click',
   );
@@ -479,7 +496,13 @@ export function extractCampaignMetrics(insight: any) {
     spend,
 
     // ===== RESULT =====
-    results: purchases,
+    results: Number(purchases) + Number(registrationComplete),
+    aov:
+      Number(purchases) + Number(registrationComplete) > 0
+        ? Number(purchaseValue) /
+          (Number(purchases) + Number(registrationComplete))
+        : null,
+
     costPerResult,
 
     purchases,
@@ -490,8 +513,12 @@ export function extractCampaignMetrics(insight: any) {
     adsCostRatio,
 
     registrationComplete,
+    registrationCompleteValue,
+
     messagingStarted,
+    messagingStartedValue,
     outboundClicks,
+    outboundClicksValue,
 
     // ===== VIDEO =====
     videoPlay,

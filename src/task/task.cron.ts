@@ -25,7 +25,6 @@ import {
   AD_INSIGHT_FIELDS,
   ADSET_FIELDS,
   CAMPAIGN_FIELDS,
-  CREATIVE_FIELDS,
 } from 'src/common/utils/meta-field';
 import { UpsertService } from 'src/modules/campaign-sync-service/upsert.service';
 import { MetaService } from 'src/modules/meta/meta.service';
@@ -68,8 +67,8 @@ export class TaskCron {
   @Cron('0 10 0,6,12,18 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncMaxInsights() {
     // await this.syncMaxCampaignInsights();
-    await this.syncMaxAdsetInsights();
-    // await this.syncMaxAdInsights();
+    // await this.syncMaxAdsetInsights();
+    await this.syncMaxAdInsights();
   }
 
   @Cron('0 20 3,9,15,21 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
@@ -111,12 +110,7 @@ export class TaskCron {
          * 2️⃣ Fetch Campaign thay đổi
          */
         const campaignCursor = await adAccount.getCampaigns(
-          [
-            ...CAMPAIGN_FIELDS,
-            `insights.date_preset(maximum).limit(1).level(campaign){${AD_INSIGHT_FIELDS.join(
-              ',',
-            )}}`,
-          ],
+          CAMPAIGN_FIELDS,
           {
             limit: LIMIT_DATA,
             filtering: [
@@ -143,12 +137,7 @@ export class TaskCron {
 
         for (const ids of chunk(campaignIds, 50)) {
           const adsetCursor = await adAccount.getAdSets(
-            [
-              ...ADSET_FIELDS,
-              `insights.date_preset(maximum).limit(1).level(adset){${AD_INSIGHT_FIELDS.join(
-                ',',
-              )}}`,
-            ],
+            ADSET_FIELDS,
             {
               limit: LIMIT_DATA,
               filtering: [{ field: 'campaign.id', operator: 'IN', value: ids }],
@@ -181,10 +170,6 @@ export class TaskCron {
               Ad.Fields.effective_status,
               Ad.Fields.created_time,
               Ad.Fields.updated_time,
-              `creative{${CREATIVE_FIELDS.join(',')}}`,
-              `insights.date_preset(maximum).limit(1).level(ad){${AD_INSIGHT_FIELDS.join(
-                ',',
-              )}}`,
             ],
             {
               limit: LIMIT_DATA,
@@ -283,6 +268,8 @@ export class TaskCron {
           {
             level: 'campaign',
             date_preset: 'maximum',
+            action_attribution_windows: '7d_click',
+            action_breakdowns: 'action_type',
             filtering: [
               { field: 'campaign.id', operator: 'IN', value: idsChunk },
             ],
@@ -401,6 +388,8 @@ export class TaskCron {
             level: 'campaign',
             time_increment: 1,
             date_preset: 'maximum',
+            action_attribution_windows: '7d_click',
+            action_breakdowns: 'action_type',
             time_range: {
               since: since.format('YYYY-MM-DD'),
               until: maxStop.format('YYYY-MM-DD'),
@@ -480,6 +469,8 @@ export class TaskCron {
           {
             level: 'adset',
             date_preset: 'maximum',
+            action_attribution_windows: '7d_click',
+            action_breakdowns: 'action_type',
             filtering: [{ field: 'adset.id', operator: 'IN', value: idsChunk }],
           },
           true,
@@ -526,6 +517,8 @@ export class TaskCron {
           {
             level: 'adset',
             date_preset: 'maximum',
+            action_attribution_windows: '7d_click',
+            action_breakdowns: 'action_type',
             filtering: [{ field: 'adset.id', operator: 'IN', value: idsChunk }],
             breakdowns: ['age', 'gender'], // 👈 thêm dòng này
           },
@@ -567,11 +560,6 @@ export class TaskCron {
               ...extractCampaignMetrics(audient),
               rawPayload: audient,
             },
-          });
-
-          await this.prisma.ad.update({
-            where: { id: audient.ad_id },
-            data: { ...extractCampaignMetrics(audient) },
           });
         }
 
@@ -647,6 +635,8 @@ export class TaskCron {
           level: 'adset',
           time_increment: 1,
           date_preset: 'maximum',
+          action_attribution_windows: '7d_click',
+          action_breakdowns: 'action_type',
           time_range: {
             since: since.format('YYYY-MM-DD'),
             until: maxStop.format('YYYY-MM-DD'),
@@ -714,6 +704,8 @@ export class TaskCron {
         const cursor = await adAccount.getInsights(
           AD_INSIGHT_FIELDS,
           {
+            action_attribution_windows: '7d_click',
+            action_breakdowns: 'action_type',
             level: 'ad',
             date_preset: 'maximum',
             filtering: [{ field: 'ad.id', operator: 'IN', value: idsChunk }],
@@ -754,6 +746,57 @@ export class TaskCron {
           await this.prisma.ad.update({
             where: { id: i.ad_id },
             data: { ...extractCampaignMetrics(i) },
+          });
+        }
+
+        const audientCursor = await adAccount.getInsights(
+          AD_INSIGHT_FIELDS,
+          {
+            level: 'ad',
+            date_preset: 'maximum',
+            action_attribution_windows: '7d_click',
+            action_breakdowns: 'action_type',
+            filtering: [{ field: 'ad.id', operator: 'IN', value: idsChunk }],
+            breakdowns: ['age', 'gender'], // 👈 thêm dòng này
+          },
+          true,
+        );
+
+        const audients = await fetchAll(audientCursor);
+        for (const audient of audients) {
+          if (!audient.ad_id) continue;
+
+          await this.prisma.adAudienceInsight.upsert({
+            where: {
+              adId_age_gender_level_range_dateStart: {
+                adId: audient.ad_id,
+                age: audient.age,
+                gender: audient.gender,
+                level: LevelInsight.AD,
+                dateStart: audient.date_start,
+                range: InsightRange.MAX,
+              },
+            },
+            update: {
+              age: audient.age,
+              gender: audient.gender,
+              dateStart: audient.date_start,
+              dateStop: audient.date_stop,
+              ...extractCampaignMetrics(audient),
+              rawPayload: audient,
+            },
+            create: {
+              adId: audient.ad_id,
+              age: audient.age,
+              gender: audient.gender,
+              level: LevelInsight.AD,
+              range: InsightRange.MAX,
+
+              dateStart: audient.date_start,
+              dateStop: audient.date_stop,
+              ...extractCampaignMetrics(audient),
+              rawPayload: audient,
+            },
           });
         }
 
@@ -815,8 +858,6 @@ export class TaskCron {
       if (since.isBefore(maxStart)) since = maxStart;
       if (since.isAfter(maxStop)) continue;
 
-      const adAccount = new AdAccount(accountId);
-
       try {
         this.logger.log(
           `📅 AD ${max.adId} → ${since.format(
@@ -829,6 +870,8 @@ export class TaskCron {
           level: 'ad',
           time_increment: 1,
           date_preset: 'maximum',
+          action_attribution_windows: '7d_click',
+          action_breakdowns: 'action_type',
           time_range: {
             since: since.format('YYYY-MM-DD'),
             until: maxStop.format('YYYY-MM-DD'),

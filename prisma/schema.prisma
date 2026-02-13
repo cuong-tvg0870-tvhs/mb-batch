@@ -282,14 +282,18 @@ model Campaign {
      */
     results       Int?   @default(0)
     costPerResult Float? @default(0)
+    aov           Int?   @default(0)
 
     purchases     Int?   @default(0)
     purchaseValue Float? @default(0)
     roas          Float? @default(0)
 
-    registrationComplete Int? @default(0)
-    messagingStarted     Int? @default(0)
-    outboundClicks       Int? @default(0)
+    registrationComplete      Int?   @default(0)
+    registrationCompleteValue Float? @default(0)
+    messagingStarted          Int?   @default(0)
+    messagingStartedValue     Float? @default(0)
+    outboundClicks            Int?   @default(0)
+    outboundClicksValue       Float? @default(0)
 
     cvr          Float? @default(0)
     adsCostRatio Float? @default(0)
@@ -381,14 +385,18 @@ model AdSet {
      */
     results       Int?   @default(0)
     costPerResult Float? @default(0)
+    aov           Int?   @default(0)
 
     purchases     Int?   @default(0)
     purchaseValue Float? @default(0)
     roas          Float? @default(0)
 
-    registrationComplete Int? @default(0)
-    messagingStarted     Int? @default(0)
-    outboundClicks       Int? @default(0)
+    registrationComplete      Int?   @default(0)
+    registrationCompleteValue Float? @default(0)
+    messagingStarted          Int?   @default(0)
+    messagingStartedValue     Float? @default(0)
+    outboundClicks            Int?   @default(0)
+    outboundClicksValue       Float? @default(0)
 
     cvr          Float? @default(0)
     adsCostRatio Float? @default(0)
@@ -476,16 +484,21 @@ model Ad {
      */
     results       Int?   @default(0)
     costPerResult Float? @default(0)
+    aov           Int?   @default(0)
 
     purchases     Int?   @default(0)
     purchaseValue Float? @default(0)
     roas          Float? @default(0)
 
-    registrationComplete Int?   @default(0)
-    messagingStarted     Int?   @default(0)
-    outboundClicks       Int?   @default(0)
-    cvr                  Float? @default(0)
-    adsCostRatio         Float? @default(0)
+    registrationComplete      Int?   @default(0)
+    registrationCompleteValue Float? @default(0)
+    messagingStarted          Int?   @default(0)
+    messagingStartedValue     Float? @default(0)
+    outboundClicks            Int?   @default(0)
+    outboundClicksValue       Float? @default(0)
+
+    cvr          Float? @default(0)
+    adsCostRatio Float? @default(0)
 
     qualityRanking        String?
     engagementRateRanking String?
@@ -505,8 +518,9 @@ model Ad {
     videoThruplay     Int?   @default(0)
     videoView         Int?   @default(0)
 
-    hookRate Float? @default(0)
-    holdRate Float? @default(0)
+    hookRate           Float?              @default(0)
+    holdRate           Float?              @default(0)
+    adAudienceInsights AdAudienceInsight[]
 
     @@index([adsetId])
     @@index([creativeId])
@@ -619,6 +633,7 @@ model Creative {
      */
     results       Int?   @default(0)
     costPerResult Float? @default(0)
+    aov           Int?   @default(0)
 
     purchases     Int?   @default(0)
     purchaseValue Float? @default(0)
@@ -637,9 +652,12 @@ model Creative {
     actions      Json?
     actionValues Json?
 
-    registrationComplete Int? @default(0)
-    messagingStarted     Int? @default(0)
-    outboundClicks       Int? @default(0)
+    registrationComplete      Int?   @default(0)
+    registrationCompleteValue Float? @default(0)
+    messagingStarted          Int?   @default(0)
+    messagingStartedValue     Float? @default(0)
+    outboundClicks            Int?   @default(0)
+    outboundClicksValue       Float? @default(0)
 
     cvr          Float? @default(0)
     adsCostRatio Float? @default(0)
@@ -745,14 +763,18 @@ model AdInsight {
      */
     results       Int?   @default(0)
     costPerResult Float? @default(0)
+    aov           Int?   @default(0)
 
     purchases     Int?   @default(0)
     purchaseValue Float? @default(0)
     roas          Float? @default(0)
 
-    registrationComplete Int? @default(0)
-    messagingStarted     Int? @default(0)
-    outboundClicks       Int? @default(0)
+    registrationComplete      Int?   @default(0)
+    registrationCompleteValue Float? @default(0)
+    messagingStarted          Int?   @default(0)
+    messagingStartedValue     Float? @default(0)
+    outboundClicks            Int?   @default(0)
+    outboundClicksValue       Float? @default(0)
 
     cvr          Float? @default(0)
     adsCostRatio Float? @default(0)
@@ -823,14 +845,18 @@ model CampaignInsight {
      */
     results       Int?   @default(0)
     costPerResult Float? @default(0)
+    aov           Int?   @default(0)
 
     purchases     Int?   @default(0)
     purchaseValue Float? @default(0)
     roas          Float? @default(0)
 
-    registrationComplete Int? @default(0)
-    messagingStarted     Int? @default(0)
-    outboundClicks       Int? @default(0)
+    registrationComplete      Int?   @default(0)
+    registrationCompleteValue Float? @default(0)
+    messagingStarted          Int?   @default(0)
+    messagingStartedValue     Float? @default(0)
+    outboundClicks            Int?   @default(0)
+    outboundClicksValue       Float? @default(0)
 
     cvr          Float? @default(0)
     adsCostRatio Float? @default(0)
@@ -903,14 +929,18 @@ model CreativeInsight {
      */
     results       Int?   @default(0)
     costPerResult Float? @default(0)
+    aov           Int?   @default(0)
 
     purchases     Int?   @default(0)
     purchaseValue Float? @default(0)
     roas          Float? @default(0)
 
-    registrationComplete Int? @default(0)
-    messagingStarted     Int? @default(0)
-    outboundClicks       Int? @default(0)
+    registrationComplete      Int?   @default(0)
+    registrationCompleteValue Float? @default(0)
+    messagingStarted          Int?   @default(0)
+    messagingStartedValue     Float? @default(0)
+    outboundClicks            Int?   @default(0)
+    outboundClicksValue       Float? @default(0)
 
     cvr          Float? @default(0)
     adsCostRatio Float? @default(0)
@@ -982,18 +1012,21 @@ model AdSetInsight {
      * ===== CONVERSION =====
      */
     results       Int?   @default(0)
+    aov           Int?   @default(0)
     costPerResult Float? @default(0)
 
     purchases     Int?   @default(0)
     purchaseValue Float? @default(0)
     roas          Float? @default(0)
 
-    registrationComplete Int? @default(0)
-    messagingStarted     Int? @default(0)
-    outboundClicks       Int? @default(0)
-
-    cvr          Float? @default(0)
-    adsCostRatio Float? @default(0)
+    registrationComplete      Int?   @default(0)
+    registrationCompleteValue Float? @default(0)
+    messagingStarted          Int?   @default(0)
+    messagingStartedValue     Float? @default(0)
+    outboundClicks            Int?   @default(0)
+    outboundClicksValue       Float? @default(0)
+    cvr                       Float? @default(0)
+    adsCostRatio              Float? @default(0)
 
     qualityRanking        String?
     engagementRateRanking String?
@@ -1075,14 +1108,18 @@ model CampaignAudienceInsight {
      */
     results       Int?   @default(0)
     costPerResult Float? @default(0)
+    aov           Int?   @default(0)
 
     purchases     Int?   @default(0)
     purchaseValue Float? @default(0)
     roas          Float? @default(0)
 
-    registrationComplete Int? @default(0)
-    messagingStarted     Int? @default(0)
-    outboundClicks       Int? @default(0)
+    registrationComplete      Int?   @default(0)
+    registrationCompleteValue Float? @default(0)
+    messagingStarted          Int?   @default(0)
+    messagingStartedValue     Float? @default(0)
+    outboundClicks            Int?   @default(0)
+    outboundClicksValue       Float? @default(0)
 
     cvr          Float? @default(0)
     adsCostRatio Float? @default(0)
@@ -1169,14 +1206,18 @@ model AdsetAudienceInsight {
      */
     results       Int?   @default(0)
     costPerResult Float? @default(0)
+    aov           Int?   @default(0)
 
     purchases     Int?   @default(0)
     purchaseValue Float? @default(0)
     roas          Float? @default(0)
 
-    registrationComplete Int? @default(0)
-    messagingStarted     Int? @default(0)
-    outboundClicks       Int? @default(0)
+    registrationComplete      Int?   @default(0)
+    registrationCompleteValue Float? @default(0)
+    messagingStarted          Int?   @default(0)
+    messagingStartedValue     Float? @default(0)
+    outboundClicks            Int?   @default(0)
+    outboundClicksValue       Float? @default(0)
 
     cvr          Float? @default(0)
     adsCostRatio Float? @default(0)
@@ -1212,6 +1253,104 @@ model AdsetAudienceInsight {
      */
     @@unique([adsetId, age, gender, level, range, dateStart])
     @@index([adsetId])
+    @@index([age, gender])
+}
+
+model AdAudienceInsight {
+    id String @id @default(cuid())
+
+    adId String
+    ad   Ad     @relation(fields: [adId], references: [id], onDelete: Cascade)
+
+    level LevelInsight @default(AD)
+
+    /**
+     * ===== TIME =====
+     * Không theo ngày → dùng ALL_TIME
+     * Nhưng vẫn giữ field để mở rộng
+     */
+    dateStart String?
+    dateStop  String?
+    range     InsightRange @default(MAX)
+
+    /**
+     * ===== BREAKDOWN =====
+     */
+    age    String // e.g. "18-24", "25-34"
+    gender String // "male" | "female" | "unknown"
+
+    // INSIGHT DATA
+    impressions Int?   @default(0)
+    reach       Int?   @default(0)
+    frequency   Float? @default(0)
+
+    /**
+     * ===== TRAFFIC =====
+     */
+    clicks       Int?   @default(0)
+    uniqueClicks Int?   @default(0)
+    ctr          Float? @default(0)
+    uniqueCtr    Float? @default(0)
+    cpc          Float? @default(0)
+    cpm          Float? @default(0)
+
+    /**
+     * ===== SPEND =====
+     */
+    spend Float? @default(0)
+
+    /**
+     * ===== CONVERSION =====
+     */
+    results       Int?   @default(0)
+    costPerResult Float? @default(0)
+    aov           Int?   @default(0)
+
+    purchases     Int?   @default(0)
+    purchaseValue Float? @default(0)
+    roas          Float? @default(0)
+
+    registrationComplete      Int?   @default(0)
+    registrationCompleteValue Float? @default(0)
+    messagingStarted          Int?   @default(0)
+    messagingStartedValue     Float? @default(0)
+    outboundClicks            Int?   @default(0)
+    outboundClicksValue       Float? @default(0)
+
+    cvr          Float? @default(0)
+    adsCostRatio Float? @default(0)
+
+    qualityRanking        String?
+    engagementRateRanking String?
+    conversionRateRanking String?
+
+    /**
+     * ===== RAW =====
+     */
+    actions      Json?
+    actionValues Json?
+
+    videoPlay Float? @default(0)
+    video3s   Float? @default(0)
+    video100  Float? @default(0)
+
+    videoAvgWatchTime Float? @default(0)
+    videoThruplay     Int?   @default(0)
+    videoView         Int?   @default(0)
+
+    hookRate Float? @default(0)
+    holdRate Float? @default(0)
+
+    rawPayload Json?
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @default(now())
+
+    /**
+     * ===== CONSTRAINT =====
+     */
+    @@unique([adId, age, gender, level, range, dateStart])
+    @@index([adId])
     @@index([age, gender])
 }
 
