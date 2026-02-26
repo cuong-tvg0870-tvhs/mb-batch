@@ -1389,6 +1389,7 @@ model TemplateCampaign {
     data Json?
 
     reference_id String?
+    reference    SystemCampaign? @relation(fields: [reference_id], references: [id])
 
     createdById String?
     createdAt   DateTime  @default(now())
@@ -1423,6 +1424,7 @@ model SystemCampaign {
     campaign_bidAmount   Int?
     campaign_CBO         Boolean?
     campaigns            Campaign[]
+    templateCampaigns    TemplateCampaign[]
 }
 
 model SystemAdSet {
