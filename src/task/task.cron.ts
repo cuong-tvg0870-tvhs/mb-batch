@@ -25,6 +25,7 @@ import {
   AD_INSIGHT_FIELDS,
   ADSET_FIELDS,
   CAMPAIGN_FIELDS,
+  CREATIVE_FIELDS,
 } from 'src/common/utils/meta-field';
 import { UpsertService } from 'src/modules/campaign-sync-service/upsert.service';
 import { MetaService } from 'src/modules/meta/meta.service';
@@ -54,33 +55,89 @@ export class TaskCron {
 
   async onModuleInit() {
     this.logger.log('🚀 App started → scan video immediately');
-    // await this.syncCampaignCore();
-    // await this.syncMaxInsights();
-    // await this.syncDailyAdInsights();
-
-    // await this.syncDailyInsights();
-    await this.calculateCreativeInsightFromAdInsight();
   }
 
-  @Cron('0 0 0,12 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('0 5 0,12 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncCampaignCore() {
+    this.logger.log('🔄 Sync Campaign Core');
     await this.syncCampaignService();
+    this.logger.log('✅ Sync Campaign Core DONE');
   }
 
-  @Cron('0 10 0,6,12,18 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  async syncMaxInsights() {
-    // await this.syncMaxCampaignInsights();
-    // await this.syncMaxAdsetInsights();
-    // await this.syncMaxAdsetAudientInsights();
+  /*
+  |--------------------------------------------------------------------------
+  | MAX INSIGHTS
+  |--------------------------------------------------------------------------
+  | Lifetime insights
+  | Frequency: every 12h
+  */
+
+  @Cron('0 30 1,13 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async syncMaxCampaignInsightsJob() {
+    this.logger.log('🔄 Sync MAX Campaign Insights');
+    await this.syncMaxCampaignInsights();
+    this.logger.log('✅ MAX Campaign DONE');
+  }
+
+  @Cron('0 45 1,13 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async syncMaxAdsetInsightsJob() {
+    this.logger.log('🔄 Sync MAX Adset Insights');
+    await this.syncMaxAdsetInsights();
+    this.logger.log('✅ MAX Adset DONE');
+  }
+
+  @Cron('0 0 2,14 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async syncMaxAdsetAudienceInsightsJob() {
+    this.logger.log('🔄 Sync MAX Adset Audience Insights');
+    await this.syncMaxAdsetAudientInsights();
+    this.logger.log('✅ MAX Adset Audience DONE');
+  }
+
+  @Cron('0 15 2,14 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async syncMaxAdInsightsJob() {
+    this.logger.log('🔄 Sync MAX Ad Insights');
     await this.syncMaxAdInsights();
-    await this.syncMaxAdAudientInsights();
+    this.logger.log('✅ MAX Ad DONE');
   }
 
-  @Cron('0 20 3,9,15,21 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  async syncDailyInsights() {
+  @Cron('0 30 2,14 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async syncMaxAdAudienceInsightsJob() {
+    this.logger.log('🔄 Sync MAX Ad Audience Insights');
+    await this.syncMaxAdAudientInsights();
+    this.logger.log('✅ MAX Ad Audience DONE');
+  }
+
+  /*
+  |--------------------------------------------------------------------------
+  | DAILY INSIGHTS
+  |--------------------------------------------------------------------------
+  | Rolling backfill 2–3 days
+  | Frequency: every 6h
+  */
+
+  @Cron('0 15 3,9,15,21 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async syncDailyCampaignInsightsJob() {
+    this.logger.log('🔄 Sync DAILY Campaign Insights');
     await this.syncDailyCampaignInsights();
+    this.logger.log('✅ DAILY Campaign DONE');
+  }
+
+  @Cron('0 30 3,9,15,21 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async syncDailyAdsetInsightsJob() {
+    this.logger.log('🔄 Sync DAILY Adset Insights');
     await this.syncDailyAdsetInsights();
+    this.logger.log('✅ DAILY Adset DONE');
+  }
+
+  @Cron('0 45 3,9,15,21 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async syncDailyAdInsightsJob() {
+    this.logger.log('🔄 Sync DAILY Ad Insights');
     await this.syncDailyAdInsights();
+    this.logger.log('✅ DAILY Ad DONE');
+
+    this.logger.log('🔄 Analytic Creative Insight');
+    await this.calculateCreativeInsightFromAdInsight();
+    this.logger.log('✅ Analytic Creative Insight');
   }
 
   async syncCampaignService() {
@@ -173,8 +230,12 @@ export class TaskCron {
               Ad.Fields.name,
               Ad.Fields.status,
               Ad.Fields.effective_status,
+              Ad.Fields.creative_asset_groups_spec,
+              Ad.Fields.bid_amount,
+              Ad.Fields.priority,
               Ad.Fields.created_time,
               Ad.Fields.updated_time,
+              `creative{${CREATIVE_FIELDS.join(',')}}`,
             ],
             {
               limit: LIMIT_DATA,
@@ -339,6 +400,7 @@ export class TaskCron {
       where: {
         range: InsightRange.MAX,
         level: LevelInsight.CAMPAIGN,
+        spend: { gt: 0 },
       },
       select: {
         campaignId: true,
@@ -606,7 +668,11 @@ export class TaskCron {
     const today = dayjs().startOf('day');
 
     const maxInsights = await this.prisma.adSetInsight.findMany({
-      where: { range: InsightRange.MAX, level: LevelInsight.ADSET },
+      where: {
+        range: InsightRange.MAX,
+        level: LevelInsight.ADSET,
+        spend: { gt: 0 },
+      },
       select: {
         adSetId: true,
         dateStart: true,
@@ -845,7 +911,7 @@ export class TaskCron {
     for (const [accountId, ids] of Object.entries(byAccount)) {
       const adAccount = new AdAccount(accountId);
 
-      for (const idsChunk of chunk(ids, 50)) {
+      for (const idsChunk of chunk(ids, 20)) {
         const audientCursor = await adAccount.getInsights(
           AD_INSIGHT_FIELDS,
           {
@@ -915,7 +981,11 @@ export class TaskCron {
     const today = dayjs().startOf('day');
 
     const maxInsights = await this.prisma.adInsight.findMany({
-      where: { range: InsightRange.MAX, level: LevelInsight.AD },
+      where: {
+        range: InsightRange.MAX,
+        level: LevelInsight.AD,
+        spend: { gt: 0 },
+      },
       select: {
         adId: true,
         dateStart: true,
@@ -1022,7 +1092,6 @@ export class TaskCron {
      * 1️⃣ Lấy toàn bộ creative + ads
      */
     const creatives = await this.prisma.creative.findMany({
-      // where: { id: '731038106513088' },
       select: {
         id: true,
         ads: {
@@ -1299,7 +1368,7 @@ export class TaskCron {
       const revenue3d = last3d._sum.purchaseValue ?? 0;
       const roas3d = spend3d > 0 ? revenue3d / spend3d : 0;
 
-      let status: CreativeStatus = CreativeStatus.TEST;
+      let status: CreativeStatus;
 
       // ===============================
       // RULE ENGINE
