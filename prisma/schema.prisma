@@ -591,7 +591,8 @@ model Creative {
     creativeType        String? // IMAGE, VIDEO, CAROUSEL, LINK, ...
 
     imageHash String?
-    adImage   AdImage? @relation(fields: [imageHash], references: [hash])
+    imageId   String?
+    adImage   AdImage? @relation(fields: [imageId], references: [id])
 
     imageUrl     String?
     thumbnailUrl String?
@@ -791,7 +792,6 @@ model AdImage {
     creatives Creative[]
 
     @@unique([accountId, hash, id])
-    @@unique([hash])
     @@index([accountId])
     @@index([hash])
 }
@@ -821,6 +821,7 @@ model AdVideo {
     updatedAt DateTime   @default(now())
     creatives Creative[]
 
+    @@unique([accountId, id])
     @@index([status])
     @@index([accountId])
 }
