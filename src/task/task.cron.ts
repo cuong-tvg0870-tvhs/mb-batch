@@ -145,163 +145,172 @@ export class TaskCron {
     this.init();
 
     try {
-      const accounts = await this.prisma.account.findMany({});
+      const accounts = await this.prisma.account.findMany({
+        where: { needsReauth: false },
+      });
 
       for (const acc of accounts) {
-        this.logger.log(`🔹 Account: ${acc.name} (${acc.id})`);
+        try {
+          this.logger.log(`🔹 Account: ${acc.name} (${acc.id})`);
 
-        const adAccount = new AdAccount(acc.id);
+          const adAccount = new AdAccount(acc.id);
 
-        /**
-         * 1️⃣ Lấy mốc updated_time mới nhất trong DB
-         */
-        const lastCampaign = await this.prisma.campaign.findFirst({
-          where: { accountId: acc.id },
-          orderBy: { updatedAt: 'desc' },
-          select: { updatedAt: true },
-        });
-
-        const lastSyncUnix = lastCampaign
-          ? Math.floor(
-              (new Date(lastCampaign.updatedAt).getTime() - 5 * 60 * 1000) /
-                1000,
-            )
-          : Math.floor((Date.now() - 30 * 24 * 60 * 60 * 1000) / 1000);
-
-        /**
-         * 2️⃣ Fetch Campaign thay đổi
-         */
-        const campaignCursor = await adAccount.getCampaigns(
-          CAMPAIGN_FIELDS,
-          {
-            limit: LIMIT_DATA,
-            filtering: [
-              {
-                field: 'updated_time',
-                operator: 'GREATER_THAN',
-                value: lastSyncUnix,
-              },
-            ],
-          },
-          true,
-        );
-
-        const campaigns = await fetchAll(campaignCursor);
-
-        if (!campaigns.length) continue;
-
-        const campaignIds = campaigns.map((c) => c.id);
-
-        /**
-         * 3️⃣ Fetch AdSet theo campaign.id IN (...)
-         */
-        const adSets: any[] = [];
-
-        for (const ids of chunk(campaignIds, 50)) {
-          const adsetCursor = await adAccount.getAdSets(
-            ADSET_FIELDS,
-            {
-              limit: LIMIT_DATA,
-              filtering: [{ field: 'campaign.id', operator: 'IN', value: ids }],
-            },
-            true,
-          );
-
-          const result = await fetchAll(adsetCursor);
-          adSets.push(...result);
-
-          await sleep(500);
-        }
-
-        const adsetIds = adSets.map((a) => a.id);
-
-        /**
-         * 4️⃣ Fetch Ads theo adset.id IN (...)
-         */
-        const ads: any[] = [];
-
-        for (const ids of chunk(adsetIds, 50)) {
-          const adCursor = await adAccount.getAds(
-            [
-              Ad.Fields.id,
-              Ad.Fields.account_id,
-              Ad.Fields.campaign_id,
-              Ad.Fields.adset_id,
-              Ad.Fields.name,
-              Ad.Fields.status,
-              Ad.Fields.effective_status,
-              Ad.Fields.creative_asset_groups_spec,
-              Ad.Fields.bid_amount,
-              Ad.Fields.priority,
-              Ad.Fields.created_time,
-              Ad.Fields.updated_time,
-              `creative{${CREATIVE_FIELDS.join(',')}}`,
-            ],
-            {
-              limit: LIMIT_DATA,
-              filtering: [{ field: 'adset.id', operator: 'IN', value: ids }],
-            },
-            true,
-          );
-
-          const result = await fetchAll(adCursor);
-          ads.push(...result);
-
-          await sleep(500);
-        }
-
-        /**
-         * 5️⃣ Build mapping
-         */
-        const adSetsByCampaign = groupBy(adSets, (as) => as.campaign_id);
-        const adsByAdSet = groupBy(ads, (ad) => ad.adset_id);
-
-        for (const ad of ads) {
-          await this.metaService.syncAdAssetsLegacy(
-            adAccount,
-            adAccount.id,
-            ad,
-          );
-
-          await this.prisma.$transaction(async (tx) => {
-            await this.upsertDataService.upsertCreativeLegacy(tx, acc.id, ad);
+          /**
+           * 1️⃣ Lấy mốc updated_time mới nhất trong DB
+           */
+          const lastCampaign = await this.prisma.campaign.findFirst({
+            where: { accountId: acc.id },
+            orderBy: { updatedAt: 'desc' },
+            select: { updatedAt: true },
           });
-        }
-        /**
-         * 6️⃣ Upsert tree
-         */
-        for (const campaign of campaigns) {
-          await this.prisma.$transaction(async (tx) => {
-            await this.upsertDataService.upsertCampaign(tx, acc.id, campaign);
 
-            const campaignAdSets = adSetsByCampaign[campaign.id] ?? [];
+          const lastSyncUnix = lastCampaign
+            ? Math.floor(
+                (new Date(lastCampaign.updatedAt).getTime() - 5 * 60 * 1000) /
+                  1000,
+              )
+            : Math.floor((Date.now() - 30 * 24 * 60 * 60 * 1000) / 1000);
 
-            for (const adset of campaignAdSets) {
-              await this.upsertDataService.upsertAdSet(
-                tx,
-                acc.id,
-                campaign.id,
-                adset,
-              );
+          /**
+           * 2️⃣ Fetch Campaign thay đổi
+           */
+          const campaignCursor = await adAccount.getCampaigns(
+            CAMPAIGN_FIELDS,
+            {
+              limit: LIMIT_DATA,
+              filtering: [
+                {
+                  field: 'updated_time',
+                  operator: 'GREATER_THAN',
+                  value: lastSyncUnix,
+                },
+              ],
+            },
+            true,
+          );
 
-              const adsetAds = adsByAdSet[adset.id] ?? [];
+          const campaigns = await fetchAll(campaignCursor);
 
-              for (const ad of adsetAds) {
-                await this.upsertDataService.upsertAdLegacy(
+          if (!campaigns.length) continue;
+
+          const campaignIds = campaigns.map((c) => c.id);
+
+          /**
+           * 3️⃣ Fetch AdSet theo campaign.id IN (...)
+           */
+          const adSets: any[] = [];
+
+          for (const ids of chunk(campaignIds, 50)) {
+            const adsetCursor = await adAccount.getAdSets(
+              ADSET_FIELDS,
+              {
+                limit: LIMIT_DATA,
+                filtering: [
+                  { field: 'campaign.id', operator: 'IN', value: ids },
+                ],
+              },
+              true,
+            );
+
+            const result = await fetchAll(adsetCursor);
+            adSets.push(...result);
+
+            await sleep(500);
+          }
+
+          const adsetIds = adSets.map((a) => a.id);
+
+          /**
+           * 4️⃣ Fetch Ads theo adset.id IN (...)
+           */
+          const ads: any[] = [];
+
+          for (const ids of chunk(adsetIds, 50)) {
+            const adCursor = await adAccount.getAds(
+              [
+                Ad.Fields.id,
+                Ad.Fields.account_id,
+                Ad.Fields.campaign_id,
+                Ad.Fields.adset_id,
+                Ad.Fields.name,
+                Ad.Fields.status,
+                Ad.Fields.effective_status,
+                Ad.Fields.creative_asset_groups_spec,
+                Ad.Fields.bid_amount,
+                Ad.Fields.priority,
+                Ad.Fields.created_time,
+                Ad.Fields.updated_time,
+                `creative{${CREATIVE_FIELDS.join(',')}}`,
+              ],
+              {
+                limit: LIMIT_DATA,
+                filtering: [{ field: 'adset.id', operator: 'IN', value: ids }],
+              },
+              true,
+            );
+
+            const result = await fetchAll(adCursor);
+            ads.push(...result);
+
+            await sleep(500);
+          }
+
+          /**
+           * 5️⃣ Build mapping
+           */
+          const adSetsByCampaign = groupBy(adSets, (as) => as.campaign_id);
+          const adsByAdSet = groupBy(ads, (ad) => ad.adset_id);
+
+          for (const ad of ads) {
+            await this.metaService.syncAdAssetsLegacy(
+              adAccount,
+              adAccount.id,
+              ad,
+            );
+
+            await this.prisma.$transaction(async (tx) => {
+              await this.upsertDataService.upsertCreativeLegacy(tx, acc.id, ad);
+            });
+          }
+          /**
+           * 6️⃣ Upsert tree
+           */
+          for (const campaign of campaigns) {
+            await this.prisma.$transaction(async (tx) => {
+              await this.upsertDataService.upsertCampaign(tx, acc.id, campaign);
+
+              const campaignAdSets = adSetsByCampaign[campaign.id] ?? [];
+
+              for (const adset of campaignAdSets) {
+                await this.upsertDataService.upsertAdSet(
                   tx,
                   acc.id,
                   campaign.id,
-                  adset.id,
-                  ad,
+                  adset,
                 );
-              }
-            }
-          });
-        }
 
-        this.logger.log(
-          `✅ Account ${acc.id} synced: ${campaigns.length} campaigns`,
-        );
+                const adsetAds = adsByAdSet[adset.id] ?? [];
+
+                for (const ad of adsetAds) {
+                  await this.upsertDataService.upsertAdLegacy(
+                    tx,
+                    acc.id,
+                    campaign.id,
+                    adset.id,
+                    ad,
+                  );
+                }
+              }
+            });
+          }
+
+          this.logger.log(
+            `✅ Account ${acc.id} synced: ${campaigns.length} campaigns`,
+          );
+        } catch (err) {
+          this.logger.error(parseMetaError(err));
+          continue;
+        }
       }
 
       this.logger.log('--- END Campaign Data ---');
@@ -320,9 +329,10 @@ export class TaskCron {
     this.init();
 
     const campaigns = await this.prisma.campaign.findMany({
+      where: { account: { needsReauth: false } },
       select: { id: true, accountId: true },
     });
-
+    console.log(campaigns.length);
     const byAccount = this.groupByAccount(campaigns);
 
     for (const [accountId, ids] of Object.entries(byAccount)) {
@@ -401,6 +411,7 @@ export class TaskCron {
         range: InsightRange.MAX,
         level: LevelInsight.CAMPAIGN,
         spend: { gt: 0 },
+        campaign: { account: { needsReauth: false } },
       },
       select: {
         campaignId: true,
@@ -425,7 +436,11 @@ export class TaskCron {
       const maxStop = maxStopRaw.isAfter(today) ? today : maxStopRaw;
 
       const lastDaily = await this.prisma.campaignInsight.findFirst({
-        where: { campaignId: max.campaignId, range: InsightRange.DAILY },
+        where: {
+          campaignId: max.campaignId,
+          range: InsightRange.DAILY,
+          campaign: { account: { needsReauth: false } },
+        },
         orderBy: { dateStart: 'desc' },
       });
 
@@ -522,6 +537,7 @@ export class TaskCron {
     this.init();
 
     const adsets = await this.prisma.adSet.findMany({
+      where: { account: { needsReauth: false } },
       select: { id: true, accountId: true },
     });
 
@@ -544,7 +560,6 @@ export class TaskCron {
         );
 
         const insights = await fetchAll(cursor);
-
         for (const i of insights) {
           if (!i.adset_id) continue;
 
@@ -591,6 +606,7 @@ export class TaskCron {
     this.init();
 
     const adsets = await this.prisma.adSet.findMany({
+      where: { account: { needsReauth: false } },
       select: { id: true, accountId: true },
     });
 
@@ -669,6 +685,7 @@ export class TaskCron {
 
     const maxInsights = await this.prisma.adSetInsight.findMany({
       where: {
+        adSet: { account: { needsReauth: false } },
         range: InsightRange.MAX,
         level: LevelInsight.ADSET,
         spend: { gt: 0 },
@@ -696,7 +713,11 @@ export class TaskCron {
       const maxStop = maxStopRaw.isAfter(today) ? today : maxStopRaw;
 
       const lastDaily = await this.prisma.adSetInsight.findFirst({
-        where: { adSetId: max.adSetId, range: InsightRange.DAILY },
+        where: {
+          adSetId: max.adSetId,
+          range: InsightRange.DAILY,
+          adSet: { account: { needsReauth: false } },
+        },
         orderBy: { dateStart: 'desc' },
       });
 
@@ -783,6 +804,7 @@ export class TaskCron {
     this.init();
 
     const ads = await this.prisma.ad.findMany({
+      where: { account: { needsReauth: false } },
       select: { id: true, accountId: true },
     });
 
@@ -903,6 +925,7 @@ export class TaskCron {
     this.init();
 
     const ads = await this.prisma.ad.findMany({
+      where: { account: { needsReauth: false } },
       select: { id: true, accountId: true },
     });
 
@@ -982,6 +1005,7 @@ export class TaskCron {
 
     const maxInsights = await this.prisma.adInsight.findMany({
       where: {
+        ad: { account: { needsReauth: false } },
         range: InsightRange.MAX,
         level: LevelInsight.AD,
         spend: { gt: 0 },
@@ -1009,7 +1033,11 @@ export class TaskCron {
       const maxStop = maxStopRaw.isAfter(today) ? today : maxStopRaw;
 
       const lastDaily = await this.prisma.adInsight.findFirst({
-        where: { adId: max.adId, range: InsightRange.DAILY },
+        where: {
+          adId: max.adId,
+          range: InsightRange.DAILY,
+          ad: { account: { needsReauth: false } },
+        },
         orderBy: { dateStart: 'desc' },
       });
 
@@ -1092,6 +1120,7 @@ export class TaskCron {
      * 1️⃣ Lấy toàn bộ creative + ads
      */
     const creatives = await this.prisma.creative.findMany({
+      where: { account: { needsReauth: false } },
       select: {
         id: true,
         ads: {
