@@ -54,7 +54,6 @@ export class TaskCron {
   ===================================================== */
 
   async onModuleInit() {
-    await this.syncCampaignCore();
     this.logger.log('🚀 App started → scan video immediately');
   }
 
