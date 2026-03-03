@@ -733,8 +733,6 @@ export class TaskCron {
       if (since.isBefore(maxStart)) since = maxStart;
       if (since.isAfter(maxStop)) continue;
 
-      const adAccount = new AdAccount(accountId);
-
       try {
         this.logger.log(
           `📅 Adset ${max.adSetId} → ${since.format(
@@ -861,57 +859,6 @@ export class TaskCron {
             data: { ...extractCampaignMetrics(i) },
           });
         }
-
-        // const audientCursor = await adAccount.getInsights(
-        //   AD_INSIGHT_FIELDS,
-        //   {
-        //     level: 'ad',
-        //     date_preset: 'maximum',
-        //     action_attribution_windows: '7d_click',
-        //     action_breakdowns: 'action_type',
-        //     filtering: [{ field: 'ad.id', operator: 'IN', value: idsChunk }],
-        //     breakdowns: ['age', 'gender'], // 👈 thêm dòng này
-        //   },
-        //   true,
-        // );
-
-        // const audients = await fetchAll(audientCursor);
-        // for (const audient of audients) {
-        //   if (!audient.ad_id) continue;
-
-        //   await this.prisma.adAudienceInsight.upsert({
-        //     where: {
-        //       adId_age_gender_level_range_dateStart: {
-        //         adId: audient.ad_id,
-        //         age: audient.age,
-        //         gender: audient.gender,
-        //         level: LevelInsight.AD,
-        //         dateStart: audient.date_start,
-        //         range: InsightRange.MAX,
-        //       },
-        //     },
-        //     update: {
-        //       age: audient.age,
-        //       gender: audient.gender,
-        //       dateStart: audient.date_start,
-        //       dateStop: audient.date_stop,
-        //       ...extractCampaignMetrics(audient),
-        //       rawPayload: audient,
-        //     },
-        //     create: {
-        //       adId: audient.ad_id,
-        //       age: audient.age,
-        //       gender: audient.gender,
-        //       level: LevelInsight.AD,
-        //       range: InsightRange.MAX,
-
-        //       dateStart: audient.date_start,
-        //       dateStop: audient.date_stop,
-        //       ...extractCampaignMetrics(audient),
-        //       rawPayload: audient,
-        //     },
-        //   });
-        // }
 
         await sleep(800);
       }
@@ -1120,7 +1067,6 @@ export class TaskCron {
      * 1️⃣ Lấy toàn bộ creative + ads
      */
     const creatives = await this.prisma.creative.findMany({
-      where: { account: { needsReauth: false } },
       select: {
         id: true,
         ads: {
