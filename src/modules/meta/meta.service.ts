@@ -1,12 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import axios from 'axios';
 import 'dotenv/config';
-import {
-  AdAccount,
-  AdVideo,
-  FacebookAdsApi,
-  User,
-} from 'facebook-nodejs-business-sdk';
+import { AdAccount, FacebookAdsApi, User } from 'facebook-nodejs-business-sdk';
 import {
   beautyFashionKeywords,
   commonKeywords,
@@ -217,8 +212,12 @@ export class MetaService {
         let uploadResult: any = null;
 
         try {
-          const videoNode = await new AdVideo(videoId).read(AD_VIDEO_FIELDS);
-          uploadResult = videoNode?._data;
+          const videoNode = await adAccount.getAdVideos(
+            AD_VIDEO_FIELDS,
+            { ids: [videoId] },
+            true,
+          );
+          uploadResult = (await fetchAll(videoNode))[0];
         } catch (err) {
           console.warn(
             `⚠️ Cannot read video ${videoId}, fallback to creative data`,
@@ -234,7 +233,6 @@ export class MetaService {
           accountId,
           thumbnailUrl: ad.creative?.thumbnail_url || null,
         };
-
         const finalData = uploadResult
           ? {
               id: uploadResult.id,
