@@ -832,9 +832,9 @@ export class TaskCron {
           await this.prisma.adInsight.upsert({
             where: {
               adId_dateStart_range: {
-                dateStart: i.date_start,
                 adId: i.ad_id,
                 range: InsightRange.MAX,
+                dateStart: i.date_start,
               },
             },
             update: {
@@ -1119,9 +1119,21 @@ export class TaskCron {
         },
       });
 
-      const groupedMax = await this.prisma.adInsight.aggregate({
+      const uniqueMaxPerAd = await this.prisma.adInsight.findMany({
         where: {
           adId: { in: adIds },
+          range: 'MAX',
+        },
+        orderBy: [
+          { adId: 'asc' },
+          { dateStart: 'asc' }, // lấy lifetime lớn nhất
+        ],
+        distinct: ['adId'],
+      });
+
+      const groupedMax = await this.prisma.adInsight.aggregate({
+        where: {
+          id: { in: uniqueMaxPerAd.map((u) => u.id) },
           range: 'MAX',
         },
         _sum: {
