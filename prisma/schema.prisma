@@ -1532,3 +1532,66 @@ enum PlanningStatus {
     RUNNING
     FAILED
 }
+
+model CreativeFolder {
+    id            String           @id
+    name          String
+    description   String?
+    parentId      String?
+    parent        CreativeFolder?  @relation("FolderTree", fields: [parentId], references: [id])
+    children      CreativeFolder[] @relation("FolderTree")
+    creation_time String?
+    // relations
+    assets        CreativeAsset[]
+
+    createdAtLocal DateTime @default(now())
+    updatedAt      DateTime @updatedAt
+
+    @@index([parentId])
+}
+
+enum AssetType {
+    IMAGE
+    VIDEO
+}
+
+model CreativeAsset {
+    id   String    @id
+    name String?
+    type AssetType
+
+    // metadata chung
+    width     Int?
+    height    Int?
+    thumbnail String?
+
+    // image
+    imageUrl  String?
+    imageHash String?
+
+    //drive
+    drive_url String?
+
+    // video
+    video_id         String?
+    video_source     String?
+    video_thumbnails Json?
+    duration         Int?
+
+    creation_time String?
+
+    status Json?
+
+    // relation
+    folderId String
+    folder   CreativeFolder @relation(fields: [folderId], references: [id])
+
+    createdAtLocal DateTime @default(now())
+    updatedAt      DateTime @updatedAt
+
+    videoSource Json?
+
+    @@index([folderId])
+    @@index([video_id])
+    @@index([imageHash])
+}

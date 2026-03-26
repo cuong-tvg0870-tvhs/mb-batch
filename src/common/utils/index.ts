@@ -288,7 +288,6 @@ export async function fetchAll(
     for (const item of page) {
       result.push(item._data);
     }
-
     while (page.hasNext()) {
       try {
         page = await page.next();
