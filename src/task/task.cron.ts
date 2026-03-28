@@ -53,7 +53,11 @@ export class TaskCron {
 
   async onModuleInit() {
     this.logger.log('🚀 App started → scan video immediately');
+    // await this.syncCampaignData();
+
+    await this.syncMaxCampaignInsights();
     // await this.syncDailyCampaignInsights();
+
     // await this.syncMaxAdsetInsights();
     // await this.syncMaxAdsetAudienceInsights();
     // await this.syncDailyAdsetInsights();
@@ -62,17 +66,79 @@ export class TaskCron {
     // await this.syncMaxAdAudienceInsights();
     // await this.syncDailyAdInsights();
 
+    // await this.syncCampaignCore();
+
     // await this.syncImage();
-    await this.syncVideo();
+    // await this.syncVideo();
 
     // await this.calculateCreativeInsightFromAdInsight();
   }
 
-  @Cron('0 5 0,12 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('0 5 0 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncCampaignCore() {
     this.logger.log('🔄 Sync Campaign Core');
     await this.syncCampaignData();
     this.logger.log('✅ Sync Campaign Core DONE');
+  }
+
+  @Cron('0 5 1 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async syncMaxCampaignInsightsJob() {
+    this.logger.log('🔄 Sync MAX Campaign Insights');
+    await this.syncMaxCampaignInsights();
+    this.logger.log('✅ MAX Campaign DONE');
+  }
+
+  @Cron('0 10 2 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async syncMaxAdsetInsightsJob() {
+    this.logger.log('🔄 Sync MAX Adset Insights');
+    await this.syncMaxAdsetInsights();
+    this.logger.log('✅ MAX Adset DONE');
+  }
+
+  @Cron('0 15 3 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async syncMaxAdsetAudienceInsightsJob() {
+    this.logger.log('🔄 Sync MAX Adset Audience Insights');
+    await this.syncMaxAdsetAudienceInsights();
+    this.logger.log('✅ MAX Adset Audience DONE');
+  }
+
+  @Cron('0 20 4 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async syncMaxAdInsightsJob() {
+    this.logger.log('🔄 Sync MAX Ad Insights');
+    await this.syncMaxAdInsights();
+    this.logger.log('✅ MAX Ad DONE');
+  }
+
+  @Cron('0 25 5 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async syncMaxAdAudienceInsightsJob() {
+    this.logger.log('🔄 Sync MAX Ad Audience Insights');
+    await this.syncMaxAdAudienceInsights();
+    this.logger.log('✅ MAX Ad Audience DONE');
+  }
+
+  @Cron('0 30 6,12,17 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async syncDailyCampaignInsightsJob() {
+    this.logger.log('🔄 Sync DAILY Campaign Insights');
+    await this.syncDailyCampaignInsights();
+    this.logger.log('✅ DAILY Campaign DONE');
+  }
+
+  @Cron('0 35 7,13,18 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async syncDailyAdsetInsightsJob() {
+    this.logger.log('🔄 Sync DAILY Adset Insights');
+    await this.syncDailyAdsetInsights();
+    this.logger.log('✅ DAILY Adset DONE');
+  }
+
+  @Cron('0 40 8,13,48 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async syncDailyAdInsightsJob() {
+    this.logger.log('🔄 Sync DAILY Ad Insights');
+    await this.syncDailyAdInsights();
+    this.logger.log('✅ DAILY Ad DONE');
+
+    this.logger.log('🔄 Analytic Creative Insight');
+    await this.calculateCreativeInsightFromAdInsight();
+    this.logger.log('✅ Analytic Creative Insight');
   }
 
   async upsertFullStructure(campaigns: any[], accountId: string) {
@@ -392,82 +458,6 @@ export class TaskCron {
       throw new InternalServerErrorException(parseMetaError(err));
     }
   }
-
-  // /*
-  // |--------------------------------------------------------------------------
-  // | MAX INSIGHTS
-  // |--------------------------------------------------------------------------
-  // | Lifetime insights
-  // | Frequency: every 12h
-  // */
-
-  // @Cron('0 30 1,13 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  // async syncMaxCampaignInsightsJob() {
-  //   this.logger.log('🔄 Sync MAX Campaign Insights');
-  //   await this.syncMaxCampaignInsights();
-  //   this.logger.log('✅ MAX Campaign DONE');
-  // }
-
-  // @Cron('0 45 1,13 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  // async syncMaxAdsetInsightsJob() {
-  //   this.logger.log('🔄 Sync MAX Adset Insights');
-  //   await this.syncMaxAdsetInsights();
-  //   this.logger.log('✅ MAX Adset DONE');
-  // }
-
-  // @Cron('0 0 2,14 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  // async syncMaxAdsetAudienceInsightsJob() {
-  //   this.logger.log('🔄 Sync MAX Adset Audience Insights');
-  //   await this.syncMaxAdsetAudientInsights();
-  //   this.logger.log('✅ MAX Adset Audience DONE');
-  // }
-
-  // @Cron('0 15 2,14 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  // async syncMaxAdInsightsJob() {
-  //   this.logger.log('🔄 Sync MAX Ad Insights');
-  //   await this.syncMaxAdInsights();
-  //   this.logger.log('✅ MAX Ad DONE');
-  // }
-
-  // @Cron('0 30 2,14 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  // async syncMaxAdAudienceInsightsJob() {
-  //   this.logger.log('🔄 Sync MAX Ad Audience Insights');
-  //   await this.syncMaxAdAudientInsights();
-  //   this.logger.log('✅ MAX Ad Audience DONE');
-  // }
-
-  // /*
-  // |--------------------------------------------------------------------------
-  // | DAILY INSIGHTS
-  // |--------------------------------------------------------------------------
-  // | Rolling backfill 2–3 days
-  // | Frequency: every 6h
-  // */
-
-  // @Cron('0 15 3,9,15,21 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  // async syncDailyCampaignInsightsJob() {
-  //   this.logger.log('🔄 Sync DAILY Campaign Insights');
-  //   await this.syncDailyCampaignInsights();
-  //   this.logger.log('✅ DAILY Campaign DONE');
-  // }
-
-  // @Cron('0 30 3,9,15,21 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  // async syncDailyAdsetInsightsJob() {
-  //   this.logger.log('🔄 Sync DAILY Adset Insights');
-  //   await this.syncDailyAdsetInsights();
-  //   this.logger.log('✅ DAILY Adset DONE');
-  // }
-
-  // @Cron('0 45 3,9,15,21 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  // async syncDailyAdInsightsJob() {
-  //   this.logger.log('🔄 Sync DAILY Ad Insights');
-  //   await this.syncDailyAdInsights();
-  //   this.logger.log('✅ DAILY Ad DONE');
-
-  //   this.logger.log('🔄 Analytic Creative Insight');
-  //   await this.calculateCreativeInsightFromAdInsight();
-  //   this.logger.log('✅ Analytic Creative Insight');
-  // }
 
   // /* =====================================================
   //    CAMPAIGN MAX
@@ -1033,7 +1023,6 @@ export class TaskCron {
             AD_INSIGHT_FIELDS,
             {
               level: 'ad',
-              // Theo nguồn tài liệu [1], 'lifetime' đã bị thay thế bởi 'maximum' (tối đa 37 tháng)
               date_preset: 'maximum',
               action_attribution_windows: '7d_click',
               action_breakdowns: 'action_type',
@@ -1563,15 +1552,31 @@ export class TaskCron {
   async syncImage() {
     this.logger.log('🔄 Chỉ cập nhật AdImage đã tồn tại trong DB...');
     this.init();
+    const expiredDate = new Date(Date.now() - 12 * 60 * 60 * 1000);
 
     try {
       // 1. Lấy danh sách các hình ảnh hiện có, nhóm theo accountId
       const existingImages = await this.prisma.adImage.findMany({
-        where: { account: { needsReauth: false } },
-        select: { hash: true, accountId: true },
+        where: {
+          account: { needsReauth: false },
+          OR: [{ url: null }, { updatedAt: { lt: expiredDate } }],
+        },
+        select: {
+          hash: true,
+          accountId: true,
+          updatedAt: true,
+          url: true,
+          createdTime: true,
+        },
       });
 
       if (existingImages.length === 0) return;
+
+      const needRefresh = existingImages.filter((img) => {
+        if (!img.url) return true;
+
+        return this.isMetaUrlExpired(img.url);
+      });
 
       const byAccount = this.groupByAccount(
         existingImages.map((img) => ({
@@ -1612,9 +1617,7 @@ export class TaskCron {
                       createdAt: img?.created_time
                         ? new Date(img?.created_time)
                         : undefined,
-                      updatedAt: img?.updated_time
-                        ? new Date(img?.updated_time)
-                        : undefined,
+                      updatedAt: new Date(),
                     },
                   }),
                 ),
@@ -1640,12 +1643,15 @@ export class TaskCron {
       '🔄 Cập nhật AdVideo đã tồn tại trong DB (Sử dụng Multiple Object IDs)',
     );
     const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
-
+    const expiredDate = new Date(Date.now() - 12 * 60 * 60 * 1000);
     try {
       // 1. Lấy toàn bộ danh sách Video ID hiện có trong DB [2]
       // Chúng ta không cần groupBy theo accountId nữa vì sẽ gọi trực tiếp qua ID video
       const existingVideos = await this.prisma.adVideo.findMany({
-        where: { account: { needsReauth: false } },
+        where: {
+          account: { needsReauth: false },
+          OR: [{ thumbnailUrl: null }, { updatedAt: { lt: expiredDate } }],
+        },
         select: { id: true },
       });
 
@@ -1678,7 +1684,6 @@ export class TaskCron {
             // Sử dụng Prisma Transaction để cập nhật hàng loạt nhằm đảm bảo tính toàn vẹn [3]
             await this.prisma.$transaction(
               videos.map((vid: any) => {
-                console.log(vid.source);
                 return this.prisma.adVideo.update({
                   where: { id: vid.id },
                   data: {
@@ -1712,6 +1717,27 @@ export class TaskCron {
     } catch (err) {
       this.logger.error(`Lỗi nghiêm trọng syncVideo: ${err.message}`);
     }
+  }
+
+  private getMetaUrlExpireDate(url?: string): Date | null {
+    if (!url) return null;
+
+    try {
+      const u = new URL(url);
+      const oe = u.searchParams.get('oe');
+      if (!oe) return null;
+
+      const timestamp = parseInt(oe, 16);
+      return new Date(timestamp * 1000);
+    } catch {
+      return null;
+    }
+  }
+  private isMetaUrlExpired(url?: string): boolean {
+    const expireDate = this.getMetaUrlExpireDate(url);
+    if (!expireDate) return true;
+
+    return expireDate.getTime() < Date.now();
   }
 
   // // HELPER
