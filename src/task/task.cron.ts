@@ -56,7 +56,6 @@ export class TaskCron implements OnModuleInit {
 
   async onModuleInit() {
     this.logger.log('🚀 TaskCron initialized');
-    // await this.syncMaxCampaignInsightsJob();
   }
 
   // @Cron('0 5 0 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
@@ -1090,11 +1089,7 @@ export class TaskCron implements OnModuleInit {
                   until: maxStop.format('YYYY-MM-DD'),
                 },
                 filtering: [
-                  {
-                    field: 'ad.id',
-                    operator: 'EQUAL',
-                    value: max.adId,
-                  },
+                  { field: 'ad.id', operator: 'EQUAL', value: max.adId },
                 ],
               },
               true,
@@ -1278,10 +1273,7 @@ export class TaskCron implements OnModuleInit {
     const threeDaysAgo = dayjs().subtract(2, 'day').format('YYYY-MM-DD');
 
     const creatives = await this.prisma.creative.findMany({
-      select: {
-        id: true,
-        ads: { select: { id: true } },
-      },
+      select: { rawPayload: true, id: true, ads: { select: { id: true } } },
     });
 
     function sumMetrics(target: Record<string, number>, source: any) {
@@ -1422,26 +1414,57 @@ export class TaskCron implements OnModuleInit {
 
         let status: CreativeStatus;
 
-        if (maxSpend === 0) status = CreativeStatus.TEST;
-        else if (maxSpend <= 100_000) status = CreativeStatus.NEED_SPEND;
+        if (maxSpend === 0) {
+          status = CreativeStatus.TEST;
+        } else if (maxSpend > 0 && maxSpend <= 100_000) {
+          status = CreativeStatus.NEED_SPEND;
+        }
+
+        // ✅ SCALE P1
         else if (
-          (maxSpend <= 500_000 && roasMax >= 2) ||
-          (maxSpend > 500_000 && roasMax >= 2.2) ||
+          ((maxSpend > 100_000 && maxSpend <= 500_000 && roasMax >= 2) ||
+            (maxSpend > 500_000 && roasMax >= 2.2)) &&
           roas7d >= 2.5
-        )
+        ) {
           status = CreativeStatus.SCALE_P1;
+        }
+
+        // ✅ SCALE P2
         else if (
-          (maxSpend <= 500_000 && roasMax >= 1.5) ||
-          (maxSpend > 500_000 && roasMax >= 1.8 && ctrMax > 0.03) ||
-          (roas7d >= 2.2 && roas3d >= 2.2)
-        )
+          ((maxSpend > 100_000 && maxSpend <= 500_000 && roasMax >= 1.5) ||
+            (maxSpend > 500_000 && roasMax >= 1.8 && ctrMax > 0.03)) &&
+          roas7d >= 2.2 &&
+          roas3d >= 2.2
+        ) {
           status = CreativeStatus.SCALE_P2;
+        }
+
+        // ✅ REVIEW
         else if (
-          (maxSpend <= 500_000 && maxPurchases < 1 && ctrMax > 0.03) ||
+          (maxSpend > 100_000 &&
+            maxSpend <= 500_000 &&
+            maxPurchases < 1 &&
+            ctrMax > 0.03) ||
           (maxSpend > 500_000 && roasMax < 1.8 && ctrMax > 0.03)
-        )
+        ) {
           status = CreativeStatus.REVIEW;
-        else status = CreativeStatus.OFF;
+        }
+
+        // ✅ OFF
+        else if (
+          (maxSpend > 100_000 &&
+            maxSpend <= 500_000 &&
+            maxPurchases < 1 &&
+            ctrMax < 0.03) ||
+          (maxSpend > 500_000 && roasMax < 1.8 && ctrMax < 0.03)
+        ) {
+          status = CreativeStatus.OFF;
+        }
+
+        // ✅ NEW: fallback
+        else {
+          status = CreativeStatus.OTHER;
+        }
 
         creativeUpdates.push({
           id: creative.id,
@@ -1592,7 +1615,7 @@ export class TaskCron implements OnModuleInit {
       const existingVideos = await this.prisma.adVideo.findMany({
         where: {
           account: { needsReauth: false },
-          status: null,
+          status: { not: null },
           // creatives: {
           //   // some: {
           //   //   NOT: {
@@ -1604,6 +1627,7 @@ export class TaskCron implements OnModuleInit {
           //   // },
           // },
         },
+        orderBy: { status: 'desc' },
         select: { id: true },
       });
 
@@ -1611,7 +1635,7 @@ export class TaskCron implements OnModuleInit {
 
       const videoIds = existingVideos.map((v) => v.id);
 
-      for (const idsChunk of chunk(videoIds, 1)) {
+      for (const idsChunk of chunk(videoIds, 20)) {
         try {
           const response = (await api.call('GET', [], {
             ids: idsChunk.join(','),

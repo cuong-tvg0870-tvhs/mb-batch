@@ -557,6 +557,7 @@ model Ad {
 }
 
 enum CidStatus {
+    OTHER
     TEST
     NEED_TO_SPEND
     SCALE_P1
@@ -794,6 +795,7 @@ model CreativeInsight {
 }
 
 enum CreativeStatus {
+    OTHER
     TEST
     NEED_SPEND
     SCALE_P1
