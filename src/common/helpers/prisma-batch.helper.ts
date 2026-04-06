@@ -31,7 +31,7 @@ export class PrismaBatchHelper {
   /**
    * upsert hàng loạt (transaction nhỏ)
    */
-  async upsertMany<T>(items: T[], handler: (item: T) => any, chunkSize = 50) {
+  async upsertMany<T>(items: T[], handler: (item: T) => any, chunkSize = 20) {
     const chunks = this.chunkArray(items, chunkSize);
 
     for (const chunk of chunks) {

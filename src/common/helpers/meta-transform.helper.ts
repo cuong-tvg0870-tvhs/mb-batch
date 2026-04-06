@@ -71,6 +71,7 @@ export class MetaTransformHelper {
       creativeType: c.object_type,
       imageHash: c.image_hash,
       videoId: c.video_id,
+      thumbnailUrl: c.thumbnail_url,
       pageId,
       postId,
       rawPayload: c,
