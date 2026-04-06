@@ -320,9 +320,14 @@ model Campaign {
     holdRate Float? @default(0)
 
     @@unique([id, systemCampaignId])
-    @@index([accountId])
-    @@index([status])
-    @@index([remoteUpdatedAt])
+    // ✅ INDEXES
+    @@index([accountId, updatedAt(sort: Desc)])
+    @@index([accountId, status, updatedAt(sort: Desc)])
+    @@index([accountId, remoteUpdatedAt(sort: Desc)])
+    // optional (nếu dùng soft delete nhiều)
+    @@index([accountId, deletedAt, updatedAt(sort: Desc)])
+    // optional (nếu dùng cursor pagination)
+    @@index([accountId, updatedAt(sort: Desc), id])
 }
 
 model AdSet {
@@ -423,9 +428,18 @@ model AdSet {
     holdRate              Float?                 @default(0)
     adsetAudienceInsights AdsetAudienceInsight[]
 
-    @@index([campaignId])
-    @@index([accountId])
-    @@index([status])
+    // 🔥 list theo campaign
+    @@index([campaignId, updatedAt(sort: Desc)])
+    // 🔥 list theo account
+    @@index([accountId, updatedAt(sort: Desc)])
+    // 🔥 filter + sort
+    @@index([accountId, status, updatedAt(sort: Desc)])
+    // 🔥 sync data
+    @@index([accountId, remoteUpdatedAt(sort: Desc)])
+    // 🔥 soft delete (nếu dùng)
+    @@index([accountId, deletedAt, updatedAt(sort: Desc)])
+    // 🔥 pagination mượt
+    @@index([campaignId, updatedAt(sort: Desc), id])
 }
 
 model Ad {
@@ -522,10 +536,24 @@ model Ad {
     holdRate           Float?              @default(0)
     adAudienceInsights AdAudienceInsight[]
 
-    @@index([adsetId])
+    // 🔥 list theo adset
+    @@index([adsetId, updatedAt(sort: Desc)])
+    // 🔥 list theo campaign (rất hay dùng dashboard)
+    @@index([campaignId, updatedAt(sort: Desc)])
+    // 🔥 list theo account
+    @@index([accountId, updatedAt(sort: Desc)])
+    // 🔥 filter + sort
+    @@index([accountId, status, updatedAt(sort: Desc)])
+    // 🔥 sync
+    @@index([accountId, remoteUpdatedAt(sort: Desc)])
+    // 🔥 join creative
     @@index([creativeId])
-    @@index([accountId])
-    @@index([status])
+    // 🔥 join cid (nếu dùng tracking nhiều)
+    @@index([cid])
+    // 🔥 pagination
+    @@index([adsetId, updatedAt(sort: Desc), id])
+    // 🔥 soft delete
+    @@index([accountId, deletedAt, updatedAt(sort: Desc)])
 }
 
 enum CidStatus {
@@ -672,7 +700,11 @@ model Creative {
     hookRate Float? @default(0)
     holdRate Float? @default(0)
 
-    @@index([accountId])
+    @@index([accountId, createdAt(sort: Desc)])
+    @@index([accountId, creativeType, createdAt(sort: Desc)])
+    @@index([accountId, remoteUpdatedAt(sort: Desc)])
+    @@index([adId])
+    // optional
     @@index([imageHash])
     @@index([videoId])
 }
@@ -1396,6 +1428,10 @@ model TemplateCampaign {
     createdAt   DateTime  @default(now())
     updatedAt   DateTime  @updatedAt
     deletedAt   DateTime?
+
+    @@index([name])
+    @@index([reference_id])
+    @@index([createdById, createdAt(sort: Desc)])
 }
 
 model SystemCampaign {
@@ -1426,6 +1462,9 @@ model SystemCampaign {
     campaign_CBO         Boolean?
     campaigns            Campaign[]
     templateCampaigns    TemplateCampaign[]
+
+    @@index([status])
+    @@index([createdById, createdAt(sort: Desc)])
 }
 
 model SystemAdSet {
@@ -1454,6 +1493,9 @@ model SystemAdSet {
     adset_budget       Int?
     adset_bidStrategy  String?
     adset_bidAmount    Int?
+
+    @@index([status])
+    @@index([createdById, createdAt(sort: Desc)])
 }
 
 model SystemAd {
@@ -1474,6 +1516,9 @@ model SystemAd {
     accountId String?
     account   Account?         @relation(fields: [accountId], references: [id])
     creative  SystemCreative[]
+
+    @@index([status])
+    @@index([createdById, createdAt(sort: Desc)])
 }
 
 model SystemCreative {
@@ -1496,41 +1541,9 @@ model SystemCreative {
 
     accountId String?
     account   Account? @relation(fields: [accountId], references: [id])
-}
 
-model Planning {
-    id          String  @id @default(cuid())
-    name        String
-    description String?
-
-    type    PlanningType
-    enabled Boolean      @default(true)
-
-    schedule Json // { every: 5, unit: "minute" } | { cron: "0 */6 * * *" }
-
-    config Json // type-specific config
-
-    status PlanningStatus @default(IDLE)
-
-    lastRunAt DateTime?
-    nextRunAt DateTime?
-
-    createdById String
-    createdAt   DateTime @default(now())
-    updatedAt   DateTime @updatedAt
-}
-
-enum PlanningType {
-    SYNC_CAMPAIGN
-    SYNC_INSIGHT
-    RULE_CAMPAIGN
-}
-
-enum PlanningStatus {
-    IDLE
-    WAITING
-    RUNNING
-    FAILED
+    @@index([status])
+    @@index([createdById, createdAt(sort: Desc)])
 }
 
 model CreativeFolder {

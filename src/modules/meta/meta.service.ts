@@ -7,16 +7,12 @@ import {
   commonKeywords,
   fetchAll,
   LIMIT_DATA,
-  toPrismaJson,
 } from '../../common/utils';
 
-import { MetaAd } from 'src/common/dtos/types.dto';
 import { sleep } from '../../common/utils';
 import {
   AD_ACCOUNT_FIELDS,
-  AD_IMAGE_FIELDS,
   AD_PIXEL_FIELDS,
-  AD_VIDEO_FIELDS,
 } from '../../common/utils/meta-field';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -126,134 +122,5 @@ export class MetaService {
       await sleep(5000);
     }
     return { success: true, accounts };
-  }
-
-  async syncAdAssetsLegacy(
-    adAccount: AdAccount,
-    accountId: string,
-    ad: MetaAd,
-  ) {
-    /** IMAGE */
-    if (ad.creative?.image_hash) {
-      const exists = await this.prisma.adImage.findFirst({
-        where: { hash: ad.creative.image_hash },
-      });
-
-      if (!exists) {
-        const cursor = await adAccount.getAdImages(
-          AD_IMAGE_FIELDS,
-          { hashes: [ad.creative.image_hash] },
-          true,
-        );
-
-        const image = (await fetchAll(cursor))[0];
-        if (image) {
-          await this.prisma.adImage.upsert({
-            where: {
-              accountId_hash_id: {
-                id: image.id,
-                accountId,
-                hash: image.hash,
-              },
-            },
-            update: {
-              name: image.name,
-              url: image.permalink_url || image.url,
-              permalink_url: image.permalink_url,
-              height: image.height,
-              width: image.width,
-              rawPayload: toPrismaJson(image),
-              status: image.status,
-              createdTime: image.created_time
-                ? new Date(image.created_time)
-                : undefined,
-              createdAt: image.created_time
-                ? new Date(image.created_time)
-                : undefined,
-              updatedAt: image.updated_time
-                ? new Date(image.updated_time)
-                : undefined,
-            },
-            create: {
-              id: image.id,
-              accountId,
-              hash: image.hash,
-              name: image.name,
-              url: image.permalink_url || image.url,
-              permalink_url: image.permalink_url,
-
-              height: image.height,
-              width: image.width,
-              rawPayload: toPrismaJson(image),
-              status: image.status,
-              createdTime: image.created_time
-                ? new Date(image.created_time)
-                : undefined,
-              createdAt: image.created_time
-                ? new Date(image.created_time)
-                : undefined,
-              updatedAt: image.updated_time
-                ? new Date(image.updated_time)
-                : undefined,
-            },
-          });
-        }
-      }
-    }
-    /** VIDEO */
-    if (ad.creative?.video_id) {
-      const exists = await this.prisma.adVideo.findFirst({
-        where: { id: ad.creative.video_id },
-      });
-
-      if (!exists) {
-        const videoId = ad.creative.video_id;
-
-        let uploadResult: any = null;
-
-        try {
-          const videoNode = await adAccount.getAdVideos(
-            AD_VIDEO_FIELDS,
-            { ids: [videoId] },
-            true,
-          );
-          uploadResult = (await fetchAll(videoNode))[0];
-        } catch (err) {
-          console.warn(
-            `⚠️ Cannot read video ${videoId}, fallback to creative data`,
-          );
-        }
-
-        /**
-         * Fallback nếu không read được video
-         */
-        const fallbackData = {
-          id: videoId,
-          title: `Video ${videoId} - no permission`,
-          accountId,
-          thumbnailUrl: ad.creative?.thumbnail_url || null,
-        };
-        const finalData = uploadResult
-          ? {
-              id: uploadResult.id,
-              title: uploadResult?.title,
-              accountId,
-              source:
-                uploadResult.source ||
-                `https://facebook.com/${uploadResult.permalink_url}`,
-              status: uploadResult?.status?.video_status,
-              thumbnailUrl: uploadResult?.picture || uploadResult?.source,
-              length: uploadResult?.length,
-              rawPayload: uploadResult,
-            }
-          : fallbackData;
-
-        await this.prisma.adVideo.upsert({
-          where: { id: finalData.id },
-          create: finalData,
-          update: finalData,
-        });
-      }
-    }
   }
 }
