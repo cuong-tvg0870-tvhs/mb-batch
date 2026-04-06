@@ -56,7 +56,7 @@ export class TaskCron implements OnModuleInit {
 
   async onModuleInit() {
     this.logger.log('🚀 TaskCron initialized');
-    await this.syncDailyAdInsightsJob();
+    // await this.syncMaxCampaignInsightsJob();
   }
 
   // @Cron('0 5 0 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
@@ -1085,10 +1085,10 @@ export class TaskCron implements OnModuleInit {
                 date_preset: 'maximum',
                 action_attribution_windows: '7d_click',
                 action_breakdowns: 'action_type',
-                // time_range: {
-                //   since: since.format('YYYY-MM-DD'),
-                //   until: maxStop.format('YYYY-MM-DD'),
-                // },
+                time_range: {
+                  since: since.format('YYYY-MM-DD'),
+                  until: maxStop.format('YYYY-MM-DD'),
+                },
                 filtering: [
                   {
                     field: 'ad.id',
