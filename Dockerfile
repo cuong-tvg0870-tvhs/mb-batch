@@ -1,29 +1,24 @@
 # ========================
-# deps: cài full deps để build
-# ========================
-FROM node:20-alpine AS deps
-WORKDIR /app
-
-COPY package.json package-lock.json* ./
-
-# npm ci nhanh và deterministic hơn
-RUN npm ci
-
-
-# ========================
-# builder: generate prisma + build nest
+# builder: install deps (cached) + generate prisma + build nest
 # ========================
 FROM node:20-alpine AS builder
 WORKDIR /app
 
-COPY --from=deps /app/node_modules ./node_modules
+COPY package.json yarn.lock* ./
+# --mount=type=cache keeps the Yarn cache across builds → no re-download on repeat builds
+# Inline registry/timeout so every stage gets the same config
+RUN --mount=type=cache,target=/root/.yarn \
+    yarn install --frozen-lockfile \
+                 --registry https://registry.npmjs.org \
+                 --network-timeout 600000
+
 COPY . .
 
 # Prisma chỉ cần DATABASE_URL hợp lệ về format
 RUN DATABASE_URL="postgresql://user:pass@localhost:5432/db" \
     npx prisma generate
 
-RUN npm run build
+RUN yarn build
 
 
 # ========================
@@ -32,9 +27,11 @@ RUN npm run build
 FROM node:20-alpine AS prod-deps
 WORKDIR /app
 
-COPY package.json package-lock.json* ./
-
-RUN npm ci --omit=dev
+COPY package.json yarn.lock* ./
+RUN --mount=type=cache,target=/root/.yarn \
+    yarn install --frozen-lockfile --production \
+                 --registry https://registry.npmjs.org \
+                 --network-timeout 600000
 
 # copy Prisma client đã generate
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma

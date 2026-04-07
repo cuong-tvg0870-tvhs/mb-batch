@@ -14,14 +14,11 @@ import {
   fetchAll,
   parseMetaError,
   sleep,
-  toPrismaJson,
 } from 'src/common/utils';
 
 import {
   AD_FIELDS,
-  AD_IMAGE_FIELDS,
   AD_INSIGHT_FIELDS,
-  AD_VIDEO_FIELDS,
   ADSET_FIELDS,
   CAMPAIGN_FIELDS,
   CREATIVE_FIELDS,
@@ -57,6 +54,8 @@ export class TaskCron implements OnModuleInit {
 
   async onModuleInit() {
     this.logger.log('🚀 TaskCron initialized');
+    // await this.syncAllAdSetInsights();
+    // await this.syncAllAdInsights();
   }
 
   /**
@@ -82,14 +81,14 @@ export class TaskCron implements OnModuleInit {
   @Cron('5 1 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncMaxCampaignInsightsJob() {
     this.logger.log('🔄 Sync MAX Campaign Insights');
-    await this.syncMaxCampaignInsights();
+    await this.syncAllCampaignInsights();
     this.logger.log('✅ MAX Campaign DONE');
   }
 
   @Cron('15 2 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncMaxAdsetInsightsJob() {
     this.logger.log('🔄 Sync MAX Adset Insights');
-    await this.syncMaxAdSetInsights();
+    await this.syncAllAdSetInsights();
     this.logger.log('✅ MAX Adset DONE');
   }
 
@@ -103,7 +102,7 @@ export class TaskCron implements OnModuleInit {
   @Cron('35 4 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncMaxAdInsightsJob() {
     this.logger.log('🔄 Sync MAX Ad Insights');
-    await this.syncMaxAdInsights();
+    await this.syncAllAdInsights();
     this.logger.log('✅ MAX Ad DONE');
   }
 
@@ -362,123 +361,6 @@ export class TaskCron implements OnModuleInit {
     }
   }
 
-  async syncMaxCampaignInsights() {
-    this.logger.log('🔄 Sync MAX Campaign Insight');
-    this.init();
-
-    const prismaHelper = new PrismaBatchHelper(this.prisma);
-
-    const campaigns = await this.prisma.campaign.findMany({
-      where: { account: { needsReauth: false } },
-      select: { id: true, accountId: true },
-    });
-
-    const byAccount = this.groupByAccount(campaigns);
-
-    let totalProcessed = 0;
-
-    for (const [accountId, ids] of Object.entries(byAccount)) {
-      const adAccount = new AdAccount(accountId);
-
-      this.logger.log(`➡️ Account ${accountId} - ${ids.length} campaigns`);
-
-      for (const idsChunk of chunk(ids, 50)) {
-        try {
-          // ================= FETCH =================
-          const cursor = await adAccount.getInsights(
-            AD_INSIGHT_FIELDS,
-            {
-              limit: 100,
-              level: 'campaign',
-              date_preset: 'maximum',
-              action_attribution_windows: '7d_click',
-              action_breakdowns: 'action_type',
-              filtering: [
-                { field: 'campaign.id', operator: 'IN', value: idsChunk },
-              ],
-            },
-            true,
-          );
-
-          const insights = await fetchAll(cursor);
-
-          if (!insights.length) {
-            this.logger.log(`⚠️ Empty chunk`);
-            continue;
-          }
-
-          const validInsights = insights.filter((i) => i.campaign_id);
-
-          const campaignIds = [
-            ...new Set(validInsights.map((i) => i.campaign_id)),
-          ];
-
-          this.logger.log(
-            `📦 ${validInsights.length} insights | ${campaignIds.length} campaigns`,
-          );
-
-          // ================= DELETE (NHẸ) =================
-          await this.prisma.campaignInsight.deleteMany({
-            where: {
-              campaignId: { in: campaignIds },
-              range: InsightRange.MAX,
-            },
-          });
-
-          // ================= TRANSFORM =================
-          const insightData = validInsights.map((i) => {
-            const metrics = extractCampaignMetrics(i);
-
-            return {
-              campaignId: i.campaign_id,
-              level: LevelInsight.CAMPAIGN,
-              range: InsightRange.MAX,
-              dateStart: i.date_start,
-              dateStop: i.date_stop,
-              ...metrics,
-              rawPayload: i,
-            };
-          });
-
-          // ================= INSERT =================
-          await prismaHelper.createManySafe(
-            this.prisma.campaignInsight,
-            insightData,
-          );
-
-          // ================= UPDATE CAMPAIGN (BATCH) =================
-          const campaignUpdateData = validInsights.map((i) => {
-            const metrics = extractCampaignMetrics(i);
-
-            return {
-              id: i.campaign_id,
-              ...metrics,
-            };
-          });
-
-          await prismaHelper.upsertMany(campaignUpdateData, (item) =>
-            this.prisma.campaign.update({
-              where: { id: item.id },
-              data: item,
-            }),
-          );
-
-          totalProcessed += validInsights.length;
-
-          this.logger.log(`✅ Chunk done (${validInsights.length} insights)`);
-
-          await sleep(800);
-        } catch (error) {
-          this.logger.error(
-            `❌ Account ${accountId}: ${parseMetaError(error).message}`,
-          );
-        }
-      }
-    }
-
-    this.logger.log(`🎯 DONE MAX Campaign Insight - Total: ${totalProcessed}`);
-  }
-
   async syncDailyCampaignInsights() {
     this.logger.log('🔄 Sync DAILY Campaign Insights');
     this.init();
@@ -641,8 +523,8 @@ export class TaskCron implements OnModuleInit {
     );
   }
 
-  async syncMaxAdSetInsights() {
-    this.logger.log('🔄 Sync MAX Adset Insight');
+  async syncAllAdSetInsights() {
+    this.logger.log('🔄 Sync MAX + 3D + 7D AdSet Insight');
     this.init();
 
     const prismaHelper = new PrismaBatchHelper(this.prisma);
@@ -656,6 +538,30 @@ export class TaskCron implements OnModuleInit {
 
     let totalProcessed = 0;
 
+    // 🔥 3 JOBS
+    const JOBS = [
+      {
+        range: InsightRange.MAX,
+        datePreset: 'maximum',
+        field: 'insightMaxId',
+      },
+      {
+        range: InsightRange.DAY_3,
+        datePreset: 'last_3d',
+        field: 'insight3dId',
+      },
+      {
+        range: InsightRange.DAY_7,
+        datePreset: 'last_7d',
+        field: 'insight7dId',
+      },
+      {
+        range: InsightRange.TODAY,
+        datePreset: 'today',
+        field: 'insightTodayId',
+      },
+    ];
+
     for (const [accountId, ids] of Object.entries(byAccount)) {
       const adAccount = new AdAccount(accountId);
 
@@ -663,85 +569,111 @@ export class TaskCron implements OnModuleInit {
 
       for (const idsChunk of chunk(ids, 50)) {
         try {
-          // ================= FETCH =================
-          const cursor = await adAccount.getInsights(
-            AD_INSIGHT_FIELDS,
-            {
-              limit: 100,
-              level: 'adset',
-              date_preset: 'maximum',
-              action_attribution_windows: '7d_click',
-              action_breakdowns: 'action_type',
-              filtering: [
-                { field: 'adset.id', operator: 'IN', value: idsChunk },
-              ],
-            },
-            true,
-          );
+          // 🔥 CALL API SONG SONG
+          const results = await Promise.all(
+            JOBS.map(async (job) => {
+              const cursor = await adAccount.getInsights(
+                AD_INSIGHT_FIELDS,
+                {
+                  limit: 100,
+                  level: 'adset',
+                  date_preset: job.datePreset,
+                  action_attribution_windows: '7d_click',
+                  action_breakdowns: 'action_type',
+                  filtering: [
+                    { field: 'adset.id', operator: 'IN', value: idsChunk },
+                  ],
+                },
+                true,
+              );
 
-          const insights = await fetchAll(cursor);
+              const insights = await fetchAll(cursor);
 
-          if (!insights.length) {
-            this.logger.log(`⚠️ Empty chunk`);
-            continue;
-          }
-
-          const validInsights = insights.filter((i) => i.campaign_id);
-
-          const adSetIds = [
-            ...new Set(validInsights.map((i) => i.campaign_id)),
-          ];
-
-          this.logger.log(
-            `📦 ${validInsights.length} insights | ${adSetIds.length} adsets`,
-          );
-
-          // ================= DELETE (NHẸ) =================
-          await this.prisma.adSetInsight.deleteMany({
-            where: {
-              adSetId: { in: adSetIds },
-              range: InsightRange.MAX,
-            },
-          });
-
-          // ================= TRANSFORM =================
-          const insightData = validInsights.map((i) => {
-            const metrics = extractCampaignMetrics(i);
-
-            return {
-              adSetId: i.adset_id,
-              level: LevelInsight.ADSET,
-              range: InsightRange.MAX,
-              dateStart: i.date_start,
-              dateStop: i.date_stop,
-              ...metrics,
-              rawPayload: i,
-            };
-          });
-
-          // ================= INSERT =================
-          await prismaHelper.createManySafe(
-            this.prisma.adSetInsight,
-            insightData,
-          );
-
-          // ================= UPDATE CAMPAIGN (BATCH) =================
-          const adSetUpdateData = validInsights.map((i) => {
-            const metrics = extractCampaignMetrics(i);
-
-            return { id: i.adset_id, ...metrics };
-          });
-
-          await prismaHelper.upsertMany(adSetUpdateData, (item) =>
-            this.prisma.adSet.update({
-              where: { id: item.id },
-              data: item,
+              return {
+                job,
+                insights: insights.filter((i) => i.adset_id),
+              };
             }),
           );
 
-          totalProcessed += validInsights.length;
+          // ================= PROCESS =================
+          for (const { job, insights } of results) {
+            if (!insights.length) continue;
 
-          this.logger.log(`✅ Chunk done (${validInsights.length} insights)`);
+            const adSetIds = [...new Set(insights.map((i) => i.adset_id))];
+
+            this.logger.log(`📦 ${job.range}: ${insights.length} insights`);
+
+            // ❗ giữ logic MAX (delete)
+            if (job.range === InsightRange.MAX) {
+              await this.prisma.adSetInsight.deleteMany({
+                where: {
+                  adSetId: { in: adSetIds },
+                  range: job.range,
+                },
+              });
+            }
+
+            // ================= TRANSFORM =================
+            const insightData = insights.map((i) => {
+              const metrics = extractCampaignMetrics(i);
+
+              return {
+                adSetId: i.adset_id,
+                level: LevelInsight.ADSET,
+                range: job.range,
+                dateStart: i.date_start,
+                dateStop: i.date_stop,
+                ...metrics,
+                rawPayload: i,
+              };
+            });
+
+            // ================= INSERT =================
+            await prismaHelper.createManySafe(
+              this.prisma.adSetInsight,
+              insightData,
+            );
+
+            // ================= GET INSERTED IDS =================
+            const inserted = await this.prisma.adSetInsight.findMany({
+              where: {
+                adSetId: { in: adSetIds },
+                range: job.range,
+              },
+              select: { id: true, adSetId: true },
+            });
+
+            const map = new Map(inserted.map((i) => [i.adSetId, i.id]));
+
+            // ================= UPDATE ADSET =================
+            await prismaHelper.upsertMany(adSetIds, (id) => {
+              const insightId = map.get(id) || null;
+
+              const data: any = {
+                [job.field]: insightId,
+              };
+
+              // 🔥 giữ logic MAX (update metrics)
+              if (job.range === InsightRange.MAX) {
+                const insight = insights.find((i) => i.adset_id === id);
+                if (insight) {
+                  Object.assign(data, extractCampaignMetrics(insight));
+                }
+              }
+
+              return this.prisma.adSet.update({
+                where: { id },
+                data,
+              });
+            });
+
+            totalProcessed += insights.length;
+
+            this.logger.log(
+              `✅ ${job.range} done (${insights.length} insights)`,
+            );
+          }
 
           await sleep(800);
         } catch (error) {
@@ -752,7 +684,9 @@ export class TaskCron implements OnModuleInit {
       }
     }
 
-    this.logger.log(`🎯 DONE MAX adSet Insight - Total: ${totalProcessed}`);
+    this.logger.log(
+      `🎯 DONE MAX + 3D + 7D AdSet Insight - Total: ${totalProcessed}`,
+    );
   }
 
   async syncDailyAdSetInsights() {
@@ -918,8 +852,8 @@ export class TaskCron implements OnModuleInit {
   }
 
   // AD
-  async syncMaxAdInsights() {
-    this.logger.log('🔄 Sync MAX Ad Insight');
+  async syncAllAdInsights() {
+    this.logger.log('🔄 Sync MAX + 3D + 7D Ad Insight');
     this.init();
 
     const prismaHelper = new PrismaBatchHelper(this.prisma);
@@ -933,6 +867,29 @@ export class TaskCron implements OnModuleInit {
 
     let totalProcessed = 0;
 
+    const JOBS = [
+      {
+        range: InsightRange.MAX,
+        datePreset: 'maximum',
+        field: 'insightMaxId',
+      },
+      {
+        range: InsightRange.DAY_3,
+        datePreset: 'last_3d',
+        field: 'insight3dId',
+      },
+      {
+        range: InsightRange.DAY_7,
+        datePreset: 'last_7d',
+        field: 'insight7dId',
+      },
+      {
+        range: InsightRange.TODAY,
+        datePreset: 'today',
+        field: 'insightTodayId',
+      },
+    ];
+
     for (const [accountId, ids] of Object.entries(byAccount)) {
       const adAccount = new AdAccount(accountId);
 
@@ -940,78 +897,111 @@ export class TaskCron implements OnModuleInit {
 
       for (const idsChunk of chunk(ids, 50)) {
         try {
-          // ================= FETCH =================
-          const cursor = await adAccount.getInsights(
-            AD_INSIGHT_FIELDS,
-            {
-              limit: 100,
-              level: 'ad',
-              date_preset: 'maximum',
-              action_attribution_windows: '7d_click',
-              action_breakdowns: 'action_type',
-              filtering: [{ field: 'ad.id', operator: 'IN', value: idsChunk }],
-            },
-            true,
-          );
+          // 🔥 CALL API SONG SONG
+          const results = await Promise.all(
+            JOBS.map(async (job) => {
+              const cursor = await adAccount.getInsights(
+                AD_INSIGHT_FIELDS,
+                {
+                  limit: 100,
+                  level: 'ad',
+                  date_preset: job.datePreset,
+                  action_attribution_windows: '7d_click',
+                  action_breakdowns: 'action_type',
+                  filtering: [
+                    { field: 'ad.id', operator: 'IN', value: idsChunk },
+                  ],
+                },
+                true,
+              );
 
-          const insights = await fetchAll(cursor);
+              const insights = await fetchAll(cursor);
 
-          if (!insights.length) {
-            this.logger.log(`⚠️ Empty chunk`);
-            continue;
-          }
-
-          const validInsights = insights.filter((i) => i.ad_id);
-
-          const adIds = [...new Set(validInsights.map((i) => i.ad_id))];
-
-          this.logger.log(
-            `📦 ${validInsights.length} insights | ${adIds.length} ad`,
-          );
-
-          // ================= DELETE (NHẸ) =================
-          await this.prisma.adInsight.deleteMany({
-            where: {
-              adId: { in: adIds },
-              range: InsightRange.MAX,
-            },
-          });
-
-          // ================= TRANSFORM =================
-          const insightData = validInsights.map((i) => {
-            const metrics = extractCampaignMetrics(i);
-
-            return {
-              adId: i.ad_id,
-              level: LevelInsight.AD,
-              range: InsightRange.MAX,
-              dateStart: i.date_start,
-              dateStop: i.date_stop,
-              ...metrics,
-              rawPayload: i,
-            };
-          });
-
-          // ================= INSERT =================
-          await prismaHelper.createManySafe(this.prisma.adInsight, insightData);
-
-          // ================= UPDATE CAMPAIGN (BATCH) =================
-          const adUpdateData = validInsights.map((i) => {
-            const metrics = extractCampaignMetrics(i);
-
-            return { id: i.ad_id, ...metrics };
-          });
-
-          await prismaHelper.upsertMany(adUpdateData, (item) =>
-            this.prisma.ad.update({
-              where: { id: item.id },
-              data: item,
+              return {
+                job,
+                insights: insights.filter((i) => i.ad_id),
+              };
             }),
           );
 
-          totalProcessed += validInsights.length;
+          // ================= PROCESS =================
+          for (const { job, insights } of results) {
+            if (!insights.length) continue;
 
-          this.logger.log(`✅ Chunk done (${validInsights.length} insights)`);
+            const adIds = [...new Set(insights.map((i) => i.ad_id))];
+
+            this.logger.log(`📦 ${job.range}: ${insights.length} insights`);
+
+            // 🔥 giữ logic MAX
+            if (job.range === InsightRange.MAX) {
+              await this.prisma.adInsight.deleteMany({
+                where: {
+                  adId: { in: adIds },
+                  range: job.range,
+                },
+              });
+            }
+
+            // ================= TRANSFORM =================
+            const insightData = insights.map((i) => {
+              const metrics = extractCampaignMetrics(i);
+
+              return {
+                adId: i.ad_id,
+                level: LevelInsight.AD,
+                range: job.range,
+                dateStart: i.date_start,
+                dateStop: i.date_stop,
+                ...metrics,
+                rawPayload: i,
+              };
+            });
+
+            // ================= INSERT =================
+            await prismaHelper.createManySafe(
+              this.prisma.adInsight,
+              insightData,
+            );
+
+            // ================= GET INSERTED IDS =================
+            const inserted = await this.prisma.adInsight.findMany({
+              where: {
+                adId: { in: adIds },
+                range: job.range,
+              },
+              select: { id: true, adId: true },
+            });
+
+            const map = new Map(inserted.map((i) => [i.adId, i.id]));
+
+            // ================= UPDATE AD =================
+            await prismaHelper.upsertMany(adIds, (id) => {
+              const insightId = map.get(id) || null;
+
+              const data: any = {
+                [job.field]: insightId,
+              };
+
+              // 🔥 giữ logic MAX (update metrics)
+              if (job.range === InsightRange.MAX) {
+                const insight = insights.find((i) => i.ad_id === id);
+                if (insight) {
+                  Object.assign(data, extractCampaignMetrics(insight));
+                }
+              }
+
+              return this.prisma.ad.update({
+                where: { id },
+                data,
+              });
+            });
+
+            totalProcessed += insights.length;
+
+            this.logger.log(
+              `✅ ${job.range} done (${insights.length} insights)`,
+            );
+          }
 
           await sleep(800);
         } catch (error) {
@@ -1022,7 +1012,9 @@ export class TaskCron implements OnModuleInit {
       }
     }
 
-    this.logger.log(`🎯 DONE MAX adSet Insight - Total: ${totalProcessed}`);
+    this.logger.log(
+      `🎯 DONE MAX + 3D + 7D Ad Insight - Total: ${totalProcessed}`,
+    );
   }
 
   async syncDailyAdInsights() {
@@ -1544,168 +1536,172 @@ export class TaskCron implements OnModuleInit {
     }, {});
   }
 
-  // XỬ Lý VIDEO
-
-  async syncImage() {
-    this.logger.log('🔄 Sync AdImage (optimized)');
+  async syncAllCampaignInsights() {
+    this.logger.log('🔄 Sync MAX + 3D + 7D Campaign Insight');
     this.init();
 
     const prismaHelper = new PrismaBatchHelper(this.prisma);
 
-    try {
-      const existingImages = await this.prisma.adImage.findMany({
-        where: {
-          account: { needsReauth: false },
-          OR: [{ url: null }],
-        },
-        select: { hash: true, accountId: true },
-      });
+    const campaigns = await this.prisma.campaign.findMany({
+      where: { account: { needsReauth: false } },
+      select: { id: true, accountId: true },
+    });
 
-      if (!existingImages.length) return;
+    const byAccount = this.groupByAccount(campaigns);
 
-      const byAccount = this.groupByAccount(
-        existingImages.map((img) => ({
-          id: img.hash,
-          accountId: img.accountId,
-        })),
-      );
+    let totalProcessed = 0;
 
-      for (const [accountId, hashes] of Object.entries(byAccount)) {
-        const adAccount = new AdAccount(accountId);
+    // 🔥 3 JOBS
+    const JOBS = [
+      {
+        range: InsightRange.MAX,
+        datePreset: 'maximum',
+        campaignField: 'insightMaxId',
+      },
+      {
+        range: InsightRange.DAY_3,
+        datePreset: 'last_3d',
+        campaignField: 'insight3dId',
+      },
+      {
+        range: InsightRange.DAY_7,
+        datePreset: 'last_7d',
+        campaignField: 'insight7dId',
+      },
 
-        for (const hashChunk of chunk(hashes, 50)) {
-          try {
-            const cursor = await adAccount.getAdImages(AD_IMAGE_FIELDS, {
-              limit: 100,
-              hashes: hashChunk,
-            });
+      {
+        range: InsightRange.TODAY,
+        datePreset: 'today',
+        campaignField: 'insightTodayId',
+      },
+    ];
 
-            const images = await fetchAll(cursor);
+    for (const [accountId, ids] of Object.entries(byAccount)) {
+      const adAccount = new AdAccount(accountId);
 
-            if (!images.length) continue;
+      this.logger.log(`➡️ Account ${accountId} - ${ids.length} campaigns`);
 
-            const updateData = images.map((img) => ({
-              hash: img.hash,
-              accountId,
-              data: {
-                name: img?.name,
-                url: img?.permalink_url || img?.url,
-                permalink_url: img?.permalink_url,
-                height: img?.height,
-                width: img?.width,
-                rawPayload: toPrismaJson(img),
-                status: img?.status,
-                createdTime: img?.created_time
-                  ? new Date(img.created_time)
-                  : undefined,
-                createdAt: img?.created_time
-                  ? new Date(img.created_time)
-                  : undefined,
-                updatedAt: new Date(),
-              },
-            }));
-
-            await prismaHelper.upsertMany(updateData, (item) =>
-              this.prisma.adImage.updateMany({
-                where: {
-                  hash: item.hash,
-                  accountId: item.accountId,
-                },
-                data: item.data,
-              }),
-            );
-
-            await sleep(800);
-          } catch (error) {
-            this.logger.error(
-              `❌ syncImage ${accountId}: ${parseMetaError(error).message}`,
-            );
-          }
-        }
-      }
-
-      this.logger.log(`✅ Updated ${existingImages.length} images`);
-    } catch (err) {
-      this.logger.error(`❌ syncImage fatal: ${err.message}`);
-    }
-  }
-
-  async syncVideo() {
-    this.logger.log('🔄 Sync AdVideo (optimized)');
-    this.init();
-
-    const prismaHelper = new PrismaBatchHelper(this.prisma);
-    const api = FacebookAdsApi.getDefaultApi();
-
-    try {
-      const existingVideos = await this.prisma.adVideo.findMany({
-        where: {
-          account: { needsReauth: false },
-          status: { not: null },
-          // creatives: {
-          //   // some: {
-          //   //   NOT: {
-          //   //     rawPayload: {
-          //   //       path: ['actor_id'],
-          //   //       not: null,
-          //   //     },
-          //   //   },
-          //   // },
-          // },
-        },
-        orderBy: { status: 'desc' },
-        select: { id: true },
-      });
-
-      if (!existingVideos.length) return;
-
-      const videoIds = existingVideos.map((v) => v.id);
-
-      for (const idsChunk of chunk(videoIds, 20)) {
+      for (const idsChunk of chunk(ids, 50)) {
         try {
-          const response = (await api.call('GET', [], {
-            ids: idsChunk.join(','),
-            fields: AD_VIDEO_FIELDS.join(','),
-          })) as any;
+          // 🔥 chạy song song 3 API (nhanh hơn 3x)
+          const results = await Promise.all(
+            JOBS.map(async (job) => {
+              const cursor = await adAccount.getInsights(
+                AD_INSIGHT_FIELDS,
+                {
+                  limit: 100,
+                  level: 'campaign',
+                  date_preset: job.datePreset,
+                  action_attribution_windows: '7d_click',
+                  action_breakdowns: 'action_type',
+                  filtering: [
+                    { field: 'campaign.id', operator: 'IN', value: idsChunk },
+                  ],
+                },
+                true,
+              );
 
-          const videos = Object.values(response || {});
+              const insights = await fetchAll(cursor);
 
-          if (!videos.length) continue;
-
-          const updateData = videos.map((vid: any) => ({
-            id: vid.id,
-            data: {
-              title: vid?.title || vid?.name,
-              accountId: vid?.account_id,
-              source: vid?.source,
-              status: vid?.status?.video_status || vid?.status,
-              thumbnailUrl: vid?.thumbnails?.data?.find(
-                (tn) => tn?.is_preferred,
-              )?.url,
-              length: vid?.length,
-              rawPayload: toPrismaJson(vid),
-              updatedAt: new Date(),
-            },
-          }));
-
-          await prismaHelper.upsertMany(updateData, (item) =>
-            this.prisma.adVideo.update({
-              where: { id: item.id },
-              data: item.data,
+              return {
+                job,
+                insights: insights.filter((i) => i.campaign_id),
+              };
             }),
           );
 
-          this.logger.log(`✅ Updated ${videos.length} videos`);
+          // ================= PROCESS =================
+          for (const { job, insights } of results) {
+            if (!insights.length) continue;
+
+            const campaignIds = [
+              ...new Set(insights.map((i) => i.campaign_id)),
+            ];
+
+            this.logger.log(`📦 ${job.range}: ${insights.length} insights`);
+
+            // ❗ giữ logic MAX của bạn (delete)
+            if (job.range === InsightRange.MAX) {
+              await this.prisma.campaignInsight.deleteMany({
+                where: {
+                  campaignId: { in: campaignIds },
+                  range: job.range,
+                },
+              });
+            }
+
+            // ================= TRANSFORM =================
+            const insightData = insights.map((i) => {
+              const metrics = extractCampaignMetrics(i);
+
+              return {
+                campaignId: i.campaign_id,
+                level: LevelInsight.CAMPAIGN,
+                range: job.range,
+                dateStart: i.date_start,
+                dateStop: i.date_stop,
+                ...metrics,
+                rawPayload: i,
+              };
+            });
+
+            // ================= INSERT =================
+            await prismaHelper.createManySafe(
+              this.prisma.campaignInsight,
+              insightData,
+            );
+
+            // ================= GET INSERTED IDS =================
+            const inserted = await this.prisma.campaignInsight.findMany({
+              where: {
+                campaignId: { in: campaignIds },
+                range: job.range,
+              },
+              select: { id: true, campaignId: true },
+            });
+
+            const map = new Map(inserted.map((i) => [i.campaignId, i.id]));
+
+            // ================= UPDATE CAMPAIGN =================
+            await prismaHelper.upsertMany(campaignIds, (id) => {
+              const insightId = map.get(id) || null;
+
+              const data: any = {
+                [job.campaignField]: insightId,
+              };
+
+              // 🔥 giữ logic MAX (update metrics vào campaign)
+              if (job.range === InsightRange.MAX) {
+                const insight = insights.find((i) => i.campaign_id === id);
+                if (insight) {
+                  Object.assign(data, extractCampaignMetrics(insight));
+                }
+              }
+
+              return this.prisma.campaign.update({
+                where: { id },
+                data,
+              });
+            });
+
+            totalProcessed += insights.length;
+
+            this.logger.log(
+              `✅ ${job.range} done (${insights.length} insights)`,
+            );
+          }
 
           await sleep(800);
         } catch (error) {
           this.logger.error(
-            `❌ syncVideo chunk: ${parseMetaError(error).message}`,
+            `❌ Account ${accountId}: ${parseMetaError(error).message}`,
           );
         }
       }
-    } catch (err) {
-      this.logger.error(`❌ syncVideo fatal: ${err.message}`);
     }
+
+    this.logger.log(
+      `🎯 DONE MAX + 3D + 7D Campaign Insight - Total: ${totalProcessed}`,
+    );
   }
 }

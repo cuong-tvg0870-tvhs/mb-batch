@@ -45,6 +45,7 @@ enum InsightRange {
     MAX
     DAY_7
     DAY_3
+    TODAY
     DAILY
 }
 
@@ -250,6 +251,18 @@ model Campaign {
     updatedAt DateTime  @default(now())
     deletedAt DateTime?
 
+    insight3dId String?          @unique
+    insight3d   CampaignInsight? @relation("Campaign_3D", fields: [insight3dId], references: [id])
+
+    insight7dId String?          @unique
+    insight7d   CampaignInsight? @relation("Campaign_7D", fields: [insight7dId], references: [id])
+
+    insightMaxId String?          @unique
+    insightMax   CampaignInsight? @relation("Campaign_MAX", fields: [insightMaxId], references: [id])
+
+    insightTodayId String?          @unique
+    insightToday   CampaignInsight? @relation("Campaign_TODAY", fields: [insightTodayId], references: [id])
+
     adsets                   AdSet[]
     ads                      Ad[]
     campaignInsights         CampaignInsight[]
@@ -428,6 +441,18 @@ model AdSet {
     holdRate              Float?                 @default(0)
     adsetAudienceInsights AdsetAudienceInsight[]
 
+    insight3dId String?       @unique
+    insight3d   AdSetInsight? @relation("AdSet_3D", fields: [insight3dId], references: [id])
+
+    insight7dId String?       @unique
+    insight7d   AdSetInsight? @relation("AdSet_7D", fields: [insight7dId], references: [id])
+
+    insightMaxId String?       @unique
+    insightMax   AdSetInsight? @relation("AdSet_MAX", fields: [insightMaxId], references: [id])
+
+    insightTodayId String?       @unique
+    insightToday   AdSetInsight? @relation("AdSet_TODAY", fields: [insightTodayId], references: [id])
+
     // 🔥 list theo campaign
     @@index([campaignId, updatedAt(sort: Desc)])
     // 🔥 list theo account
@@ -535,6 +560,18 @@ model Ad {
     hookRate           Float?              @default(0)
     holdRate           Float?              @default(0)
     adAudienceInsights AdAudienceInsight[]
+
+    insight3dId String?    @unique
+    insight3d   AdInsight? @relation("Ad_3D", fields: [insight3dId], references: [id])
+
+    insight7dId String?    @unique
+    insight7d   AdInsight? @relation("Ad_7D", fields: [insight7dId], references: [id])
+
+    insightMaxId String?    @unique
+    insightMax   AdInsight? @relation("Ad_MAX", fields: [insightMaxId], references: [id])
+
+    insightTodayId String?    @unique
+    insightToday   AdInsight? @relation("Ad_TODAY", fields: [insightTodayId], references: [id])
 
     // 🔥 list theo adset
     @@index([adsetId, updatedAt(sort: Desc)])
@@ -937,6 +974,11 @@ model AdInsight {
     createdAt DateTime @default(now())
     updatedAt DateTime @default(now())
 
+    ad3d    Ad? @relation("Ad_3D")
+    ad7d    Ad? @relation("Ad_7D")
+    adMax   Ad? @relation("Ad_MAX")
+    adToday Ad? @relation("Ad_TODAY")
+
     @@unique([adId, dateStart, range])
     @@index([adId])
 }
@@ -1019,6 +1061,11 @@ model CampaignInsight {
 
     createdAt DateTime @default(now())
     updatedAt DateTime @default(now())
+
+    campaign3d    Campaign? @relation("Campaign_3D")
+    campaign7d    Campaign? @relation("Campaign_7D")
+    campaignMax   Campaign? @relation("Campaign_MAX")
+    campaignToday Campaign? @relation("Campaign_TODAY")
 
     @@unique([campaignId, dateStart, range])
     @@index([campaignId])
@@ -1104,6 +1151,11 @@ model AdSetInsight {
     updatedAt  DateTime  @default(now())
     campaign   Campaign? @relation(fields: [campaignId], references: [id])
     campaignId String?
+
+    adset3d    AdSet? @relation("AdSet_3D")
+    adset7d    AdSet? @relation("AdSet_7D")
+    adsetMax   AdSet? @relation("AdSet_MAX")
+    adsetToday AdSet? @relation("AdSet_TODAY")
 
     @@unique([adSetId, dateStart, range])
     @@index([adSetId])
