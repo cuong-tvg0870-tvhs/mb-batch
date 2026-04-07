@@ -4,12 +4,10 @@
 FROM node:20-alpine AS deps
 WORKDIR /app
 
-# fix yarn network
-RUN yarn config set registry https://registry.npmjs.org \
- && yarn config set network-timeout 600000
+COPY package.json package-lock.json* ./
 
-COPY package.json yarn.lock* ./
-RUN yarn install --frozen-lockfile
+# npm ci nhanh và deterministic hơn
+RUN npm ci
 
 
 # ========================
@@ -25,8 +23,7 @@ COPY . .
 RUN DATABASE_URL="postgresql://user:pass@localhost:5432/db" \
     npx prisma generate
 
-
-RUN yarn build
+RUN npm run build
 
 
 # ========================
@@ -35,8 +32,9 @@ RUN yarn build
 FROM node:20-alpine AS prod-deps
 WORKDIR /app
 
-COPY package.json yarn.lock* ./
-RUN yarn install --frozen-lockfile --production
+COPY package.json package-lock.json* ./
+
+RUN npm ci --omit=dev
 
 # copy Prisma client đã generate
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma

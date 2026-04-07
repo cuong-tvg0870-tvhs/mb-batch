@@ -29,6 +29,7 @@ import {
 
 import * as dayjs from 'dayjs';
 
+import { Cron } from '@nestjs/schedule';
 import { CreativeStatus, InsightRange, LevelInsight } from '@prisma/client';
 import { MetaTransformHelper } from 'src/common/helpers/meta-transform.helper';
 import { PrismaBatchHelper } from 'src/common/helpers/prisma-batch.helper';
@@ -58,63 +59,88 @@ export class TaskCron implements OnModuleInit {
     this.logger.log('🚀 TaskCron initialized');
   }
 
-  // @Cron('0 5 0 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  /**
+   * ================================
+   * 🔹 CORE DATA (1 lần / ngày)
+   * ================================
+   */
+
+  @Cron('5 0 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncCampaignCore() {
     this.logger.log('🔄 Sync Campaign Core');
     await this.syncCampaignData();
     this.logger.log('✅ Sync Campaign Core DONE');
   }
 
-  // @Cron('0 5 1 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  /**
+   * ================================
+   * 🔹 MAX INSIGHTS (1 lần / ngày)
+   * Pipeline: Campaign → AdSet → Audience → Ad
+   * ================================
+   */
+
+  @Cron('5 1 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncMaxCampaignInsightsJob() {
     this.logger.log('🔄 Sync MAX Campaign Insights');
     await this.syncMaxCampaignInsights();
     this.logger.log('✅ MAX Campaign DONE');
   }
 
-  // @Cron('0 10 2 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('15 2 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncMaxAdsetInsightsJob() {
     this.logger.log('🔄 Sync MAX Adset Insights');
     await this.syncMaxAdSetInsights();
     this.logger.log('✅ MAX Adset DONE');
   }
 
-  // @Cron('0 15 3 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('25 3 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncMaxAdsetAudienceInsightsJob() {
     this.logger.log('🔄 Sync MAX Adset Audience Insights');
     await this.syncMaxAdSetAudienceInsights();
     this.logger.log('✅ MAX Adset Audience DONE');
   }
 
-  // @Cron('0 20 4 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('35 4 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncMaxAdInsightsJob() {
     this.logger.log('🔄 Sync MAX Ad Insights');
     await this.syncMaxAdInsights();
     this.logger.log('✅ MAX Ad DONE');
   }
 
-  // @Cron('0 25 5 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  async syncMaxAdAudienceInsightsJob() {
-    this.logger.log('🔄 Sync MAX Ad Audience Insights');
-    await this.syncMaxAdSetAudienceInsights();
-    this.logger.log('✅ MAX Ad Audience DONE');
-  }
+  /**
+   * ================================
+   * 🔁 DAILY INSIGHTS (3 lần / ngày)
+   * Pipeline chuẩn:
+   * Campaign → AdSet → Ad → Creative
+   * ================================
+   */
 
-  // @Cron('0 30 6,12,17 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  /**
+   * 🟢 Campaign DAILY
+   */
+  @Cron('0 6,12,18 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncDailyCampaignInsightsJob() {
     this.logger.log('🔄 Sync DAILY Campaign Insights');
     await this.syncDailyCampaignInsights();
     this.logger.log('✅ DAILY Campaign DONE');
   }
 
-  // @Cron('0 35 7,13,18 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  /**
+   * 🟡 AdSet DAILY (delay sau Campaign)
+   */
+  @Cron('15 6,12,18 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncDailyAdsetInsightsJob() {
     this.logger.log('🔄 Sync DAILY Adset Insights');
     await this.syncDailyAdSetInsights();
     this.logger.log('✅ DAILY Adset DONE');
   }
 
-  // @Cron('0 40 8,13,18 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  /**
+   * 🔵 Ad DAILY + Creative Analytics (delay sau AdSet)
+   */
+  @Cron('30 6 * * *', { timeZone: 'Asia/Ho_Chi_Minh' }) // 06:30
+  @Cron('0 13 * * *', { timeZone: 'Asia/Ho_Chi_Minh' }) // 13:00
+  @Cron('40 18 * * *', { timeZone: 'Asia/Ho_Chi_Minh' }) // 18:40
   async syncDailyAdInsightsJob() {
     this.logger.log('🔄 Sync DAILY Ad Insights');
     await this.syncDailyAdInsights();
@@ -122,7 +148,7 @@ export class TaskCron implements OnModuleInit {
 
     this.logger.log('🔄 Analytic Creative Insight');
     await this.calculateCreativeInsightFromAdInsightParallel();
-    this.logger.log('✅ Analytic Creative Insight');
+    this.logger.log('✅ Analytic Creative Insight DONE');
   }
 
   /* =====================================================
