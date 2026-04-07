@@ -54,7 +54,7 @@ export class TaskCron implements OnModuleInit {
 
   async onModuleInit() {
     this.logger.log('🚀 TaskCron initialized');
-    // await this.syncAllAdSetInsights();
+    await this.calculateCreativeInsightFromAdInsightParallel();
     // await this.syncAllAdInsights();
   }
 
@@ -1281,8 +1281,8 @@ export class TaskCron implements OnModuleInit {
     this.logger.log(`🎯 DONE MAX adSet Insight - Total: ${totalProcessed}`);
   }
 
-  async calculateCreativeInsightFromAdInsightParallel(batchSize = 20) {
-    console.log('🚀 Start calculate CreativeInsight (optimized)...');
+  async calculateCreativeInsightFromAdInsightParallel(batchSize = 50) {
+    console.log('🚀 Start calculate CreativeInsight FINAL...');
 
     const prismaHelper = new PrismaBatchHelper(this.prisma);
 
@@ -1290,10 +1290,15 @@ export class TaskCron implements OnModuleInit {
     const sevenDaysAgo = dayjs().subtract(6, 'day').format('YYYY-MM-DD');
     const threeDaysAgo = dayjs().subtract(2, 'day').format('YYYY-MM-DD');
 
+    // ================= LOAD CREATIVE =================
     const creatives = await this.prisma.creative.findMany({
-      select: { rawPayload: true, id: true, ads: { select: { id: true } } },
+      select: {
+        id: true,
+        ads: { select: { id: true } },
+      },
     });
 
+    // ================= HELPER =================
     function sumMetrics(target: Record<string, number>, source: any) {
       for (const key in source) {
         if (typeof source[key] === 'number') {
@@ -1302,25 +1307,23 @@ export class TaskCron implements OnModuleInit {
       }
     }
 
+    // ================= LOOP BATCH =================
     for (let i = 0; i < creatives.length; i += batchSize) {
       const batch = creatives.slice(i, i + batchSize);
 
-      // ================= 1. GOM AD IDS =================
       const adIds = batch.flatMap((c) => c.ads.map((a) => a.id));
-
       if (!adIds.length) continue;
 
-      // ================= 2. LOAD 1 LẦN =================
+      // ================= LOAD INSIGHT =================
       const insights = await this.prisma.adInsight.findMany({
         where: {
           adId: { in: adIds },
-          range: { in: ['DAILY', 'MAX'] },
+          range: { in: ['MAX', 'DAY_7', 'DAY_3'] }, // 🔥 bỏ DAILY
         },
       });
 
-      // ================= 3. GROUP THEO CREATIVE =================
+      // ================= GROUP BY AD =================
       const insightMap = new Map<string, any[]>();
-
       for (const ins of insights) {
         if (!insightMap.has(ins.adId)) {
           insightMap.set(ins.adId, []);
@@ -1328,91 +1331,63 @@ export class TaskCron implements OnModuleInit {
         insightMap.get(ins.adId)!.push(ins);
       }
 
-      // ================= 4. BUILD DATA =================
       const creativeInsightUpserts: any[] = [];
       const creativeUpdates: any[] = [];
 
+      // ================= LOOP CREATIVE =================
       for (const creative of batch) {
         const adIds = creative.ads.map((a) => a.id);
         if (!adIds.length) continue;
 
         const bucket = {
-          daily: {} as Record<string, Record<string, number>>,
           max: {} as Record<string, number>,
           last7d: {} as Record<string, number>,
           last3d: {} as Record<string, number>,
         };
 
-        // 👉 merge tất cả adInsight của creative
+        // ================= MERGE =================
         for (const adId of adIds) {
           const adInsights = insightMap.get(adId) || [];
 
           for (const ins of adInsights) {
-            if (ins.range === 'DAILY') {
-              if (!bucket.daily[ins.dateStart]) {
-                bucket.daily[ins.dateStart] = {};
-              }
-
-              sumMetrics(bucket.daily[ins.dateStart], ins);
-
-              if (ins.dateStart >= sevenDaysAgo && ins.dateStart <= today) {
-                sumMetrics(bucket.last7d, ins);
-              }
-              if (ins.dateStart >= threeDaysAgo && ins.dateStart <= today) {
-                sumMetrics(bucket.last3d, ins);
-              }
-            }
-
-            if (ins.range === 'MAX') {
-              sumMetrics(bucket.max, ins);
-            }
+            if (ins.range === 'MAX') sumMetrics(bucket.max, ins);
+            if (ins.range === 'DAY_7') sumMetrics(bucket.last7d, ins);
+            if (ins.range === 'DAY_3') sumMetrics(bucket.last3d, ins);
           }
         }
 
-        // ================= PREPARE UPSERT =================
-        for (const date in bucket.daily) {
-          creativeInsightUpserts.push({
+        // ================= UPSERT PAYLOAD =================
+        creativeInsightUpserts.push(
+          {
             creativeId: creative.id,
-            dateStart: date,
-            range: 'DAILY',
+            dateStart: '1975-01-01',
+            range: 'MAX',
             data: {
-              dateStop: date,
-              ...bucket.daily[date],
+              dateStop: today,
+              ...bucket.max,
             },
-          });
-        }
-
-        creativeInsightUpserts.push({
-          creativeId: creative.id,
-          dateStart: '1975-01-01',
-          range: 'MAX',
-          data: {
-            dateStop: today,
-            ...bucket.max,
           },
-        });
-
-        creativeInsightUpserts.push({
-          creativeId: creative.id,
-          dateStart: sevenDaysAgo,
-          range: 'DAY_7',
-          data: {
-            dateStop: today,
-            ...bucket.last7d,
+          {
+            creativeId: creative.id,
+            dateStart: sevenDaysAgo,
+            range: 'DAY_7',
+            data: {
+              dateStop: today,
+              ...bucket.last7d,
+            },
           },
-        });
-
-        creativeInsightUpserts.push({
-          creativeId: creative.id,
-          dateStart: threeDaysAgo,
-          range: 'DAY_3',
-          data: {
-            dateStop: today,
-            ...bucket.last3d,
+          {
+            creativeId: creative.id,
+            dateStart: threeDaysAgo,
+            range: 'DAY_3',
+            data: {
+              dateStop: today,
+              ...bucket.last3d,
+            },
           },
-        });
+        );
 
-        // ================= STATUS =================
+        // ================= CALCULATE STATUS =================
         const maxSpend = bucket.max.spend ?? 0;
         const maxRevenue = bucket.max.purchaseValue ?? 0;
         const maxPurchases = bucket.max.purchases ?? 0;
@@ -1421,10 +1396,12 @@ export class TaskCron implements OnModuleInit {
 
         const roasMax = maxSpend > 0 ? maxRevenue / maxSpend : 0;
         const ctrMax = maxImpressions > 0 ? maxClicks / maxImpressions : 0;
+
         const roas7d =
           (bucket.last7d.spend ?? 0) > 0
             ? (bucket.last7d.purchaseValue ?? 0) / bucket.last7d.spend
             : 0;
+
         const roas3d =
           (bucket.last3d.spend ?? 0) > 0
             ? (bucket.last3d.purchaseValue ?? 0) / bucket.last3d.spend
@@ -1432,55 +1409,32 @@ export class TaskCron implements OnModuleInit {
 
         let status: CreativeStatus;
 
-        if (maxSpend === 0) {
-          status = CreativeStatus.TEST;
-        } else if (maxSpend > 0 && maxSpend <= 100_000) {
-          status = CreativeStatus.NEED_SPEND;
-        }
-
-        // ✅ SCALE P1
+        if (maxSpend === 0) status = CreativeStatus.TEST;
+        else if (maxSpend <= 100_000) status = CreativeStatus.NEED_SPEND;
         else if (
-          ((maxSpend > 100_000 && maxSpend <= 500_000 && roasMax >= 2) ||
+          ((maxSpend <= 500_000 && roasMax >= 2) ||
             (maxSpend > 500_000 && roasMax >= 2.2)) &&
           roas7d >= 2.5
         ) {
           status = CreativeStatus.SCALE_P1;
-        }
-
-        // ✅ SCALE P2
-        else if (
-          ((maxSpend > 100_000 && maxSpend <= 500_000 && roasMax >= 1.5) ||
+        } else if (
+          ((maxSpend <= 500_000 && roasMax >= 1.5) ||
             (maxSpend > 500_000 && roasMax >= 1.8 && ctrMax > 0.03)) &&
           roas7d >= 2.2 &&
           roas3d >= 2.2
         ) {
           status = CreativeStatus.SCALE_P2;
-        }
-
-        // ✅ REVIEW
-        else if (
-          (maxSpend > 100_000 &&
-            maxSpend <= 500_000 &&
-            maxPurchases < 1 &&
-            ctrMax > 0.03) ||
+        } else if (
+          (maxSpend <= 500_000 && maxPurchases < 1 && ctrMax > 0.03) ||
           (maxSpend > 500_000 && roasMax < 1.8 && ctrMax > 0.03)
         ) {
           status = CreativeStatus.REVIEW;
-        }
-
-        // ✅ OFF
-        else if (
-          (maxSpend > 100_000 &&
-            maxSpend <= 500_000 &&
-            maxPurchases < 1 &&
-            ctrMax < 0.03) ||
+        } else if (
+          (maxSpend <= 500_000 && maxPurchases < 1 && ctrMax < 0.03) ||
           (maxSpend > 500_000 && roasMax < 1.8 && ctrMax < 0.03)
         ) {
           status = CreativeStatus.OFF;
-        }
-
-        // ✅ NEW: fallback
-        else {
+        } else {
           status = CreativeStatus.OTHER;
         }
 
@@ -1493,7 +1447,7 @@ export class TaskCron implements OnModuleInit {
         });
       }
 
-      // ================= 5. UPSERT BATCH =================
+      // ================= UPSERT INSIGHT =================
       await prismaHelper.upsertMany(creativeInsightUpserts, (item) =>
         this.prisma.creativeInsight.upsert({
           where: {
@@ -1513,20 +1467,57 @@ export class TaskCron implements OnModuleInit {
         }),
       );
 
-      // ================= 6. UPDATE CREATIVE =================
-      await prismaHelper.upsertMany(creativeUpdates, (item) =>
-        this.prisma.creative.update({
+      // ================= FETCH INSIGHT ID =================
+      const insightRecords = await this.prisma.creativeInsight.findMany({
+        where: {
+          creativeId: { in: batch.map((c) => c.id) },
+          range: { in: ['MAX', 'DAY_7', 'DAY_3'] },
+        },
+        select: {
+          id: true,
+          creativeId: true,
+          range: true,
+        },
+      });
+
+      const insightMapByCreative = new Map<
+        string,
+        { max?: string; d7?: string; d3?: string }
+      >();
+
+      for (const r of insightRecords) {
+        if (!insightMapByCreative.has(r.creativeId)) {
+          insightMapByCreative.set(r.creativeId, {});
+        }
+
+        const obj = insightMapByCreative.get(r.creativeId)!;
+
+        if (r.range === 'MAX') obj.max = r.id;
+        if (r.range === 'DAY_7') obj.d7 = r.id;
+        if (r.range === 'DAY_3') obj.d3 = r.id;
+      }
+
+      // ================= UPDATE CREATIVE =================
+      await prismaHelper.upsertMany(creativeUpdates, (item) => {
+        const ref = insightMapByCreative.get(item.id);
+
+        return this.prisma.creative.update({
           where: { id: item.id },
-          data: item.data,
-        }),
-      );
+          data: {
+            ...item.data,
+            insightMaxId: ref?.max,
+            insight7DayId: ref?.d7,
+            insight3DayId: ref?.d3,
+          },
+        });
+      });
 
       console.log(
         `✅ Batch ${i / batchSize + 1} done (${batch.length} creatives)`,
       );
     }
 
-    console.log('🎯 DONE CreativeInsight optimized');
+    console.log('🎯 DONE CreativeInsight FINAL');
   }
 
   private groupByAccount(records: any[]) {

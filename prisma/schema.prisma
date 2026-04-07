@@ -738,6 +738,18 @@ model Creative {
     hookRate Float? @default(0)
     holdRate Float? @default(0)
 
+    insight3dId String?          @unique
+    insight3d   CreativeInsight? @relation("Creative_3D", fields: [insight3dId], references: [id])
+
+    insight7dId String?          @unique
+    insight7d   CreativeInsight? @relation("Creative_7D", fields: [insight7dId], references: [id])
+
+    insightMaxId String?          @unique
+    insightMax   CreativeInsight? @relation("Creative_MAX", fields: [insightMaxId], references: [id])
+
+    insightTodayId String?          @unique
+    insightToday   CreativeInsight? @relation("Creative_TODAY", fields: [insightTodayId], references: [id])
+
     @@index([accountId, createdAt(sort: Desc)])
     @@index([accountId, creativeType, createdAt(sort: Desc)])
     @@index([accountId, remoteUpdatedAt(sort: Desc)])
@@ -826,6 +838,11 @@ model CreativeInsight {
     updatedAt  DateTime  @default(now())
     campaign   Campaign? @relation(fields: [campaignId], references: [id])
     campaignId String?
+
+    creative3d    Creative? @relation("Creative_3D")
+    creative7d    Creative? @relation("Creative_7D")
+    creativeMax   Creative? @relation("Creative_MAX")
+    creativeToday Creative? @relation("Creative_TODAY")
 
     @@unique([creativeId, dateStart, range])
     @@index([creativeId])
