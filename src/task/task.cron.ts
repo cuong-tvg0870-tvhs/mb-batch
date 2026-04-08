@@ -14,11 +14,14 @@ import {
   fetchAll,
   parseMetaError,
   sleep,
+  toPrismaJson,
 } from 'src/common/utils';
 
 import {
   AD_FIELDS,
+  AD_IMAGE_FIELDS,
   AD_INSIGHT_FIELDS,
+  AD_VIDEO_FIELDS,
   ADSET_FIELDS,
   CAMPAIGN_FIELDS,
   CREATIVE_FIELDS,
@@ -54,8 +57,8 @@ export class TaskCron implements OnModuleInit {
 
   async onModuleInit() {
     this.logger.log('🚀 TaskCron initialized');
-    await this.calculateCreativeInsightFromAdInsightParallel();
-    // await this.syncAllAdInsights();
+    // await this.syncImage();
+    // await this.syncVideo();
   }
 
   /**
@@ -184,32 +187,14 @@ export class TaskCron implements OnModuleInit {
       ...new Set(creativeData.map((c) => c.pageId).filter(Boolean)),
     ];
 
-    const videoIds = [
-      ...new Set(creativeData.map((c) => c.videoId).filter(Boolean)),
-    ];
-
-    const imageHashes = [
-      ...new Set(creativeData.map((c) => c.imageHash).filter(Boolean)),
-    ];
+    const videoMap = new Map<string, any>();
+    const imageMap = new Map<string, any>();
 
     const fanpages = await this.prisma.fanpage.findMany({
       where: { id: { in: pageIds } },
     });
 
-    const existingVideos = await this.prisma.adVideo.findMany({
-      where: { id: { in: videoIds } },
-    });
-
-    const existingImages = await this.prisma.adImage.findMany({
-      where: { hash: { in: imageHashes } },
-    });
-
     const fanpageMap = new Map(fanpages.map((f) => [f.id, f]));
-    const videoSet = new Set(existingVideos.map((v) => v.id));
-    const imageSet = new Set(existingImages.map((i) => i.hash));
-
-    const newVideos = [];
-    const newImages = [];
 
     for (const item of creativeData) {
       // ✅ map systemPageId
@@ -217,31 +202,45 @@ export class TaskCron implements OnModuleInit {
         item.systemPageId = item.pageId;
       }
 
-      // ✅ video
-      if (item.videoId && !videoSet.has(item.videoId)) {
-        newVideos.push({
-          id: item.videoId,
-          accountId: item.accountId,
-          thumbnailUrl: item.thumbnailUrl,
-        });
-        videoSet.add(item.videoId); // tránh duplicate trong loop
+      for (const item of creativeData) {
+        // ✅ map systemPageId
+        if (item.pageId && fanpageMap.has(item.pageId)) {
+          item.systemPageId = item.pageId;
+        }
+
+        // ✅ VIDEO (dedup theo videoId)
+        if (item.videoId && !videoMap.has(item.videoId)) {
+          videoMap.set(item.videoId, {
+            id: item.videoId,
+            accountId: item.accountId,
+            thumbnailUrl: item.thumbnailUrl,
+          });
+        }
+
+        // ✅ IMAGE (dedup theo accountId + hash)
+        if (item.imageHash) {
+          const key = `${(item.accountId as string).replaceAll('act_', '')}:${item.imageHash}`;
+
+          if (!imageMap.has(key)) {
+            imageMap.set(key, {
+              id: key,
+              hash: item.imageHash,
+              accountId: item.accountId,
+              url: item.thumbnailUrl,
+            });
+            item.imageId = key;
+          }
+        }
       }
 
-      // ✅ image
-      if (item.imageHash && !imageSet.has(item.imageHash)) {
-        newImages.push({
-          id: `${accountId.replaceAll('act_', '')}:${item.imageHash}`,
-          hash: item.imageHash,
-          accountId: item.accountId,
-          url: item.thumbnailUrl,
-        });
-        imageSet.add(item.imageHash);
-      }
+      // 👉 convert ra array
     }
+    const newVideos = Array.from(videoMap.values());
+    const newImages = Array.from(imageMap.values());
 
-    await prismaHelper.createManySafe(this.prisma.adVideo, newVideos);
+    await prismaHelper.createManySafe(this.prisma.adImage, newImages, 20);
 
-    await prismaHelper.createManySafe(this.prisma.adImage, newImages);
+    await prismaHelper.createManySafe(this.prisma.adVideo, newVideos, 20);
 
     // 🔥 batch insert
     await prismaHelper.upsertMany(
@@ -330,7 +329,7 @@ export class TaskCron implements OnModuleInit {
           const cursor = await adAccount.getCampaigns(
             fields,
             {
-              limit: 50,
+              limit: 20,
               filtering: [
                 {
                   field: 'updated_time',
@@ -1694,5 +1693,186 @@ export class TaskCron implements OnModuleInit {
     this.logger.log(
       `🎯 DONE MAX + 3D + 7D Campaign Insight - Total: ${totalProcessed}`,
     );
+  }
+
+  async syncVideo() {
+    this.logger.log('🔄 Sync Ad Video (optimized)');
+    this.init();
+
+    const prismaHelper = new PrismaBatchHelper(this.prisma);
+
+    try {
+      const existingVideos = await this.prisma.adVideo.findMany({
+        where: {
+          account: { needsReauth: false },
+          status: null,
+        },
+        select: { id: true, accountId: true, thumbnailUrl: true },
+      });
+
+      if (!existingVideos.length) return;
+
+      const byAccount = this.groupByAccount(
+        existingVideos.map((vid) => ({
+          id: vid.id,
+          accountId: vid.accountId,
+        })),
+      );
+
+      for (const [accountId, ids] of Object.entries(byAccount)) {
+        const adAccount = new AdAccount(accountId);
+
+        for (const hashChunk of chunk(ids, 50)) {
+          try {
+            const cursor = await adAccount.getAdVideos(AD_VIDEO_FIELDS, {
+              limit: 100,
+              filtering: [{ field: 'id', operator: 'IN', value: hashChunk }],
+            });
+
+            const videos = await fetchAll(cursor);
+
+            if (!videos.length) continue;
+
+            const updateData = videos.map((vid) => {
+              const currentVideo = existingVideos.find((v) => v.id == vid.id);
+              if (currentVideo?.thumbnailUrl?.includes('https://scontent'))
+                return {
+                  id: vid.id,
+                  accountId,
+                  data: {
+                    title: vid?.title || vid?.name,
+                    accountId: vid?.account_id,
+                    source: vid?.source,
+                    status: vid?.status?.video_status || vid?.status,
+                    thumbnailUrl: vid?.thumbnails?.data?.find(
+                      (tn) => tn?.is_preferred,
+                    )?.url,
+                    length: vid?.length,
+                    rawPayload: toPrismaJson(vid),
+                    updatedAt: new Date(),
+                  },
+                };
+              return {
+                id: vid.id,
+                accountId,
+                data: {
+                  title: vid?.title || vid?.name,
+                  accountId: vid?.account_id,
+                  source: vid?.source,
+                  status: vid?.status?.video_status || vid?.status,
+                  length: vid?.length,
+                  rawPayload: toPrismaJson(vid),
+                  updatedAt: new Date(),
+                },
+              };
+            });
+
+            await prismaHelper.upsertMany(updateData, (item) =>
+              this.prisma.adVideo.updateMany({
+                where: {
+                  id: item.id,
+                  accountId: item.accountId,
+                },
+                data: item.data,
+              }),
+            );
+
+            await sleep(800);
+          } catch (error) {
+            this.logger.error(
+              `❌ syncVideo ${accountId}: ${parseMetaError(error).message}`,
+            );
+          }
+        }
+      }
+
+      this.logger.log(`✅ Updated ${existingVideos.length} video`);
+    } catch (err) {
+      this.logger.error(`❌ syncVideo fatal: ${err.message}`);
+    }
+  }
+
+  async syncImage() {
+    this.logger.log('🔄 Sync AdImage (optimized)');
+    this.init();
+
+    const prismaHelper = new PrismaBatchHelper(this.prisma);
+
+    try {
+      const existingImages = await this.prisma.adImage.findMany({
+        where: {
+          account: { needsReauth: false },
+          status: null,
+        },
+        select: { hash: true, accountId: true },
+      });
+
+      if (!existingImages.length) return;
+
+      const byAccount = this.groupByAccount(
+        existingImages.map((img) => ({
+          id: img.hash,
+          accountId: img.accountId,
+        })),
+      );
+
+      for (const [accountId, hashes] of Object.entries(byAccount)) {
+        const adAccount = new AdAccount(accountId);
+
+        for (const hashChunk of chunk(hashes, 50)) {
+          try {
+            const cursor = await adAccount.getAdImages(AD_IMAGE_FIELDS, {
+              limit: 100,
+              hashes: hashChunk,
+            });
+
+            const images = await fetchAll(cursor);
+
+            if (!images.length) continue;
+
+            const updateData = images.map((img) => ({
+              hash: img.hash,
+              accountId,
+              data: {
+                name: img?.name,
+                url: img?.permalink_url || img?.url,
+                permalink_url: img?.permalink_url,
+                height: img?.height,
+                width: img?.width,
+                rawPayload: toPrismaJson(img),
+                status: img?.status,
+                createdTime: img?.created_time
+                  ? new Date(img.created_time)
+                  : undefined,
+                createdAt: img?.created_time
+                  ? new Date(img.created_time)
+                  : undefined,
+                updatedAt: new Date(),
+              },
+            }));
+
+            await prismaHelper.upsertMany(updateData, (item) =>
+              this.prisma.adImage.updateMany({
+                where: {
+                  hash: item.hash,
+                  accountId: item.accountId,
+                },
+                data: item.data,
+              }),
+            );
+
+            await sleep(800);
+          } catch (error) {
+            this.logger.error(
+              `❌ syncImage ${accountId}: ${parseMetaError(error).message}`,
+            );
+          }
+        }
+      }
+
+      this.logger.log(`✅ Updated ${existingImages.length} images`);
+    } catch (err) {
+      this.logger.error(`❌ syncImage fatal: ${err.message}`);
+    }
   }
 }

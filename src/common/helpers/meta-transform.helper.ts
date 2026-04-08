@@ -10,16 +10,13 @@ export class MetaTransformHelper {
       status: c.status,
       objective: c.objective,
       buyingType: c.buying_type,
-      dailyBudget: Number(c.daily_budget),
-      lifetimeBudget: Number(c.lifetime_budget),
+      dailyBudget: Number(c.daily_budget) || undefined,
+      lifetimeBudget: Number(c.lifetime_budget) || undefined,
       effectiveBudget: Number(c.daily_budget ?? c.lifetime_budget ?? 0),
       rawPayload: c,
       lastFetchedAt: new Date(),
       createdAt: c.created_time ? new Date(c.created_time) : undefined,
       updatedAt: c.updated_time ? new Date(c.updated_time) : undefined,
-      ...(c?.insights?.data?.[0]
-        ? extractCampaignMetrics(c.insights.data[0])
-        : {}),
     } as Campaign;
   }
 
@@ -70,8 +67,11 @@ export class MetaTransformHelper {
       name: c.name,
       creativeType: c.object_type,
       imageHash: c.image_hash,
-      videoId: c.video_id,
-      thumbnailUrl: c.thumbnail_url,
+      videoId: c?.object_story_spec?.video_data?.video_id || c.video_id,
+      thumbnailUrl:
+        c.object_story_spec?.video_data?.image_url ||
+        c.image_url ||
+        c.thumbnail_url,
       pageId,
       postId,
       rawPayload: c,

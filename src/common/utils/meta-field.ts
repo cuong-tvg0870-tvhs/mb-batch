@@ -119,6 +119,7 @@ export const CREATIVE_FIELDS = [
   AdCreative.Fields.object_store_url,
   AdCreative.Fields.status,
   AdCreative.Fields.effective_object_story_id,
+  AdCreative.Fields.object_story_spec,
 ];
 
 export const AD_IMAGE_FIELDS = [
@@ -146,6 +147,7 @@ export const AD_VIDEO_FIELDS = [
   'source',
   'picture',
   'created_time',
+  'embed_html',
 ];
 export const AD_INSIGHT_FIELDS = [
   // identity
