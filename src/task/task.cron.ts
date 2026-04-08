@@ -57,8 +57,6 @@ export class TaskCron implements OnModuleInit {
 
   async onModuleInit() {
     this.logger.log('🚀 TaskCron initialized');
-    // await this.syncImage();
-    // await this.syncVideo();
   }
 
   /**
@@ -149,7 +147,7 @@ export class TaskCron implements OnModuleInit {
     this.logger.log('✅ DAILY Ad DONE');
 
     this.logger.log('🔄 Analytic Creative Insight');
-    await this.calculateCreativeInsightFromAdInsightParallel();
+    await this.calculateCreativeInsightFromAdInsight();
     this.logger.log('✅ Analytic Creative Insight DONE');
   }
 
@@ -219,7 +217,9 @@ export class TaskCron implements OnModuleInit {
 
         // ✅ IMAGE (dedup theo accountId + hash)
         if (item.imageHash) {
-          const key = `${(item.accountId as string).replaceAll('act_', '')}:${item.imageHash}`;
+          const key = `${(item.accountId as string).replaceAll('act_', '')}:${
+            item.imageHash
+          }`;
 
           if (!imageMap.has(key)) {
             imageMap.set(key, {
@@ -1280,7 +1280,7 @@ export class TaskCron implements OnModuleInit {
     this.logger.log(`🎯 DONE MAX adSet Insight - Total: ${totalProcessed}`);
   }
 
-  async calculateCreativeInsightFromAdInsightParallel(batchSize = 50) {
+  async calculateCreativeInsightFromAdInsight(batchSize = 50) {
     console.log('🚀 Start calculate CreativeInsight FINAL...');
 
     const prismaHelper = new PrismaBatchHelper(this.prisma);
@@ -1317,7 +1317,7 @@ export class TaskCron implements OnModuleInit {
       const insights = await this.prisma.adInsight.findMany({
         where: {
           adId: { in: adIds },
-          range: { in: ['MAX', 'DAY_7', 'DAY_3'] }, // 🔥 bỏ DAILY
+          range: { in: ['MAX', 'DAY_7', 'DAY_3', 'TODAY'] }, // 🔥 bỏ DAILY
         },
       });
 
@@ -1342,6 +1342,7 @@ export class TaskCron implements OnModuleInit {
           max: {} as Record<string, number>,
           last7d: {} as Record<string, number>,
           last3d: {} as Record<string, number>,
+          today: {} as Record<string, number>,
         };
 
         // ================= MERGE =================
@@ -1352,6 +1353,7 @@ export class TaskCron implements OnModuleInit {
             if (ins.range === 'MAX') sumMetrics(bucket.max, ins);
             if (ins.range === 'DAY_7') sumMetrics(bucket.last7d, ins);
             if (ins.range === 'DAY_3') sumMetrics(bucket.last3d, ins);
+            if (ins.range === 'TODAY') sumMetrics(bucket.today, ins);
           }
         }
 
@@ -1382,6 +1384,16 @@ export class TaskCron implements OnModuleInit {
             data: {
               dateStop: today,
               ...bucket.last3d,
+            },
+          },
+
+          {
+            creativeId: creative.id,
+            dateStart: today,
+            range: 'TODAY',
+            data: {
+              dateStop: today,
+              ...bucket.today,
             },
           },
         );
@@ -1470,7 +1482,7 @@ export class TaskCron implements OnModuleInit {
       const insightRecords = await this.prisma.creativeInsight.findMany({
         where: {
           creativeId: { in: batch.map((c) => c.id) },
-          range: { in: ['MAX', 'DAY_7', 'DAY_3'] },
+          range: { in: ['MAX', 'DAY_7', 'DAY_3', 'TODAY'] },
         },
         select: {
           id: true,
@@ -1481,7 +1493,7 @@ export class TaskCron implements OnModuleInit {
 
       const insightMapByCreative = new Map<
         string,
-        { max?: string; d7?: string; d3?: string }
+        { max?: string; d7?: string; d3?: string; today?: string }
       >();
 
       for (const r of insightRecords) {
@@ -1494,6 +1506,7 @@ export class TaskCron implements OnModuleInit {
         if (r.range === 'MAX') obj.max = r.id;
         if (r.range === 'DAY_7') obj.d7 = r.id;
         if (r.range === 'DAY_3') obj.d3 = r.id;
+        if (r.range === 'TODAY') obj.today = r.id;
       }
 
       // ================= UPDATE CREATIVE =================
@@ -1505,8 +1518,9 @@ export class TaskCron implements OnModuleInit {
           data: {
             ...item.data,
             insightMaxId: ref?.max,
-            insight7DayId: ref?.d7,
-            insight3DayId: ref?.d3,
+            insight7dId: ref?.d7,
+            insight3dId: ref?.d3,
+            insightTodayId: ref?.today,
           },
         });
       });
