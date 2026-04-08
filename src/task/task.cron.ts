@@ -57,6 +57,9 @@ export class TaskCron implements OnModuleInit {
 
   async onModuleInit() {
     this.logger.log('🚀 TaskCron initialized');
+    // await this.syncMaxCampaignInsightsJob();
+    // await this.syncMaxAdsetInsightsJob();
+    // await this.syncMaxAdInsightsJob();
   }
 
   /**
@@ -1363,38 +1366,26 @@ export class TaskCron implements OnModuleInit {
             creativeId: creative.id,
             dateStart: '1975-01-01',
             range: 'MAX',
-            data: {
-              dateStop: today,
-              ...bucket.max,
-            },
+            data: { dateStop: today, ...bucket.max },
           },
           {
             creativeId: creative.id,
             dateStart: sevenDaysAgo,
             range: 'DAY_7',
-            data: {
-              dateStop: today,
-              ...bucket.last7d,
-            },
+            data: { dateStop: today, ...bucket.last7d },
           },
           {
             creativeId: creative.id,
             dateStart: threeDaysAgo,
             range: 'DAY_3',
-            data: {
-              dateStop: today,
-              ...bucket.last3d,
-            },
+            data: { dateStop: today, ...bucket.last3d },
           },
 
           {
             creativeId: creative.id,
             dateStart: today,
             range: 'TODAY',
-            data: {
-              dateStop: today,
-              ...bucket.today,
-            },
+            data: { dateStop: today, ...bucket.today },
           },
         );
 
