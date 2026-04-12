@@ -9,9 +9,13 @@ import { AdAccount, FacebookAdsApi } from 'facebook-nodejs-business-sdk';
 import { PrismaService } from 'src/modules/prisma/prisma.service';
 
 import {
+  buildSubfolderFields,
   chunk,
   extractCampaignMetrics,
   fetchAll,
+  fetchAllWithAPIEndpoint,
+  flattenFolders,
+  FolderNode,
   parseMetaError,
   sleep,
   toPrismaJson,
@@ -30,7 +34,12 @@ import {
 import * as dayjs from 'dayjs';
 
 import { Cron } from '@nestjs/schedule';
-import { CreativeStatus, InsightRange, LevelInsight } from '@prisma/client';
+import {
+  AssetType,
+  CreativeStatus,
+  InsightRange,
+  LevelInsight,
+} from '@prisma/client';
 import { MetaTransformHelper } from 'src/common/helpers/meta-transform.helper';
 import { PrismaBatchHelper } from 'src/common/helpers/prisma-batch.helper';
 
@@ -57,9 +66,12 @@ export class TaskCron implements OnModuleInit {
 
   async onModuleInit() {
     this.logger.log('🚀 TaskCron initialized');
+    // await this.syncFolderData();
     // await this.syncCampaignCore();
     // await this.syncDailyCampaignInsightsJob();
-    // await this.syncAllCampaignInsights();
+    await this.syncAllCampaignInsights();
+    await this.syncAllAdSetInsights();
+    await this.syncAllAdInsights();
     // await this.syncDailyAdsetInsightsJob();
   }
 
@@ -88,6 +100,13 @@ export class TaskCron implements OnModuleInit {
     this.logger.log('🔄 Sync Video Core');
     await this.syncVideo();
     this.logger.log('✅ Sync Video DONE');
+  }
+
+  @Cron('5 20 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async syncFolderData() {
+    this.logger.log('🔄 Sync Asset Core');
+    await this.syncFolderCreative();
+    this.logger.log('✅ Sync asset DONE');
   }
 
   /**
@@ -2014,6 +2033,236 @@ export class TaskCron implements OnModuleInit {
       this.logger.log(`✅ Updated ${existingImages.length} images`);
     } catch (err) {
       this.logger.error(`❌ syncImage fatal: ${err.message}`);
+    }
+  }
+
+  async syncFolderCreative() {
+    this.logger.log('🔄 Sync Creative Folder (optimized)');
+    this.init();
+
+    const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
+    const prismaHelper = new PrismaBatchHelper(this.prisma);
+
+    const ACCOUNT_ID = '1916878948527753';
+
+    try {
+      // 1️⃣ Fetch folders
+      this.logger.log('📁 [1/5] Fetching folders from Meta API...');
+
+      const foldersRes = (await api.call(
+        'GET',
+        [ACCOUNT_ID, 'creative_folders'],
+        {
+          limit: 100,
+          fields: [
+            'id',
+            'name',
+            'creation_time',
+            'description',
+            'parent_folder{id,name}',
+            buildSubfolderFields(3),
+          ],
+        },
+      )) as { data: FolderNode[] };
+
+      const folderData = flattenFolders(foldersRes?.data ?? [], undefined, []);
+
+      this.logger.log(`📁 Total folders fetched: ${folderData.length}`);
+
+      await this.prisma.creativeFolder.createMany({
+        data: folderData,
+        skipDuplicates: true,
+      });
+
+      this.logger.log('✅ Folders saved to DB');
+
+      const folders = await this.prisma.creativeFolder.findMany({
+        select: { id: true },
+      });
+
+      this.logger.log(`📁 Total folders in DB: ${folders.length}`);
+
+      // 2️⃣ Load existing assets
+      this.logger.log('🧠 [2/5] Loading existing assets from DB...');
+
+      const existingAssets = await this.prisma.creativeAsset.findMany({
+        select: { id: true, folderId: true },
+      });
+
+      this.logger.log(`🧠 Existing assets: ${existingAssets.length}`);
+
+      const existingSet = new Set(
+        existingAssets.map((a) => `${a.id}_${a.folderId}`),
+      );
+
+      // 3️⃣ Fetch creatives per folder
+      this.logger.log('🎨 [3/5] Fetching creatives per folder...');
+
+      const CONCURRENCY = 5;
+      let processedFolders = 0;
+
+      for (const folderChunk of chunk(folders, CONCURRENCY)) {
+        this.logger.log(
+          `📦 Processing folder chunk (${processedFolders}/${folders.length})`,
+        );
+
+        await Promise.all(
+          folderChunk.map(async (folder) => {
+            try {
+              this.logger.log(`➡️ Fetch creatives for folder ${folder.id}`);
+
+              const cursor = await api.call('GET', [ACCOUNT_ID, 'creatives'], {
+                limit: 50,
+                fields: [
+                  'id',
+                  'name',
+                  'type',
+                  'url',
+                  'hash',
+                  'width',
+                  'height',
+                  'duration',
+                  'thumbnail',
+                  'video_id',
+                  'creation_time',
+                ],
+                creative_folder_id: folder.id,
+              });
+
+              const assets = await fetchAllWithAPIEndpoint(cursor);
+
+              this.logger.log(
+                `📂 Folder ${folder.id} → fetched ${assets.length} assets`,
+              );
+
+              if (!assets.length) return;
+
+              const updateData = assets.map((a) => {
+                const key = `${a.id}_${folder.id}`;
+                return {
+                  id: a.id,
+                  folderId: folder.id,
+                  data: {
+                    name: a.name,
+                    width: a.width,
+                    height: a.height,
+                    duration: a.duration,
+                    thumbnail: a.thumbnail,
+                    imageUrl: a.url,
+                    imageHash: a.hash,
+                    video_id: a.video_id,
+                    type: a.video_id ? AssetType.VIDEO : AssetType.IMAGE,
+                    creation_time: a?.creation_time,
+                    createdAtLocal: new Date(),
+                    updatedAt: new Date(),
+                  },
+                  isExist: existingSet.has(key),
+                };
+              });
+
+              const createCount = updateData.filter((i) => !i.isExist).length;
+              const updateCount = updateData.length - createCount;
+
+              this.logger.log(
+                `📝 Folder ${folder.id} → create: ${createCount}, update: ${updateCount}`,
+              );
+
+              await prismaHelper.upsertMany(updateData, (item) => {
+                if (item.isExist) {
+                  return this.prisma.creativeAsset.updateMany({
+                    where: {
+                      id: item.id,
+                      folderId: item.folderId,
+                    },
+                    data: item.data,
+                  });
+                }
+
+                return this.prisma.creativeAsset.create({
+                  data: {
+                    id: item.id,
+                    folderId: item.folderId,
+                    ...item.data,
+                  },
+                });
+              });
+
+              this.logger.log(`✅ Folder ${folder.id} synced`);
+
+              await sleep(500);
+            } catch (err) {
+              this.logger.error(
+                `❌ Folder ${folder.id}: ${parseMetaError(err).message}`,
+              );
+            }
+          }),
+        );
+
+        processedFolders += folderChunk.length;
+      }
+
+      // 4️⃣ Sync video details
+      this.logger.log('🎬 [4/5] Sync video details...');
+
+      const videoAssets = await this.prisma.creativeAsset.findMany({
+        where: { video_id: { not: null } },
+        select: { video_id: true },
+      });
+
+      const videoIds = videoAssets.map((v) => v.video_id);
+
+      this.logger.log(`🎬 Total video assets: ${videoIds.length}`);
+
+      let processedVideos = 0;
+
+      for (const idsChunk of chunk(videoIds, 50)) {
+        try {
+          this.logger.log(
+            `🎬 Fetch video batch (${processedVideos}/${videoIds.length})`,
+          );
+
+          const res = await api.call('GET', ['/'], {
+            ids: idsChunk.join(','),
+            fields: 'source,thumbnails',
+          });
+
+          const videosMap = res || {};
+
+          const updatePayload = Object.entries(videosMap).map(
+            ([videoId, vid]: any) => ({
+              video_id: videoId,
+              data: {
+                video_source: vid?.source,
+                video_thumbnails: vid?.thumbnails,
+                updatedAt: new Date(),
+              },
+            }),
+          );
+
+          this.logger.log(`🎬 Updating ${updatePayload.length} videos`);
+
+          await prismaHelper.upsertMany(updatePayload, (item) =>
+            this.prisma.creativeAsset.updateMany({
+              where: { video_id: item.video_id },
+              data: item.data,
+            }),
+          );
+
+          processedVideos += idsChunk.length;
+
+          await sleep(800);
+        } catch (error) {
+          this.logger.error(
+            `❌ sync video batch: ${parseMetaError(error).message}`,
+          );
+        }
+      }
+
+      this.logger.log('🎉 [5/5] DONE syncFolderCreative');
+      return true;
+    } catch (err) {
+      this.logger.error(`❌ syncFolderCreative fatal: ${err.message}`);
+      return false;
     }
   }
 }

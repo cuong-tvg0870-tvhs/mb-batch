@@ -1,5 +1,5 @@
 import { BadRequestException, HttpException, HttpStatus } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { CreativeAsset, CreativeFolder, Prisma } from '@prisma/client';
 import Cursor from 'facebook-nodejs-business-sdk/src/cursor';
 import { MetaFatalError, normalizeMetaError } from './meta-mapping.util';
 export * from './meta-mapping.util';
@@ -539,4 +539,66 @@ export function extractCampaignMetrics(insight: any) {
     actions: insight?.actions ?? null,
     actionValues: insight?.action_values ?? null,
   };
+}
+
+export async function fetchAllWithAPIEndpoint(initialResponse: any) {
+  let results: any[] = [];
+  let response = initialResponse;
+
+  while (true) {
+    const data = response?.data || [];
+    results = results.concat(data);
+
+    const next = response?.paging?.next;
+    if (!next) break;
+
+    // gọi next page bằng URL
+    response = await fetch(next).then((res) => res.json());
+  }
+
+  return results;
+}
+
+export type FolderNode = {
+  id: string;
+  name: string;
+  description?: string;
+  creation_time?: string;
+  parent_folder?: { id: string; name: string };
+  subfolders?: { data: FolderNode[] };
+};
+
+export type CreativeAssetResponse = {
+  data?: CreativeAsset[];
+  paging?: { next?: string };
+};
+
+export function buildSubfolderFields(depth: number): string {
+  if (depth === 0) return '';
+  const child = buildSubfolderFields(depth - 1);
+
+  return `subfolders.limit(100){id,description,name,creation_time,parent_folder{ id, name }  ${child ? `, ${child}` : ''}}`;
+}
+
+export function flattenFolders(
+  folders: FolderNode[],
+  parentId: string | null = null,
+  result: CreativeFolder[],
+) {
+  for (const folder of folders) {
+    result.push({
+      id: folder.id,
+      name: folder.name,
+      description: folder?.description!,
+      parentId: folder.parent_folder?.id || parentId,
+      creation_time: folder?.creation_time!,
+      createdAtLocal: new Date(),
+      updatedAt: new Date(),
+    });
+
+    if (folder.subfolders?.data?.length) {
+      flattenFolders(folder.subfolders.data, folder.id, result);
+    }
+  }
+  return result;
 }
