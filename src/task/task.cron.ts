@@ -65,14 +65,8 @@ export class TaskCron implements OnModuleInit {
   }
 
   async onModuleInit() {
-    this.logger.log('🚀 TaskCron initialized');
-    // await this.syncFolderData();
-    // await this.syncCampaignCore();
-    // await this.syncDailyCampaignInsightsJob();
-    await this.syncAllCampaignInsights();
-    await this.syncAllAdSetInsights();
-    await this.syncAllAdInsights();
-    // await this.syncDailyAdsetInsightsJob();
+    // this.logger.log('🚀 TaskCron initialized');
+    // await this.syncVideoBM();
   }
 
   /**
@@ -1863,14 +1857,16 @@ export class TaskCron implements OnModuleInit {
 
     try {
       const existingVideos = await this.prisma.adVideo.findMany({
-        where: {
-          account: { needsReauth: false },
-          status: null,
-        },
+        where: { account: { needsReauth: false } },
         select: { id: true, accountId: true, thumbnailUrl: true },
       });
 
-      if (!existingVideos.length) return;
+      if (!existingVideos.length) {
+        this.logger.log('⚠️ No videos to sync');
+        return;
+      }
+
+      this.logger.log(`📦 Total videos: ${existingVideos.length}`);
 
       const byAccount = this.groupByAccount(
         existingVideos.map((vid) => ({
@@ -1879,10 +1875,26 @@ export class TaskCron implements OnModuleInit {
         })),
       );
 
+      let totalProcessed = 0;
+
       for (const [accountId, ids] of Object.entries(byAccount)) {
+        this.logger.log(
+          `\n==============================\n📊 ACCOUNT: ${accountId}\n📦 VIDEOS: ${ids.length}\n==============================`,
+        );
+
         const adAccount = new AdAccount(accountId);
 
+        let chunkIndex = 0;
+
         for (const hashChunk of chunk(ids, 50)) {
+          chunkIndex++;
+
+          this.logger.log(
+            `\n➡️ [${accountId}] Chunk ${chunkIndex} | size: ${hashChunk.length}`,
+          );
+
+          this.logger.log(`🆔 IDs: ${hashChunk.map((i) => i).join(', ')}`);
+
           try {
             const cursor = await adAccount.getAdVideos(AD_VIDEO_FIELDS, {
               limit: 100,
@@ -1891,27 +1903,18 @@ export class TaskCron implements OnModuleInit {
 
             const videos = await fetchAll(cursor);
 
+            this.logger.log(
+              `📥 API returned ${videos.length} videos for chunk ${chunkIndex}`,
+            );
+
             if (!videos.length) continue;
 
             const updateData = videos.map((vid) => {
               const currentVideo = existingVideos.find((v) => v.id == vid.id);
-              if (currentVideo?.thumbnailUrl?.includes('https://scontent'))
-                return {
-                  id: vid.id,
-                  accountId,
-                  data: {
-                    title: vid?.title || vid?.name,
-                    accountId: vid?.account_id,
-                    source: vid?.source,
-                    status: vid?.status?.video_status || vid?.status,
-                    thumbnailUrl: vid?.thumbnails?.data?.find(
-                      (tn) => tn?.is_preferred,
-                    )?.url,
-                    length: vid?.length,
-                    rawPayload: toPrismaJson(vid),
-                    updatedAt: new Date(),
-                  },
-                };
+
+              const hasThumb =
+                currentVideo?.thumbnailUrl?.includes('https://scontent');
+
               return {
                 id: vid.id,
                 accountId,
@@ -1920,12 +1923,19 @@ export class TaskCron implements OnModuleInit {
                   accountId: vid?.account_id,
                   source: vid?.source,
                   status: vid?.status?.video_status || vid?.status,
+                  thumbnailUrl: hasThumb
+                    ? vid?.thumbnails?.data?.find((tn) => tn?.is_preferred)?.url
+                    : undefined,
                   length: vid?.length,
                   rawPayload: toPrismaJson(vid),
                   updatedAt: new Date(),
                 },
               };
             });
+
+            this.logger.log(
+              `🛠 Upserting ${updateData.length} videos (chunk ${chunkIndex})`,
+            );
 
             await prismaHelper.upsertMany(updateData, (item) =>
               this.prisma.adVideo.updateMany({
@@ -1937,16 +1947,155 @@ export class TaskCron implements OnModuleInit {
               }),
             );
 
+            totalProcessed += updateData.length;
+
+            this.logger.log(
+              `✅ Chunk ${chunkIndex} done | total processed: ${totalProcessed}`,
+            );
+
             await sleep(800);
           } catch (error) {
             this.logger.error(
-              `❌ syncVideo ${accountId}: ${parseMetaError(error).message}`,
+              `❌ syncVideo ${accountId} chunk ${chunkIndex}: ${parseMetaError(error).message}`,
             );
           }
         }
+
+        this.logger.log(
+          `🎯 ACCOUNT DONE: ${accountId} | processed: ${totalProcessed}`,
+        );
       }
 
-      this.logger.log(`✅ Updated ${existingVideos.length} video`);
+      this.logger.log(`🏁 DONE syncVideo | TOTAL: ${totalProcessed}`);
+    } catch (err) {
+      this.logger.error(`❌ syncVideo fatal: ${err.message}`);
+    }
+  }
+
+  async syncVideoBM() {
+    this.logger.log('🔄 Sync Ad Video (optimized)');
+    this.init();
+    const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
+
+    const prismaHelper = new PrismaBatchHelper(this.prisma);
+
+    try {
+      const existingVideos = await this.prisma.adVideo.findMany({
+        where: {
+          account: { needsReauth: false },
+          status: null,
+        },
+        select: { id: true, accountId: true, thumbnailUrl: true },
+      });
+
+      if (!existingVideos.length) {
+        this.logger.log('⚠️ No videos to sync');
+        return;
+      }
+
+      this.logger.log(`📦 Total videos: ${existingVideos.length}`);
+
+      const byAccount = this.groupByAccount(
+        existingVideos.map((vid) => ({
+          id: vid.id,
+          accountId: vid.accountId,
+        })),
+      );
+
+      let totalProcessed = 0;
+
+      for (const [accountId, ids] of Object.entries(byAccount)) {
+        this.logger.log(
+          `\n==============================\n📊 ACCOUNT: ${accountId}\n📦 VIDEOS: ${ids.length}\n==============================`,
+        );
+
+        let chunkIndex = 0;
+
+        for (const hashChunk of chunk(ids, 10)) {
+          (await Promise.all(
+            hashChunk.map(async (id) => {
+              try {
+                const cursor = await api.call('GET', [''], {
+                  ids: id,
+                  fields: AD_VIDEO_FIELDS,
+                });
+
+                const videos = Object.values(cursor);
+
+                this.logger.log(
+                  `📥 API returned ${videos.length} videos for chunk ${chunkIndex}`,
+                );
+
+                const updateData = videos.map((vid) => {
+                  const currentVideo = existingVideos.find(
+                    (v) => v.id == vid.id,
+                  );
+
+                  const hasThumb =
+                    currentVideo?.thumbnailUrl?.includes('https://scontent');
+
+                  return {
+                    id: vid.id,
+                    accountId,
+                    data: {
+                      title: vid?.title || vid?.name,
+                      accountId: vid?.account_id,
+                      source: vid?.source,
+                      status: vid?.status?.video_status || vid?.status,
+                      thumbnailUrl: hasThumb
+                        ? vid?.thumbnails?.data?.find((tn) => tn?.is_preferred)
+                            ?.url
+                        : undefined,
+                      length: vid?.length,
+                      rawPayload: toPrismaJson(vid),
+                      updatedAt: new Date(),
+                    },
+                  };
+                });
+
+                this.logger.log(
+                  `🛠 Upserting ${updateData.length} videos (chunk ${chunkIndex})`,
+                );
+
+                await prismaHelper.upsertMany(updateData, (item) =>
+                  this.prisma.adVideo.updateMany({
+                    where: {
+                      id: item.id,
+                      accountId: item.accountId,
+                    },
+                    data: item.data,
+                  }),
+                );
+
+                totalProcessed += updateData.length;
+
+                this.logger.log(
+                  `✅ Chunk ${chunkIndex} done | total processed: ${totalProcessed}`,
+                );
+
+                await sleep(800);
+              } catch (error) {
+                this.logger.error(
+                  `❌ syncVideo ${accountId} chunk ${chunkIndex}: ${parseMetaError(error).message}`,
+                );
+              }
+            }),
+          ),
+            chunkIndex++);
+
+          this.logger.log(
+            `\n➡️ [${accountId}] Chunk ${chunkIndex} | size: ${hashChunk.length}`,
+          );
+
+          this.logger.log(`🆔 IDs: ${hashChunk.map((i) => i).join(', ')}`);
+        }
+
+        this.logger.log(
+          `🎯 ACCOUNT DONE: ${accountId} | processed: ${totalProcessed}`,
+        );
+      }
+
+      this.logger.log(`🏁 DONE syncVideo | TOTAL: ${totalProcessed}`);
     } catch (err) {
       this.logger.error(`❌ syncVideo fatal: ${err.message}`);
     }
