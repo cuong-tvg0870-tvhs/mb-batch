@@ -1534,6 +1534,8 @@ model SystemCampaign {
     campaigns            Campaign[]
     templateCampaigns    TemplateCampaign[]
 
+    errors Json?
+
     @@index([status])
     @@index([createdById, createdAt(sort: Desc)])
 }
