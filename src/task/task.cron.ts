@@ -31,7 +31,7 @@ import {
   CREATIVE_FIELDS,
 } from 'src/common/utils/meta-field';
 
-import * as dayjs from 'dayjs';
+import dayjs from 'dayjs';
 
 import { Cron } from '@nestjs/schedule';
 import {
@@ -1968,7 +1968,7 @@ export class TaskCron implements OnModuleInit {
 
       this.logger.log(`🏁 DONE syncVideo | TOTAL: ${totalProcessed}`);
     } catch (err) {
-      this.logger.error(`❌ syncVideo fatal: ${err.message}`);
+      this.logger.error(`❌ syncVideo fatal: ${parseMetaError(err).message}`);
     }
   }
 
@@ -2097,7 +2097,7 @@ export class TaskCron implements OnModuleInit {
 
       this.logger.log(`🏁 DONE syncVideo | TOTAL: ${totalProcessed}`);
     } catch (err) {
-      this.logger.error(`❌ syncVideo fatal: ${err.message}`);
+      this.logger.error(`❌ syncVideo fatal: ${parseMetaError(err).message}`);
     }
   }
 
@@ -2181,7 +2181,7 @@ export class TaskCron implements OnModuleInit {
 
       this.logger.log(`✅ Updated ${existingImages.length} images`);
     } catch (err) {
-      this.logger.error(`❌ syncImage fatal: ${err.message}`);
+      this.logger.error(`❌ syncImage fatal: ${parseMetaError(err).message}`);
     }
   }
 
@@ -2408,10 +2408,10 @@ export class TaskCron implements OnModuleInit {
       }
 
       this.logger.log('🎉 [5/5] DONE syncFolderCreative');
-      return true;
     } catch (err) {
-      this.logger.error(`❌ syncFolderCreative fatal: ${err.message}`);
-      return false;
+      this.logger.error(
+        `❌ syncFolderCreative fatal: ${parseMetaError(err).message}`,
+      );
     }
   }
 }
