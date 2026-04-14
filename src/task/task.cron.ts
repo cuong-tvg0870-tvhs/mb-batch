@@ -31,7 +31,7 @@ import {
   CREATIVE_FIELDS,
 } from 'src/common/utils/meta-field';
 
-import dayjs from 'dayjs';
+import * as dayjs from 'dayjs';
 
 import { Cron } from '@nestjs/schedule';
 import {
@@ -66,7 +66,7 @@ export class TaskCron implements OnModuleInit {
 
   async onModuleInit() {
     // this.logger.log('🚀 TaskCron initialized');
-    // await this.syncVideoBM();
+    // await this.syncDailyCampaignInsights();
   }
 
   /**
@@ -2012,7 +2012,7 @@ export class TaskCron implements OnModuleInit {
         let chunkIndex = 0;
 
         for (const hashChunk of chunk(ids, 10)) {
-          (await Promise.all(
+          await Promise.all(
             hashChunk.map(async (id) => {
               try {
                 const cursor = await api.call('GET', [''], {
@@ -2081,7 +2081,7 @@ export class TaskCron implements OnModuleInit {
               }
             }),
           ),
-            chunkIndex++);
+            chunkIndex++;
 
           this.logger.log(
             `\n➡️ [${accountId}] Chunk ${chunkIndex} | size: ${hashChunk.length}`,
