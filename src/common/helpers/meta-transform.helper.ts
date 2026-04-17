@@ -27,10 +27,16 @@ export class MetaTransformHelper {
       campaignId,
       name: as.name,
       status: as.status,
+      destinationType: as.destination_type,
       dailyBudget: Number(as.daily_budget),
       lifetimeBudget: Number(as.lifetime_budget),
       effectiveBudget: Number(as.daily_budget ?? as.lifetime_budget ?? 0),
       rawPayload: as,
+      optimizationGoal: as.optimization_goal,
+      targeting: as.targeting,
+      bidStrategy: as.bid_strategy,
+      billingEvent: as.billing_event,
+
       lastFetchedAt: new Date(),
       ...(as?.insights?.data?.[0]
         ? extractCampaignMetrics(as.insights.data[0])

@@ -355,6 +355,7 @@ model AdSet {
     status String?
 
     optimizationGoal String?
+    destinationType  String?
     billingEvent     String?
     bidStrategy      String?
 
