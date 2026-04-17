@@ -72,6 +72,7 @@ export class MetaTransformHelper {
       accountId,
       name: c.name,
       creativeType: c.object_type,
+      objectStoryId: c.object_story_id,
       imageHash: c.image_hash,
       videoId: c?.object_story_spec?.video_data?.video_id || c.video_id,
       thumbnailUrl:
