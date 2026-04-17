@@ -67,6 +67,9 @@ export class TaskCron implements OnModuleInit {
   async onModuleInit() {
     // this.logger.log('🚀 TaskCron initialized');
     // await this.syncDailyCampaignInsights();
+    // await this.syncDailyCampaignInsightsJob();
+    // await this.syncDailyAdsetInsightsJob();
+    // await this.syncDailyAdInsightsJob();
   }
 
   /**
@@ -328,7 +331,7 @@ export class TaskCron implements OnModuleInit {
 
     try {
       const accounts = await this.prisma.account.findMany({
-        where: { needsReauth: false, id: 'act_6541666089263750' },
+        where: { needsReauth: false },
       });
 
       for (const account of accounts) {
