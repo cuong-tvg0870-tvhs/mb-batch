@@ -66,7 +66,7 @@ export class TaskCron implements OnModuleInit {
 
   async onModuleInit() {
     // this.logger.log('🚀 TaskCron initialized');
-    // await this.syncDailyCampaignInsights();
+    await this.syncVideoBM();
     // await this.syncDailyCampaignInsightsJob();
     // await this.syncDailyAdsetInsightsJob();
     // await this.syncDailyAdInsightsJob();
@@ -234,41 +234,33 @@ export class TaskCron implements OnModuleInit {
         item.systemPageId = item.pageId;
       }
 
-      for (const item of creativeData) {
-        // ✅ map systemPageId
-        if (item.pageId && fanpageMap.has(item.pageId)) {
-          item.systemPageId = item.pageId;
-        }
-
-        // ✅ VIDEO (dedup theo videoId)
-        if (item.videoId && !videoMap.has(item.videoId)) {
-          videoMap.set(item.videoId, {
-            id: item.videoId,
-            accountId: item.accountId,
-            thumbnailUrl: item.thumbnailUrl,
-          });
-        }
-
-        // ✅ IMAGE (dedup theo accountId + hash)
-        if (item.imageHash) {
-          const key = `${(item.accountId as string).replaceAll('act_', '')}:${
-            item.imageHash
-          }`;
-
-          if (!imageMap.has(key)) {
-            imageMap.set(key, {
-              id: key,
-              hash: item.imageHash,
-              accountId: item.accountId,
-              url: item.thumbnailUrl,
-            });
-            item.imageId = key;
-          }
-        }
+      // ✅ VIDEO (dedup theo videoId)
+      if (item.videoId && !videoMap.has(item.videoId)) {
+        videoMap.set(item.videoId, {
+          id: item.videoId,
+          accountId: item.accountId,
+          thumbnailUrl: item.thumbnailUrl,
+        });
       }
 
-      // 👉 convert ra array
+      // ✅ IMAGE (dedup theo accountId + hash)
+      if (item.imageHash) {
+        const key = `${(item.accountId as string).replaceAll('act_', '')}:${
+          item.imageHash
+        }`;
+
+        if (!imageMap.has(key)) {
+          imageMap.set(key, {
+            id: key,
+            hash: item.imageHash,
+            accountId: item.accountId,
+            url: item.thumbnailUrl,
+          });
+          item.imageId = key;
+        }
+      }
     }
+
     const newVideos = Array.from(videoMap.values());
     const newImages = Array.from(imageMap.values());
 
@@ -2015,7 +2007,7 @@ export class TaskCron implements OnModuleInit {
         let chunkIndex = 0;
 
         for (const hashChunk of chunk(ids, 10)) {
-          await Promise.all(
+          (await Promise.all(
             hashChunk.map(async (id) => {
               try {
                 const cursor = await api.call('GET', [''], {
@@ -2084,7 +2076,7 @@ export class TaskCron implements OnModuleInit {
               }
             }),
           ),
-            chunkIndex++;
+            chunkIndex++);
 
           this.logger.log(
             `\n➡️ [${accountId}] Chunk ${chunkIndex} | size: ${hashChunk.length}`,

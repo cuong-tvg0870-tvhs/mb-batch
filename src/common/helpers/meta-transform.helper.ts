@@ -65,7 +65,8 @@ export class MetaTransformHelper {
     const c = ad.creative;
     if (!c) return null;
 
-    const [pageId, postId] = c?.effective_object_story_id?.split('_') || [];
+    const [pageId, postId] =
+      (c?.effective_object_story_id || c?.object_story_id)?.split('_') || [];
 
     return {
       id: c.id,
@@ -73,6 +74,7 @@ export class MetaTransformHelper {
       name: c.name,
       creativeType: c.object_type,
       objectStoryId: c.object_story_id,
+      effectObjectStoryId: c.effective_object_story_id,
       imageHash: c.image_hash,
       videoId: c?.object_story_spec?.video_data?.video_id || c.video_id,
       thumbnailUrl:
