@@ -66,7 +66,7 @@ export class TaskCron implements OnModuleInit {
 
   async onModuleInit() {
     // this.logger.log('🚀 TaskCron initialized');
-    await this.syncVideoBM();
+    // await this.syncVideoBM();
     // await this.syncDailyCampaignInsightsJob();
     // await this.syncDailyAdsetInsightsJob();
     // await this.syncDailyAdInsightsJob();
