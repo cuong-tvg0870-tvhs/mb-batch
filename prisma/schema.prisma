@@ -68,21 +68,6 @@ model TargetingInterest {
     topic                     String?
 }
 
-model CidContent {
-    id           String  @id @default(uuid())
-    code         String
-    name         String
-    project_name String?
-    ma_sanpham   String?
-    ten_sanpham  String?
-
-    createdAt DateTime @default(now())
-
-    @@unique([code])
-    @@unique([name])
-    @@index([code, name, ma_sanpham, ten_sanpham, project_name])
-}
-
 model DropdownCategory {
     id          String  @id @default(uuid())
     key         String  @unique
@@ -1620,6 +1605,11 @@ model SystemCreative {
     @@index([createdById, createdAt(sort: Desc)])
 }
 
+enum FolderStatus {
+    ACTIVE
+    DEACTIVE
+}
+
 model CreativeFolder {
     id            String           @id
     name          String
@@ -1634,6 +1624,8 @@ model CreativeFolder {
     createdAtLocal DateTime @default(now())
     updatedAt      DateTime @updatedAt
 
+    status FolderStatus @default(ACTIVE)
+
     @@index([parentId])
 }
 
@@ -1647,20 +1639,18 @@ model CreativeAsset {
     name String?
     type AssetType
 
-    // metadata chung
     width     Int?
     height    Int?
     thumbnail String?
 
-    // image
     imageUrl  String?
-    imageHash String?
+    imageHash String? @unique // 🔥 tránh duplicate ảnh
 
-    //drive
-    drive_url String?
+    drive_url String?    @unique // 🔥 thường unique
+    drive_id  String?    @unique
+    drive     DriveFile? @relation(fields: [drive_id], references: [id])
 
-    // video
-    video_id         String?
+    video_id         String? @unique // 🔥 video id thường unique
     video_source     String?
     video_thumbnails Json?
     duration         Int?
@@ -1669,7 +1659,6 @@ model CreativeAsset {
 
     status Json?
 
-    // relation
     folderId String
     folder   CreativeFolder @relation(fields: [folderId], references: [id])
 
@@ -1678,7 +1667,60 @@ model CreativeAsset {
 
     videoSource Json?
 
+    larkRecord LarkRecord?
+
     @@index([folderId])
-    @@index([video_id])
-    @@index([imageHash])
+}
+
+model LarkRecord {
+    id  String @id
+    raw Json
+
+    cid String? @unique // 🔥 cực quan trọng (ID Content)
+
+    project_name String?
+    project_code String?
+
+    brand_name String?
+    brand_code String?
+
+    product_code String?
+    product_name String?
+
+    employee_id   String?
+    employee_name String?
+
+    drive_url String?
+
+    drive_id String?    @unique
+    drive    DriveFile? @relation(fields: [drive_id], references: [id])
+
+    creative_asset_id String?        @unique
+    creative_asset    CreativeAsset? @relation(fields: [creative_asset_id], references: [id])
+
+    production_date DateTime?
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@index([production_date])
+    @@index([brand_code, product_code])
+}
+
+model DriveFile {
+    id  String @id
+    raw Json
+
+    parentId       String?
+    name           String?
+    mimeType       String?
+    webContentLink String?
+    webViewLink    String?
+    size           String?
+
+    larkRecord    LarkRecord?
+    creativeAsset CreativeAsset?
+
+    drive_permission Boolean?
+    last_seen_at     DateTime?
 }

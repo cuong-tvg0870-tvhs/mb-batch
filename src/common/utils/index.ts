@@ -1,5 +1,10 @@
 import { BadRequestException, HttpException, HttpStatus } from '@nestjs/common';
-import { CreativeAsset, CreativeFolder, Prisma } from '@prisma/client';
+import {
+  CreativeAsset,
+  CreativeFolder,
+  FolderStatus,
+  Prisma,
+} from '@prisma/client';
 import Cursor from 'facebook-nodejs-business-sdk/src/cursor';
 import { MetaFatalError, normalizeMetaError } from './meta-mapping.util';
 export * from './meta-mapping.util';
@@ -594,6 +599,7 @@ export function flattenFolders(
       creation_time: folder?.creation_time!,
       createdAtLocal: new Date(),
       updatedAt: new Date(),
+      status: FolderStatus.ACTIVE,
     });
 
     if (folder.subfolders?.data?.length) {
