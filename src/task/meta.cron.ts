@@ -31,7 +31,7 @@ import {
   CREATIVE_FIELDS,
 } from 'src/common/utils/meta-field';
 
-import * as dayjs from 'dayjs';
+import dayjs from 'dayjs';
 
 import { Cron } from '@nestjs/schedule';
 import {
@@ -48,8 +48,8 @@ import { PrismaBatchHelper } from 'src/common/helpers/prisma-batch.helper';
 ===================================================== */
 
 @Injectable()
-export class TaskCron implements OnModuleInit {
-  private readonly logger = new Logger(TaskCron.name);
+export class MetaCron implements OnModuleInit {
+  private readonly logger = new Logger(MetaCron.name);
   private initialized = false;
 
   constructor(private readonly prisma: PrismaService) {}
@@ -65,11 +65,7 @@ export class TaskCron implements OnModuleInit {
   }
 
   async onModuleInit() {
-    // this.logger.log('🚀 TaskCron initialized');
-    // await this.syncVideoBM();
-    // await this.syncDailyCampaignInsightsJob();
-    // await this.syncDailyAdsetInsightsJob();
-    // await this.syncDailyAdInsightsJob();
+    this.logger.log('🚀 TaskCron initialized');
   }
 
   /**
