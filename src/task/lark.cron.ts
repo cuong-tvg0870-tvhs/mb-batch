@@ -237,10 +237,10 @@ export class LarkCron implements OnModuleInit {
               process.env.SDK_FACEBOOK_ACCESS_TOKEN!,
             );
 
-            const ext = item.type === AssetType.IMAGE ? '.jpg' : '.mp4';
+            const ext = item.type === AssetType.IMAGE ? '.png' : '.mp4';
 
             const filePath = path.join(BASE_DIR, `${item.drive_id}_${ext}`);
-
+            console.log(filePath);
             // =========================
             // 🔥 DRIVE API DOWNLOAD
             // =========================
