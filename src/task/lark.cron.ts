@@ -43,7 +43,7 @@ export class LarkCron implements OnModuleInit {
 
   async onModuleInit() {
     this.logger.log('🚀 Lark initialized');
-    await this.uploadContentToMeta();
+    // await this.syncLarkContent();
   }
 
   /**
@@ -211,8 +211,6 @@ export class LarkCron implements OnModuleInit {
       })
       .filter(Boolean);
 
-    console.log('✅ normalizedData:', normalizedData);
-
     // =========================
     // 🔥 ensure folder exists
     // =========================
@@ -243,10 +241,7 @@ export class LarkCron implements OnModuleInit {
             // =========================
             // 🔥 DOWNLOAD + SAVE FILE
             // =========================
-            const filePath = path.join(
-              BASE_DIR,
-              `${item.drive_id}_${Date.now()}`,
-            );
+            const filePath = path.join(BASE_DIR, `${item.name}`);
 
             const url = item.urlDownload;
 
