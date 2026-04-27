@@ -10,7 +10,6 @@ import axios, { AxiosRequestConfig } from 'axios';
 import { FacebookAdsApi } from 'facebook-nodejs-business-sdk';
 import path from 'path';
 import { chunk } from 'src/common/utils';
-import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 import { mapRecord } from './helper';
 
@@ -238,74 +237,28 @@ export class LarkCron implements OnModuleInit {
               process.env.SDK_FACEBOOK_ACCESS_TOKEN!,
             );
 
-            // =========================
-            // 🔥 DOWNLOAD + SAVE FILE
-            // =========================
+            const ext = item.type === AssetType.IMAGE ? '.jpg' : '.mp4';
 
-            const filePath = path.join(BASE_DIR, item.drive_id);
-
-            const url = item.urlDownload;
+            const filePath = path.join(BASE_DIR, `${item.drive_id}_${ext}`);
 
             // =========================
-            // 🟢 FETCH
+            // 🔥 DRIVE API DOWNLOAD
             // =========================
-            const driveRes = await fetch(url);
+            const driveRes = await this.driveSA.files.get(
+              {
+                fileId: item.drive_id,
+                alt: 'media',
+              },
+              { responseType: 'stream' },
+            );
 
-            if (!driveRes.body) throw new Error('No response body');
-
-            // =========================
-            // 🟢 IMAGE
-            // =========================
             if (item.type === AssetType.IMAGE) {
-              const buffer = Buffer.from(await driveRes.arrayBuffer());
-
-              await fs.promises.writeFile(filePath, buffer);
-            }
-
-            // =========================
-            // 🔵 VIDEO (STREAM SAFE)
-            // =========================
-            else {
-              const nodeStream = Readable.fromWeb(driveRes.body as any);
-
-              await pipeline(nodeStream, fs.createWriteStream(filePath));
+              await pipeline(driveRes.data, fs.createWriteStream(filePath));
+            } else {
+              await pipeline(driveRes.data, fs.createWriteStream(filePath));
             }
 
             return filePath;
-
-            // =========================
-            // 🔥 UPLOAD META
-            // =========================
-            const payload =
-              item.type === AssetType.IMAGE
-                ? {
-                    name: item.name,
-                    // bytes: buffer!.toString('base64'),
-                    creative_folder_id: item.folderId,
-                  }
-                : {
-                    title: item.name,
-                    file_url: item.urlDownload,
-                    creative_folder_id: item.folderId,
-                  };
-
-            const res: any = await api.call(
-              'POST',
-              [
-                '1916878948527753',
-                item.type === AssetType.IMAGE ? 'images' : 'videos',
-              ],
-              payload,
-            );
-
-            const assetId =
-              item.type === AssetType.VIDEO
-                ? res?.business_video_id
-                : (Object.values(res.images)[0] as any)?.id;
-
-            if (!assetId) throw new Error('No assetId');
-
-            return { success: true, assetId, item };
           } catch (err) {
             console.error('❌ Upload fail:', item.name, err);
             return { success: false, error: err, item };
