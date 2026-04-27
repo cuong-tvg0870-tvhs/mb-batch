@@ -1,14 +1,13 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import * as fs from 'fs';
-
 import { drive_v3, google } from 'googleapis';
+import * as path from 'path';
 import { PrismaService } from 'src/modules/prisma/prisma.service';
 
 import { Cron } from '@nestjs/schedule';
 import { AssetType, LarkRecord } from '@prisma/client';
 import axios, { AxiosRequestConfig } from 'axios';
 import { FacebookAdsApi } from 'facebook-nodejs-business-sdk';
-import path from 'path';
 import { chunk } from 'src/common/utils';
 import { pipeline } from 'stream/promises';
 import { mapRecord } from './helper';
@@ -42,7 +41,7 @@ export class LarkCron implements OnModuleInit {
 
   async onModuleInit() {
     this.logger.log('🚀 Lark initialized');
-    await this.uploadContentToMeta();
+    await this.uploadDriveToMeta();
   }
 
   /**
