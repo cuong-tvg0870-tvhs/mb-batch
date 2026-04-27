@@ -1,6 +1,5 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import * as fs from 'fs';
-import * as path from 'path';
 
 import { drive_v3, google } from 'googleapis';
 import { PrismaService } from 'src/modules/prisma/prisma.service';
@@ -9,6 +8,7 @@ import { Cron } from '@nestjs/schedule';
 import { AssetType, LarkRecord } from '@prisma/client';
 import axios, { AxiosRequestConfig } from 'axios';
 import { FacebookAdsApi } from 'facebook-nodejs-business-sdk';
+import path from 'path';
 import { chunk } from 'src/common/utils';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
@@ -241,35 +241,38 @@ export class LarkCron implements OnModuleInit {
             // =========================
             // 🔥 DOWNLOAD + SAVE FILE
             // =========================
-            const filePath = path.join(BASE_DIR, `${item.name}`);
+
+            const filePath = path.join(BASE_DIR, item.drive_id);
 
             const url = item.urlDownload;
 
+            // =========================
+            // 🟢 FETCH
+            // =========================
+            const driveRes = await fetch(url);
+
+            if (!driveRes.body) throw new Error('No response body');
+
+            // =========================
+            // 🟢 IMAGE
+            // =========================
             if (item.type === AssetType.IMAGE) {
-              // =========================
-              // 🟢 IMAGE (buffer OK)
-              // =========================
-              const res = await fetch(url);
-
-              if (!res.body) throw new Error('No response body');
-
-              const buffer = Buffer.from(await res.arrayBuffer());
+              const buffer = Buffer.from(await driveRes.arrayBuffer());
 
               await fs.promises.writeFile(filePath, buffer);
-            } else {
-              // =========================
-              // 🔵 VIDEO (stream - FIXED)
-              // =========================
-              const res = await fetch(url);
+            }
 
-              if (!res.body) throw new Error('No response body');
-
-              const nodeStream = Readable.fromWeb(res.body as any);
+            // =========================
+            // 🔵 VIDEO (STREAM SAFE)
+            // =========================
+            else {
+              const nodeStream = Readable.fromWeb(driveRes.body as any);
 
               await pipeline(nodeStream, fs.createWriteStream(filePath));
             }
 
             return filePath;
+
             // =========================
             // 🔥 UPLOAD META
             // =========================
