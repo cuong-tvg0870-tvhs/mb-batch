@@ -241,24 +241,6 @@ export class LarkCron implements OnModuleInit {
             );
 
             // =========================
-            // 🔥 Drive permission
-            // =========================
-            const resDrive = await this.driveSA.permissions.list({
-              fileId: item.drive_id,
-              fields: 'permissions(id,type)',
-            });
-
-            const isPublic = resDrive.data.permissions?.some(
-              (p) => p.type === 'anyone',
-            );
-
-            if (!isPublic) {
-              await this.addPublicPermission(item.drive_id);
-              needRevert = true;
-              await new Promise((r) => setTimeout(r, 2000));
-            }
-
-            // =========================
             // 🔥 DOWNLOAD + SAVE FILE
             // =========================
             const filePath = path.join(
@@ -329,12 +311,6 @@ export class LarkCron implements OnModuleInit {
           } catch (err) {
             console.error('❌ Upload fail:', item.name, err);
             return { success: false, error: err, item };
-          } finally {
-            try {
-              await this.removePublicPermission(item.drive_id);
-            } catch (err) {
-              console.error('❌ revert private fail:', err);
-            }
           }
         }),
       );
