@@ -43,7 +43,7 @@ export class LarkCron implements OnModuleInit {
 
   async onModuleInit() {
     this.logger.log('🚀 Lark initialized');
-    // await this.syncLarkContent();
+    await this.uploadContentToMeta();
   }
 
   /**
