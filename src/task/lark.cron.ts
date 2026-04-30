@@ -137,6 +137,9 @@ export class LarkCron implements OnModuleInit {
   }
 
   async uploadDriveToMeta() {
+    const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
+    const BUSINESS_ID = '1916878948527753';
+
     const [folders, cidContents] = await Promise.all([
       this.prisma.creativeFolder.findMany({
         where: { parent: { parentId: null } },
@@ -229,43 +232,76 @@ export class LarkCron implements OnModuleInit {
 
       const batchResults = await Promise.allSettled(
         batch.map(async (item) => {
-          let needRevert = false;
+          let filePath: string | null = null;
 
           try {
-            const api = new FacebookAdsApi(
-              process.env.SDK_FACEBOOK_ACCESS_TOKEN!,
-            );
-
-            const ext = item.type === AssetType.IMAGE ? '.png' : '.mp4';
-
-            const filePath = path.join(BASE_DIR, `${item.drive_id}_${ext}`);
-            console.log(filePath);
             // =========================
-            // 🔥 DRIVE API DOWNLOAD
+            // 🖼 IMAGE → arraybuffer
             // =========================
-            const driveRes = await this.driveSA.files.get(
-              {
-                fileId: item.drive_id,
-                alt: 'media',
-              },
-              { responseType: 'stream' },
-            );
-
             if (item.type === AssetType.IMAGE) {
-              await pipeline(driveRes.data, fs.createWriteStream(filePath));
-            } else {
-              await pipeline(driveRes.data, fs.createWriteStream(filePath));
+              const driveRes = await this.driveSA.files.get(
+                { fileId: item.drive_id, alt: 'media' },
+                { responseType: 'arraybuffer' }, // 🔥 quan trọng
+              );
+
+              const buffer = Buffer.from(driveRes.data as ArrayBuffer);
+
+              const res: any = await api.call('POST', [BUSINESS_ID, 'images'], {
+                name: item.name,
+                bytes: buffer.toString('base64'),
+                creative_folder_id: item.folderId,
+              });
+
+              const assetId = (Object.values(res.images)[0] as any)?.id;
+
+              if (!assetId) throw new Error('Upload image fail');
+
+              return { success: true, assetId, item };
             }
 
-            return filePath;
+            // =========================
+            // 🎬 VIDEO → stream → CDN
+            // =========================
+            if (item.type === AssetType.VIDEO) {
+              filePath = path.join(BASE_DIR, `${item.drive_id}.mp4`);
+
+              const driveRes = await this.driveSA.files.get(
+                { fileId: item.drive_id, alt: 'media' },
+                { responseType: 'stream' },
+              );
+
+              await pipeline(driveRes.data, fs.createWriteStream(filePath));
+
+              const cdnUrl = `${process.env.FRONT_END_DOMAIN}/cdn/${item.drive_id}.mp4`;
+
+              const res: any = await api.call('POST', [BUSINESS_ID, 'videos'], {
+                title: item.name,
+                file_url: cdnUrl,
+                creative_folder_id: item.folderId,
+              });
+
+              const assetId = res?.business_video_id;
+
+              if (!assetId) throw new Error('Upload video fail');
+
+              // 🔥 XÓA FILE SAU KHI UPLOAD
+              fs.unlinkSync(filePath);
+
+              return { success: true, assetId, item };
+            }
           } catch (err) {
             console.error('❌ Upload fail:', item.name, err);
+
+            if (filePath && fs.existsSync(filePath)) {
+              fs.unlinkSync(filePath);
+            }
+
             return { success: false, error: err, item };
           }
         }),
       );
 
-      uploadResults.push(...batchResults);
+      uploadResults.push(...batchResults.map((r: any) => r.value));
     }
 
     // =========================

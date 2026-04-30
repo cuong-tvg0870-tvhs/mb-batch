@@ -57,7 +57,6 @@ export class MetaCron implements OnModuleInit {
 
   async onModuleInit() {
     this.logger.log('🚀 TaskCron initialized');
-    // await this.syncFolderVideoData();
   }
 
   /**
