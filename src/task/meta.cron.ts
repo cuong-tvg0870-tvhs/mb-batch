@@ -57,6 +57,7 @@ export class MetaCron implements OnModuleInit {
 
   async onModuleInit() {
     this.logger.log('🚀 TaskCron initialized');
+    // await this.syncFolderVideoData();
   }
 
   /**
@@ -86,12 +87,19 @@ export class MetaCron implements OnModuleInit {
     this.logger.log('✅ Sync Video DONE');
   }
 
-  // @Cron('5 20 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  // async syncFolderData() {
-  //   this.logger.log('🔄 Sync Asset Core');
-  //   await this.syncFolderCreative();
-  //   this.logger.log('✅ Sync asset DONE');
-  // }
+  @Cron('20 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async syncFolderVideoData() {
+    this.logger.log('🔄 Sync Folder Video Core');
+    await this.syncFolderVideo();
+    this.logger.log('✅ Sync Folder Video DONE');
+  }
+
+  @Cron('40 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async syncFolderImageData() {
+    this.logger.log('🔄 Sync Folder Image Core');
+    await this.syncFolderImage();
+    this.logger.log('✅ Sync Folder Image DONE');
+  }
 
   /**
    * ================================
@@ -2167,233 +2175,158 @@ export class MetaCron implements OnModuleInit {
     }
   }
 
-  // async syncFolderCreative() {
-  //   this.logger.log('🔄 Sync Creative Folder (optimized)');
-  //   this.init();
+  async syncFolderVideo() {
+    try {
+      const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
 
-  //   const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
-  //   const prismaHelper = new PrismaBatchHelper(this.prisma);
+      // 1. Lấy batch nhỏ + lock tránh trùng job
+      const [assets, totalResult] = await Promise.all([
+        this.prisma.$queryRawUnsafe<any[]>(`
+          SELECT ca.*,
+                to_timestamp(('x' || substring(ca.video_source from 'oe=([0-9A-Fa-f]+)'))::bit(32)::bigint) AS expires_at
+          FROM "CreativeAsset" ca
+          WHERE ca.video_source ~ 'oe='
+            AND to_timestamp(('x' || substring(ca.video_source from 'oe=([0-9A-Fa-f]+)'))::bit(32)::bigint)
+                <= NOW() + interval '1 day'
+          ORDER BY expires_at ASC
+          LIMIT 20
+          FOR UPDATE SKIP LOCKED;
+        `),
 
-  //   const ACCOUNT_ID = '1916878948527753';
+        this.prisma.$queryRawUnsafe<any[]>(`
+          SELECT COUNT(*) as total
+          FROM "CreativeAsset" ca
+          WHERE ca.video_source ~ 'oe='
+            AND to_timestamp(('x' || substring(ca.video_source from 'oe=([0-9A-Fa-f]+)'))::bit(32)::bigint)
+                <= NOW() + interval '1 day';
+        `),
+      ]);
 
-  //   try {
-  //     // 1️⃣ Fetch folders
-  //     this.logger.log('📁 [1/5] Fetching folders from Meta API...');
+      if (!assets.length) return true;
 
-  //     const foldersRes = (await api.call(
-  //       'GET',
-  //       [ACCOUNT_ID, 'creative_folders'],
-  //       {
-  //         limit: 100,
-  //         fields: [
-  //           'id',
-  //           'name',
-  //           'creation_time',
-  //           'description',
-  //           'parent_folder{id,name}',
-  //           buildSubfolderFields(3),
-  //         ],
-  //       },
-  //     )) as { data: FolderNode[] };
+      // ⚠️ SAI trước đó: bạn đang dùng id thay vì video_id
+      const videoIds = assets.map((v) => v.video_id).filter(Boolean);
 
-  //     const folderData = flattenFolders(foldersRes?.data ?? [], undefined, []);
+      if (!videoIds.length) return true;
 
-  //     this.logger.log(`📁 Total folders fetched: ${folderData.length}`);
+      let response: any = {};
 
-  //     await this.prisma.creativeFolder.createMany({
-  //       data: folderData,
-  //       skipDuplicates: true,
-  //     });
+      // 2. Call API (có try/catch riêng)
+      try {
+        response = await api.call('GET', [''], {
+          ids: videoIds.join(','),
+          fields: 'source,thumbnails',
+        });
+      } catch (err: any) {
+        console.error('[FB API ERROR]', err?.message);
+        return false; // không crash cron
+      }
 
-  //     this.logger.log('✅ Folders saved to DB');
+      const videosMap = response || {};
 
-  //     const folders = await this.prisma.creativeFolder.findMany({
-  //       select: { id: true },
-  //     });
+      // 3. Update từng record (KHÔNG dùng transaction bulk)
+      for (const asset of assets) {
+        try {
+          const vid = videosMap[asset.video_id];
+          if (!vid) continue;
 
-  //     this.logger.log(`📁 Total folders in DB: ${folders.length}`);
+          await this.prisma.creativeAsset.update({
+            where: { id: asset.id },
+            data: {
+              thumbnail: vid?.thumbnails?.data?.find((th) => !!th?.is_preferred)
+                ?.uri,
+              video_thumbnails: vid?.thumbnails ?? null,
+              video_source: vid?.source ?? null,
+            },
+          });
+        } catch (err: any) {
+          console.error('[UPDATE ERROR]', {
+            assetId: asset.id,
+            error: err?.message,
+          });
+          // ❗ không throw → tránh crash toàn job
+        }
+      }
+      const total = Number(totalResult[0]?.total || 0);
+      console.log(`[SYNC DONE] processed=${assets.length} - total ${total}`);
+      return true;
+    } catch (err: any) {
+      console.error('[CRON ERROR]', err?.message);
+      return false; // ❗ cực quan trọng
+    }
+  }
 
-  //     // 2️⃣ Load existing assets
-  //     this.logger.log('🧠 [2/5] Loading existing assets from DB...');
+  async syncFolderImage() {
+    try {
+      const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
 
-  //     const existingAssets = await this.prisma.creativeAsset.findMany({
-  //       select: { id: true, folderId: true },
-  //     });
+      // 1. Lấy batch nhỏ + lock tránh trùng job
+      // 1. Lấy batch nhỏ + lock tránh trùng job
+      const [assets, totalResult] = await Promise.all([
+        this.prisma.$queryRawUnsafe<any[]>(`
+          SELECT ca.*,
+                to_timestamp(('x' || substring(ca."imageUrl" from 'oe=([0-9A-Fa-f]+)'))::bit(32)::bigint) AS expires_at
+          FROM "CreativeAsset" ca
+          WHERE ca."imageUrl" ~ 'oe='
+                      AND to_timestamp(('x' || substring(ca."imageUrl" from 'oe=([0-9A-Fa-f]+)'))::bit(32)::bigint)
+                          <= NOW() + interval '1 day'
+          ORDER BY expires_at ASC
+          LIMIT 20
+          FOR UPDATE SKIP LOCKED;
+        `),
 
-  //     this.logger.log(`🧠 Existing assets: ${existingAssets.length}`);
+        this.prisma.$queryRawUnsafe<any[]>(`
+          SELECT COUNT(*) as total
+          FROM "CreativeAsset" ca
+          WHERE ca."imageUrl" ~ 'oe='
+            AND to_timestamp(('x' || substring(ca."imageUrl" from 'oe=([0-9A-Fa-f]+)'))::bit(32)::bigint)
+                <= NOW() + interval '1 day';
+        `),
+      ]);
 
-  //     const existingSet = new Set(
-  //       existingAssets.map((a) => `${a.id}_${a.folderId}`),
-  //     );
+      if (!assets.length) return true;
 
-  //     // 3️⃣ Fetch creatives per folder
-  //     this.logger.log('🎨 [3/5] Fetching creatives per folder...');
+      // ⚠️ SAI trước đó: bạn đang dùng id thay vì video_id
+      const imageIds = assets.map((v) => v.id);
 
-  //     const CONCURRENCY = 5;
-  //     let processedFolders = 0;
+      let response: any = {};
 
-  //     for (const folderChunk of chunk(folders, CONCURRENCY)) {
-  //       this.logger.log(
-  //         `📦 Processing folder chunk (${processedFolders}/${folders.length})`,
-  //       );
+      // 2. Call API (có try/catch riêng)
+      try {
+        response = await api.call('GET', [''], {
+          ids: imageIds.join(','),
+          fields: ['hash', 'url', 'name', 'creation_time', 'id'],
+        });
+      } catch (err: any) {
+        console.error('[FB API ERROR]', err?.message);
+        return false; // không crash cron
+      }
+      const imagesMap = response || {};
 
-  //       await Promise.all(
-  //         folderChunk.map(async (folder) => {
-  //           try {
-  //             this.logger.log(`➡️ Fetch creatives for folder ${folder.id}`);
+      for (const asset of assets) {
+        try {
+          const img = imagesMap[asset.id];
+          if (!img) continue;
 
-  //             const cursor = await api.call('GET', [ACCOUNT_ID, 'creatives'], {
-  //               limit: 50,
-  //               fields: [
-  //                 'id',
-  //                 'name',
-  //                 'type',
-  //                 'url',
-  //                 'hash',
-  //                 'width',
-  //                 'height',
-  //                 'duration',
-  //                 'thumbnail',
-  //                 'video_id',
-  //                 'creation_time',
-  //               ],
-  //               creative_folder_id: folder.id,
-  //             });
+          await this.prisma.creativeAsset.update({
+            where: { id: asset.id },
+            data: { imageUrl: img.url, thumbnail: img.url },
+          });
+        } catch (err: any) {
+          console.error('[UPDATE ERROR]', {
+            assetId: asset.id,
+            error: err?.message,
+          });
+          // ❗ không throw → tránh crash toàn job
+        }
+      }
 
-  //             const assets = await fetchAllWithAPIEndpoint(cursor);
-
-  //             this.logger.log(
-  //               `📂 Folder ${folder.id} → fetched ${assets.length} assets`,
-  //             );
-
-  //             if (!assets.length) return;
-
-  //             const updateData = assets.map((a) => {
-  //               const key = `${a.id}_${folder.id}`;
-  //               return {
-  //                 id: a.id,
-  //                 folderId: folder.id,
-  //                 data: {
-  //                   name: a.name,
-  //                   width: a.width,
-  //                   height: a.height,
-  //                   duration: a.duration,
-  //                   thumbnail: a.thumbnail,
-  //                   imageUrl: a.url,
-  //                   imageHash: a.hash,
-  //                   video_id: a.video_id,
-  //                   type: a.video_id ? AssetType.VIDEO : AssetType.IMAGE,
-  //                   creation_time: a?.creation_time,
-  //                   createdAtLocal: new Date(),
-  //                   updatedAt: new Date(),
-  //                 },
-  //                 isExist: existingSet.has(key),
-  //               };
-  //             });
-
-  //             const createCount = updateData.filter((i) => !i.isExist).length;
-  //             const updateCount = updateData.length - createCount;
-
-  //             this.logger.log(
-  //               `📝 Folder ${folder.id} → create: ${createCount}, update: ${updateCount}`,
-  //             );
-
-  //             await prismaHelper.upsertMany(updateData, (item) => {
-  //               if (item.isExist) {
-  //                 return this.prisma.creativeAsset.updateMany({
-  //                   where: {
-  //                     id: item.id,
-  //                     folderId: item.folderId,
-  //                   },
-  //                   data: item.data,
-  //                 });
-  //               }
-
-  //               return this.prisma.creativeAsset.create({
-  //                 data: {
-  //                   id: item.id,
-  //                   folderId: item.folderId,
-  //                   ...item.data,
-  //                 },
-  //               });
-  //             });
-
-  //             this.logger.log(`✅ Folder ${folder.id} synced`);
-
-  //             await sleep(500);
-  //           } catch (err) {
-  //             this.logger.error(
-  //               `❌ Folder ${folder.id}: ${parseMetaError(err).message}`,
-  //             );
-  //           }
-  //         }),
-  //       );
-
-  //       processedFolders += folderChunk.length;
-  //     }
-
-  //     // 4️⃣ Sync video details
-  //     this.logger.log('🎬 [4/5] Sync video details...');
-
-  //     const videoAssets = await this.prisma.creativeAsset.findMany({
-  //       where: { video_id: { not: null } },
-  //       select: { video_id: true },
-  //     });
-
-  //     const videoIds = videoAssets.map((v) => v.video_id);
-
-  //     this.logger.log(`🎬 Total video assets: ${videoIds.length}`);
-
-  //     let processedVideos = 0;
-
-  //     for (const idsChunk of chunk(videoIds, 50)) {
-  //       try {
-  //         this.logger.log(
-  //           `🎬 Fetch video batch (${processedVideos}/${videoIds.length})`,
-  //         );
-
-  //         const res = await api.call('GET', ['/'], {
-  //           ids: idsChunk.join(','),
-  //           fields: 'source,thumbnails',
-  //         });
-
-  //         const videosMap = res || {};
-
-  //         const updatePayload = Object.entries(videosMap).map(
-  //           ([videoId, vid]: any) => ({
-  //             video_id: videoId,
-  //             data: {
-  //               video_source: vid?.source,
-  //               video_thumbnails: vid?.thumbnails,
-  //               updatedAt: new Date(),
-  //             },
-  //           }),
-  //         );
-
-  //         this.logger.log(`🎬 Updating ${updatePayload.length} videos`);
-
-  //         await prismaHelper.upsertMany(updatePayload, (item) =>
-  //           this.prisma.creativeAsset.updateMany({
-  //             where: { video_id: item.video_id },
-  //             data: item.data,
-  //           }),
-  //         );
-
-  //         processedVideos += idsChunk.length;
-
-  //         await sleep(800);
-  //       } catch (error) {
-  //         this.logger.error(
-  //           `❌ sync video batch: ${parseMetaError(error).message}`,
-  //         );
-  //       }
-  //     }
-
-  //     this.logger.log('🎉 [5/5] DONE syncFolderCreative');
-  //   } catch (err) {
-  //     this.logger.error(
-  //       `❌ syncFolderCreative fatal: ${parseMetaError(err).message}`,
-  //     );
-  //   }
-  // }
+      const total = Number(totalResult[0]?.total || 0);
+      console.log(`[SYNC DONE] processed=${assets.length} - total ${total}`);
+      return true;
+    } catch (err: any) {
+      console.error('[CRON ERROR]', err?.message);
+      return false; // ❗ cực quan trọng
+    }
+  }
 }
