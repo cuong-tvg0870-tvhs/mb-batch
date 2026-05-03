@@ -659,10 +659,7 @@ export class MetaCron implements OnModuleInit {
 
             // ================= GET INSERTED IDS =================
             const inserted = await this.prisma.campaignInsight.findMany({
-              where: {
-                campaignId: { in: campaignIds },
-                range: job.range,
-              },
+              where: { campaignId: { in: campaignIds }, range: job.range },
               select: { id: true, campaignId: true },
             });
 
@@ -728,11 +725,7 @@ export class MetaCron implements OnModuleInit {
     let totalProcessed = 0;
 
     const JOBS = [
-      {
-        range: InsightRange.MAX,
-        datePreset: 'maximum',
-        field: 'insightMaxId',
-      },
+      { range: InsightRange.MAX, datePreset: 'maximum', field: 'insightMaxId' },
       {
         range: InsightRange.DAY_3,
         datePreset: 'last_3d',
@@ -824,10 +817,7 @@ export class MetaCron implements OnModuleInit {
 
             // ================= GET INSERTED IDS =================
             const inserted = await this.prisma.adInsight.findMany({
-              where: {
-                adId: { in: adIds },
-                range: job.range,
-              },
+              where: { adId: { in: adIds }, range: job.range },
               select: { id: true, adId: true },
             });
 
