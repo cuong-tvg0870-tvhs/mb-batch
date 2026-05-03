@@ -182,6 +182,7 @@ export class LarkCron implements OnModuleInit {
       this.prisma.larkRecord.findMany({
         orderBy: [{ production_date: 'asc' }],
         where: { drive: { drive_permission: true }, creative_asset_id: null },
+        take: 20,
         select: {
           production_date: true,
           brand_code: true,
