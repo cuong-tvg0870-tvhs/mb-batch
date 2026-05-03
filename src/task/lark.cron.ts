@@ -149,9 +149,7 @@ export class LarkCron implements OnModuleInit {
             select: {
               name: true,
               id: true,
-              children: {
-                select: { name: true, id: true },
-              },
+              children: { select: { name: true, id: true } },
             },
           },
         },
@@ -173,10 +171,7 @@ export class LarkCron implements OnModuleInit {
             },
           },
         },
-        where: {
-          drive: { drive_permission: true },
-          creative_asset_id: null,
-        },
+        where: { drive: { drive_permission: true }, creative_asset_id: null },
       }),
     ]);
 
