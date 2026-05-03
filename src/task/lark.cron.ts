@@ -137,6 +137,7 @@ export class LarkCron implements OnModuleInit {
 
   async uploadDriveToMeta() {
     const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
+
     const BUSINESS_ID = '1916878948527753';
     const BASE_DIR = '/app/files';
 
@@ -246,7 +247,11 @@ export class LarkCron implements OnModuleInit {
              */
             if (item.type === AssetType.IMAGE) {
               const driveRes = await this.driveSA.files.get(
-                { fileId: item.drive_id, alt: 'media' },
+                {
+                  fileId: item.drive_id,
+                  alt: 'media',
+                  supportsAllDrives: true,
+                },
                 { responseType: 'arraybuffer' },
               );
 
@@ -274,7 +279,11 @@ export class LarkCron implements OnModuleInit {
               filePath = path.join(BASE_DIR, `${item.drive_id}.mp4`);
 
               const driveRes = await this.driveSA.files.get(
-                { fileId: item.drive_id, alt: 'media' },
+                {
+                  fileId: item.drive_id,
+                  alt: 'media',
+                  supportsAllDrives: true,
+                },
                 { responseType: 'stream' },
               );
 
@@ -296,7 +305,6 @@ export class LarkCron implements OnModuleInit {
                 file_url: cdnUrl,
                 creative_folder_id: item.folderId,
               });
-
               const assetId = res?.business_video_id;
 
               if (!assetId) throw new Error('Upload video fail');
