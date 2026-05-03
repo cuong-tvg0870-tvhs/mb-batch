@@ -138,6 +138,30 @@ export class LarkCron implements OnModuleInit {
   async uploadDriveToMeta() {
     const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
     const BUSINESS_ID = '1916878948527753';
+    const BASE_DIR = '/app/files';
+
+    // =========================
+    // 🔥 Ensure folder
+    // =========================
+    if (!fs.existsSync(BASE_DIR)) {
+      fs.mkdirSync(BASE_DIR, { recursive: true });
+    }
+
+    // =========================
+    // 🔥 Helper delete
+    // =========================
+    const safeDelete = async (filePath?: string | null) => {
+      if (!filePath) return;
+
+      try {
+        await fs.promises.unlink(filePath);
+        console.log('🧹 Deleted:', filePath);
+      } catch (err: any) {
+        if (err.code !== 'ENOENT') {
+          console.error('❌ Delete error:', filePath);
+        }
+      }
+    };
 
     const [folders, cidContents] = await Promise.all([
       this.prisma.creativeFolder.findMany({
@@ -156,6 +180,7 @@ export class LarkCron implements OnModuleInit {
       }),
       this.prisma.larkRecord.findMany({
         orderBy: [{ production_date: 'asc' }],
+        where: { drive: { drive_permission: true }, creative_asset_id: null },
         select: {
           production_date: true,
           brand_code: true,
@@ -171,7 +196,6 @@ export class LarkCron implements OnModuleInit {
             },
           },
         },
-        where: { drive: { drive_permission: true }, creative_asset_id: null },
       }),
     ]);
 
@@ -181,45 +205,31 @@ export class LarkCron implements OnModuleInit {
     const normalizedData = cidContents
       .map((item) => {
         const { project_code, brand_code, product_code, drive } = item;
-
         if (!drive?.webViewLink) return null;
 
         const project = folders.find((f) => f.name === project_code);
-        if (!project) return null;
+        const brand = project?.children?.find((b) => b.name === brand_code);
+        const product = brand?.children?.find((p) => p.name === product_code);
 
-        const brand = project.children?.find((b) => b.name === brand_code);
-        if (!brand) return null;
-
-        const product = brand.children?.find((p) => p.name === product_code);
-        if (!product) return null;
-
-        const isImage = drive.mimeType?.startsWith('image');
+        if (!project || !brand || !product) return null;
 
         return {
           name: drive.name,
-          urlDownload: drive.webContentLink,
-          urlView: drive.webViewLink,
-          type: isImage ? AssetType.IMAGE : AssetType.VIDEO,
+          type: drive.mimeType?.startsWith('image')
+            ? AssetType.IMAGE
+            : AssetType.VIDEO,
           folderId: product.id,
           drive_id: drive.id,
+          urlView: drive.webViewLink,
         };
       })
       .filter(Boolean);
 
     // =========================
-    // 🔥 ensure folder exists
-    // =========================
-    const BASE_DIR = '/app/files';
-
-    if (!fs.existsSync(BASE_DIR)) {
-      fs.mkdirSync(BASE_DIR, { recursive: true });
-    }
-
-    // =========================
-    // 🔥 Batch upload
+    // 🔥 Upload batch
     // =========================
     const BATCH_SIZE = 3;
-    const uploadResults: any[] = [];
+    const results: any[] = [];
 
     for (let i = 0; i < normalizedData.length; i += BATCH_SIZE) {
       const batch = normalizedData.slice(i, i + BATCH_SIZE);
@@ -229,13 +239,15 @@ export class LarkCron implements OnModuleInit {
           let filePath: string | null = null;
 
           try {
-            // =========================
-            // 🖼 IMAGE → arraybuffer
-            // =========================
+            /**
+             * =========================
+             * 🖼 IMAGE
+             * =========================
+             */
             if (item.type === AssetType.IMAGE) {
               const driveRes = await this.driveSA.files.get(
                 { fileId: item.drive_id, alt: 'media' },
-                { responseType: 'arraybuffer' }, // 🔥 quan trọng
+                { responseType: 'arraybuffer' },
               );
 
               const buffer = Buffer.from(driveRes.data as ArrayBuffer);
@@ -246,16 +258,18 @@ export class LarkCron implements OnModuleInit {
                 creative_folder_id: item.folderId,
               });
 
-              const assetId = (Object.values(res.images)[0] as any)?.id;
+              const assetId = (Object.values(res.images || {})?.[0] as any)?.id;
 
               if (!assetId) throw new Error('Upload image fail');
 
               return { success: true, assetId, item };
             }
 
-            // =========================
-            // 🎬 VIDEO → stream → CDN
-            // =========================
+            /**
+             * =========================
+             * 🎬 VIDEO
+             * =========================
+             */
             if (item.type === AssetType.VIDEO) {
               filePath = path.join(BASE_DIR, `${item.drive_id}.mp4`);
 
@@ -264,11 +278,20 @@ export class LarkCron implements OnModuleInit {
                 { responseType: 'stream' },
               );
 
+              // download file
               await pipeline(driveRes.data, fs.createWriteStream(filePath));
 
+              // check file
+              if (!fs.existsSync(filePath)) {
+                throw new Error('File not downloaded');
+              }
+
+              let res: any;
+
+              // 👉 production dùng CDN
               const cdnUrl = `${process.env.FRONT_END_DOMAIN}/cdn/${item.drive_id}.mp4`;
 
-              const res: any = await api.call('POST', [BUSINESS_ID, 'videos'], {
+              res = await api.call('POST', [BUSINESS_ID, 'videos'], {
                 title: item.name,
                 file_url: cdnUrl,
                 creative_folder_id: item.folderId,
@@ -278,41 +301,42 @@ export class LarkCron implements OnModuleInit {
 
               if (!assetId) throw new Error('Upload video fail');
 
-              // 🔥 XÓA FILE SAU KHI UPLOAD
-              fs.unlinkSync(filePath);
-
               return { success: true, assetId, item };
             }
-          } catch (err) {
-            console.error('❌ Upload fail:', item.name, err);
-
-            if (filePath && fs.existsSync(filePath)) {
-              fs.unlinkSync(filePath);
-            }
+          } catch (err: any) {
+            console.error(
+              '❌ Upload fail:',
+              item.name,
+              err?.response?.body || err.message || err,
+            );
 
             return { success: false, error: err, item };
+          } finally {
+            // 🔥 ALWAYS DELETE FILE
+            await safeDelete(filePath);
           }
         }),
       );
 
-      uploadResults.push(...batchResults.map((r: any) => r.value));
+      results.push(...batchResults);
     }
 
     // =========================
     // 🔥 SUCCESS FILTER
     // =========================
-    const successUploads = uploadResults
-      .filter((r: any) => r.value?.success)
+    const successUploads = results
+      .filter((r) => r.status === 'fulfilled' && r.value?.success)
       .map((r: any) => r.value);
 
     if (!successUploads.length) {
-      return { uploadResults };
+      console.log('❌ No successful uploads');
+      return { results };
     }
 
     // =========================
-    // 🔥 DB UPSERT
+    // 🔥 UPSERT DB
     // =========================
-    const dbResults = await Promise.allSettled(
+    await Promise.allSettled(
       successUploads.map(({ assetId, item }) =>
         this.prisma.creativeAsset.upsert({
           where: { id: assetId },
@@ -334,25 +358,20 @@ export class LarkCron implements OnModuleInit {
     );
 
     // =========================
-    // 🔥 UPDATE LARK RECORD
+    // 🔥 UPDATE LARK
     // =========================
     await Promise.allSettled(
       successUploads.map(({ assetId, item }) =>
         this.prisma.larkRecord.updateMany({
           where: { drive_id: item.drive_id },
-          data: {
-            creative_asset_id: assetId,
-          },
+          data: { creative_asset_id: assetId },
         }),
       ),
     );
 
     console.log('✅ DONE ALL');
 
-    return {
-      uploadResults,
-      dbResults,
-    };
+    return { results };
   }
 
   async syncDriveAndLark() {
