@@ -49,7 +49,7 @@ export class LarkCron implements OnModuleInit {
    * ================================
    */
 
-  @Cron('*/8 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  // @Cron('*/8 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async uploadContentToMeta() {
     this.logger.log('🔄 uploadContentToMeta BEGIN');
     await this.uploadDriveToMeta();
