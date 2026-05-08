@@ -1,10 +1,10 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { Cron } from '@nestjs/schedule';
 import * as fs from 'fs';
 import { drive_v3, google } from 'googleapis';
 import * as path from 'path';
 import { PrismaService } from 'src/modules/prisma/prisma.service';
 
+import { Cron } from '@nestjs/schedule';
 import { AssetType, LarkRecord } from '@prisma/client';
 import axios, { AxiosRequestConfig } from 'axios';
 import { FacebookAdsApi } from 'facebook-nodejs-business-sdk';
@@ -49,7 +49,7 @@ export class LarkCron implements OnModuleInit {
    * ================================
    */
 
-  // @Cron('*/8 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  // // @Cron('*/8 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async uploadContentToMeta() {
     this.logger.log('🔄 uploadContentToMeta BEGIN');
     await this.uploadDriveToMeta();

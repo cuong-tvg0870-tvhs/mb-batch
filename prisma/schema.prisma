@@ -136,6 +136,27 @@ model User {
     deletedAt    DateTime?
     deletedById  String?
     userFanpages UserFanpage[]
+
+    activities UserActivity[]
+}
+
+model UserActivity {
+    id          String   @id @default(uuid())
+    userId      String? // Có thể null nếu API gọi khi chưa đăng nhập
+    user        User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+    method      String // VD: GET, POST, PUT, DELETE
+    path        String // API endpoint (VD: /api/campaigns)
+    actionLabel String? // Human readable action
+    ipAddress   String? // Địa chỉ IP
+    userAgent   String? // Browser/Device
+    duration    Int? // Thời gian phản hồi API (để đo performance)
+    statusCode  Int? // Trạng thái HTTP (200, 400, 500)
+    createdAt   DateTime @default(now())
+
+    // Tối ưu tốc độ query khi bạn thống kê tần suất
+    @@index([userId])
+    @@index([createdAt])
+    @@index([path, method])
 }
 
 model UserFanpage {
@@ -1615,7 +1636,7 @@ model CreativeFolder {
     name          String
     description   String?
     parentId      String?
-    parent        CreativeFolder?  @relation("FolderTree", fields: [parentId], references: [id])
+    parent        CreativeFolder?  @relation("FolderTree", fields: [parentId], references: [id], onDelete: Cascade)
     children      CreativeFolder[] @relation("FolderTree")
     creation_time String?
     // relations
@@ -1660,7 +1681,7 @@ model CreativeAsset {
     status Json?
 
     folderId String
-    folder   CreativeFolder @relation(fields: [folderId], references: [id])
+    folder   CreativeFolder @relation(fields: [folderId], references: [id], onDelete: Cascade)
 
     createdAtLocal DateTime @default(now())
     updatedAt      DateTime @updatedAt
