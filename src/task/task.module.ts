@@ -2,7 +2,6 @@ import { BullModule } from '@nestjs/bull';
 import { Module } from '@nestjs/common';
 import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaModule } from 'src/modules/prisma/prisma.module';
-import { LarkCron } from './lark.cron';
 import { MetaCron } from './meta.cron';
 
 @Module({
@@ -11,6 +10,6 @@ import { MetaCron } from './meta.cron';
     BullModule.registerQueue({ name: 'meta-sync' }),
     PrismaModule,
   ],
-  providers: [LarkCron, MetaCron],
+  providers: [MetaCron],
 })
 export class TaskModule {}
