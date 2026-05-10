@@ -72,6 +72,8 @@ export class MetaCron implements OnModuleInit {
   }
 
   @Cron('5 21 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('5 20 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('5 19 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncImageData() {
     this.logger.log('🔄 Sync Image Core');
     await this.syncImage();
@@ -79,6 +81,8 @@ export class MetaCron implements OnModuleInit {
   }
 
   @Cron('5 22 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('5 21 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('5 20 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncVideoData() {
     this.logger.log('🔄 Sync Video Core');
     await this.syncVideo();
@@ -1245,12 +1249,10 @@ export class MetaCron implements OnModuleInit {
     }, {});
   }
 
-  async syncVideo() {
+  async syncVideo(limit: number = 50) {
     this.logger.log('🔄 Sync Ad Video (optimized)');
     this.init();
     const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
-
-    const prismaHelper = new PrismaBatchHelper(this.prisma);
 
     try {
       // TỐI ƯU: Chỉ fetch các video chưa có thumbnail hoặc thumbnail chuẩn bị hết hạn (hết hạn trong vòng 1 ngày tới)
@@ -1270,7 +1272,7 @@ export class MetaCron implements OnModuleInit {
             )
           )
         ORDER BY expires_at ASC
-        LIMIT 20
+        LIMIT ${limit}
         FOR UPDATE SKIP LOCKED;
       `),
         this.prisma.$queryRawUnsafe<any[]>(`
@@ -1379,7 +1381,7 @@ export class MetaCron implements OnModuleInit {
     }
   }
 
-  async syncImage() {
+  async syncImage(limit: number = 50) {
     this.logger.log('🔄 Sync AdImage (optimized)');
     this.init();
 
@@ -1402,7 +1404,7 @@ export class MetaCron implements OnModuleInit {
             )
           )
         ORDER BY expires_at ASC
-        LIMIT 20
+        LIMIT ${limit}
         FOR UPDATE SKIP LOCKED;
       `),
         this.prisma.$queryRawUnsafe<any[]>(`
@@ -1492,7 +1494,7 @@ export class MetaCron implements OnModuleInit {
     }
   }
 
-  async syncFolderVideo() {
+  async syncFolderVideo(limit: number = 50) {
     try {
       const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
 
@@ -1506,7 +1508,7 @@ export class MetaCron implements OnModuleInit {
             AND to_timestamp(('x' || substring(ca.video_source from 'oe=([0-9A-Fa-f]+)'))::bit(32)::bigint)
                 <= NOW() + interval '1 day'
           ORDER BY expires_at ASC
-          LIMIT 20
+          LIMIT ${limit}
           FOR UPDATE SKIP LOCKED;
         `),
 
@@ -1573,7 +1575,7 @@ export class MetaCron implements OnModuleInit {
     }
   }
 
-  async syncFolderImage() {
+  async syncFolderImage(limit: number = 50) {
     try {
       const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
 
@@ -1588,7 +1590,7 @@ export class MetaCron implements OnModuleInit {
                       AND to_timestamp(('x' || substring(ca."imageUrl" from 'oe=([0-9A-Fa-f]+)'))::bit(32)::bigint)
                           <= NOW() + interval '1 day'
           ORDER BY expires_at ASC
-          LIMIT 20
+          LIMIT ${limit}
           FOR UPDATE SKIP LOCKED;
         `),
 
