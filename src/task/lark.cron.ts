@@ -5,11 +5,12 @@ import axios, { AxiosRequestConfig } from 'axios';
 import { FacebookAdsApi } from 'facebook-nodejs-business-sdk';
 import * as fs from 'fs';
 import { drive_v3, google } from 'googleapis';
-import pLimit from 'p-limit';
 import path from 'path';
 import { PrismaService } from 'src/modules/prisma/prisma.service';
 import { pipeline } from 'stream/promises';
 import { extractDriveId, mapRecord } from './helper';
+
+import pLimit from 'p-limit';
 
 /* =====================================================
    TYPES & INTERFACES (STRICT TYPING)
