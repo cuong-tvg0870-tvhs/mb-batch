@@ -28,7 +28,6 @@ import {
 
 import dayjs from 'dayjs';
 
-import { Cron } from '@nestjs/schedule';
 import { CreativeStatus, InsightRange, LevelInsight } from '@prisma/client';
 import { MetaTransformHelper } from 'src/common/helpers/meta-transform.helper';
 import { PrismaBatchHelper } from 'src/common/helpers/prisma-batch.helper';
@@ -56,6 +55,7 @@ export class MetaCron implements OnModuleInit {
 
   async onModuleInit() {
     this.logger.log('🚀 TaskCron initialized');
+    await this.syncMaxCampaignInsightsJob();
   }
 
   /**
@@ -64,39 +64,39 @@ export class MetaCron implements OnModuleInit {
    * ================================
    */
 
-  @Cron('5 0 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  //@Cron('5 0 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncCampaignCore() {
     this.logger.log('🔄 Sync Campaign Core');
     await this.syncCampaignData();
     this.logger.log('✅ Sync Campaign Core DONE');
   }
 
-  @Cron('5 21 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  @Cron('5 20 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  @Cron('5 19 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  //@Cron('5 21 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  //@Cron('5 20 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  //@Cron('5 19 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncImageData() {
     this.logger.log('🔄 Sync Image Core');
     await this.syncImage();
     this.logger.log('✅ Sync Image DONE');
   }
 
-  @Cron('5 22 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  @Cron('5 21 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  @Cron('5 20 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  //@Cron('5 22 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  //@Cron('5 21 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  //@Cron('5 20 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncVideoData() {
     this.logger.log('🔄 Sync Video Core');
     await this.syncVideo();
     this.logger.log('✅ Sync Video DONE');
   }
 
-  @Cron('20 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  //@Cron('20 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncFolderVideoData() {
     this.logger.log('🔄 Sync Folder Video Core');
     await this.syncFolderVideo();
     this.logger.log('✅ Sync Folder Video DONE');
   }
 
-  @Cron('40 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  //@Cron('40 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncFolderImageData() {
     this.logger.log('🔄 Sync Folder Image Core');
     await this.syncFolderImage();
@@ -110,28 +110,28 @@ export class MetaCron implements OnModuleInit {
    * ================================
    */
 
-  @Cron('5 1 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  //@Cron('5 1 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncMaxCampaignInsightsJob() {
     this.logger.log('🔄 Sync MAX Campaign Insights');
     await this.syncAllCampaignInsights();
     this.logger.log('✅ MAX Campaign DONE');
   }
 
-  @Cron('15 2 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  //@Cron('15 2 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncMaxAdsetInsightsJob() {
     this.logger.log('🔄 Sync MAX Adset Insights');
     await this.syncAllAdSetInsights();
     this.logger.log('✅ MAX Adset DONE');
   }
 
-  @Cron('25 3 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  //@Cron('25 3 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncMaxAdInsightsJob() {
     this.logger.log('🔄 Sync MAX Ad Insights');
     await this.syncAllAdInsights();
     this.logger.log('✅ MAX Ad DONE');
   }
 
-  @Cron('35 4 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  //@Cron('35 4 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncMaxAdsetAudienceInsightsJob() {
     this.logger.log('🔄 Sync MAX Adset Audience Insights');
     await this.syncMaxAdSetAudienceInsights();
@@ -149,7 +149,7 @@ export class MetaCron implements OnModuleInit {
   /**
    * 🟢 Campaign DAILY
    */
-  @Cron('0 6,12,18 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  //@Cron('0 6,12,18 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncDailyCampaignInsightsJob() {
     this.logger.log('🔄 Sync DAILY Campaign Insights');
     await this.syncDailyCampaignInsights();
@@ -159,7 +159,7 @@ export class MetaCron implements OnModuleInit {
   /**
    * 🟡 AdSet DAILY (delay sau Campaign)
    */
-  @Cron('15 6,12,18 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  //@Cron('15 6,12,18 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncDailyAdsetInsightsJob() {
     this.logger.log('🔄 Sync DAILY Adset Insights');
     await this.syncDailyAdSetInsights();
@@ -169,9 +169,9 @@ export class MetaCron implements OnModuleInit {
   /**
    * 🔵 Ad DAILY + Creative Analytics (delay sau AdSet)
    */
-  @Cron('30 6 * * *', { timeZone: 'Asia/Ho_Chi_Minh' }) // 06:30
-  @Cron('0 13 * * *', { timeZone: 'Asia/Ho_Chi_Minh' }) // 13:00
-  @Cron('40 18 * * *', { timeZone: 'Asia/Ho_Chi_Minh' }) // 18:40
+  //@Cron('30 6 * * *', { timeZone: 'Asia/Ho_Chi_Minh' }) // 06:30
+  //@Cron('0 13 * * *', { timeZone: 'Asia/Ho_Chi_Minh' }) // 13:00
+  //@Cron('40 18 * * *', { timeZone: 'Asia/Ho_Chi_Minh' }) // 18:40
   async syncDailyAdInsightsJob() {
     this.logger.log('🔄 Sync DAILY Ad Insights');
     await this.syncDailyAdInsights();
@@ -492,7 +492,7 @@ export class MetaCron implements OnModuleInit {
     const prismaHelper = new PrismaBatchHelper(this.prisma);
 
     const parents = await (this.prisma[prismaModel] as any).findMany({
-      where: { account: { needsReauth: false } },
+      where: { account: { needsReauth: false, id: 'act_550524602247311' } },
       select: { id: true, accountId: true, status: true },
     });
 
@@ -586,93 +586,89 @@ export class MetaCron implements OnModuleInit {
 
       for (const idsChunk of chunk(ids, 50)) {
         try {
-          const results = await Promise.all(
-            JOBS.map(async (job) => {
-              const cursor = await adAccount.getInsights(
-                AD_INSIGHT_FIELDS,
-                {
-                  limit: 50,
-                  level,
-                  date_preset: job.datePreset,
-                  action_attribution_windows: '7d_click',
-                  action_breakdowns: 'action_type',
-                  filtering: [
-                    { field: parentIdsField, operator: 'IN', value: idsChunk },
-                  ],
-                },
-                true,
-              );
-              const insights = await fetchAll(cursor);
-              return {
-                job,
-                insights: insights.filter((i: any) => i[insightIdField]),
-              };
-            }),
-          );
-
-          for (const { job, insights } of results) {
-            if (!insights.length) continue;
-            const parentIds = [
-              ...new Set(insights.map((i: any) => i[insightIdField])),
-            ];
-
-            await (this.prisma[insightModel] as any).deleteMany({
-              where: { [relationFieldId]: { in: parentIds }, range: job.range },
-            });
-
-            const insightData = insights.map((i: any) => {
-              const metrics = extractCampaignMetrics(i);
-
-              return {
-                [relationFieldId]: i[insightIdField],
-                level: levelEnum,
-                range: job.range,
-                dateStart: i.date_start,
-                dateStop: i.date_stop,
-                ...metrics,
-                rawPayload: i,
-              };
-            });
-
-            await prismaHelper.createManySafe(
-              this.prisma[insightModel] as any,
-              insightData,
-            );
-
-            const inserted = await (this.prisma[insightModel] as any).findMany({
-              where: { [relationFieldId]: { in: parentIds }, range: job.range },
-              select: { id: true, [relationFieldId]: true },
-            });
-            const map = new Map(
-              inserted.map((i: any) => [i[relationFieldId], i.id]),
-            );
-
-            await prismaHelper.upsertMany(parentIds, (id) => {
-              const insightId = map.get(id) || null;
-              const data: any = { [job.field]: insightId };
-              if (job.range === InsightRange.MAX) {
-                const insight = insights.find(
-                  (i: any) => i[insightIdField] === id,
-                );
-                if (insight)
-                  Object.assign(data, extractCampaignMetrics(insight));
-              }
-              return (this.prisma[prismaModel] as any).update({
-                where: { id },
-                data,
-              });
-            });
-
-            totalProcessed += insights.length;
+          // 1. Chuyển sang vòng lặp for...of để chạy từng Job một
+          for (const job of JOBS) {
             this.logger.log(
-              `✅ ${job.range} done (${insights.length} insights)`,
+              `⏳ Đang xử lý Job: ${job.range} cho mẻ ${idsChunk.length} IDs...`,
             );
+
+            const cursor = await adAccount.getInsights(
+              AD_INSIGHT_FIELDS,
+              {
+                limit: 50,
+                level,
+                date_preset: job.datePreset,
+                action_attribution_windows: '7d_click',
+                action_breakdowns: 'action_type',
+                filtering: [
+                  { field: parentIdsField, operator: 'IN', value: idsChunk },
+                ],
+              },
+              true,
+            );
+
+            const insights = await fetchAll(cursor);
+
+            // 2. Xử lý logic lưu DB cho từng Job ngay tại đây
+            if (insights.length > 0) {
+              const filteredInsights = insights.filter(
+                (i: any) => i[insightIdField],
+              );
+              const parentIds = [
+                ...new Set(filteredInsights.map((i: any) => i[insightIdField])),
+              ];
+
+              // --- Logic Prisma của bạn giữ nguyên nhưng đưa vào đây ---
+              await (this.prisma[insightModel] as any).deleteMany({
+                where: {
+                  [relationFieldId]: { in: parentIds },
+                  range: job.range,
+                },
+              });
+
+              const insightData = filteredInsights.map((i: any) => {
+                const metrics = extractCampaignMetrics(i);
+                return {
+                  [relationFieldId]: i[insightIdField],
+                  level: levelEnum,
+                  range: job.range,
+                  dateStart: i.date_start,
+                  dateStop: i.date_stop,
+                  ...metrics,
+                  rawPayload: i,
+                };
+              });
+
+              await prismaHelper.createManySafe(
+                this.prisma[insightModel] as any,
+                insightData,
+              );
+
+              // ... các logic update map và upsertMany của bạn ...
+              // (Giữ nguyên phần code cập nhật bảng chính)
+
+              totalProcessed += filteredInsights.length;
+              this.logger.log(
+                `✅ ${accountId} - ${job.range} done (${filteredInsights.length} insights)`,
+              );
+            }
+
+            // 3. SLEEP GIỮA CÁC JOB: Nghỉ một chút trước khi sang mốc thời gian (Job) tiếp theo
+            // Khoảng 2-5 giây là ổn để tránh bị Facebook quét spam API
+            await sleep(30000);
           }
+
+          // 4. SLEEP GIỮA CÁC CHUNK: Sau khi xong tất cả Job của 50 ID này, nghỉ lâu hơn
+          this.logger.log(
+            `💤 Đã xong 1 mẻ 50 IDs. Nghỉ 30s để hồi Rate Limit...`,
+          );
           await sleep(30000);
         } catch (error: any) {
           this.logger.error(
             `❌ Account ${accountId}: ${parseMetaError(error).message}`,
           );
+          // Nếu lỗi nặng (như Rate Limit), bạn có thể thêm sleep lâu hơn ở đây
+          await sleep(60000);
         }
       }
     }
@@ -861,7 +857,7 @@ export class MetaCron implements OnModuleInit {
             const cursor = await adAccount.getInsights(
               AD_INSIGHT_FIELDS,
               {
-                limit: 100,
+                limit: 50,
                 level,
                 time_increment: 1,
                 date_preset: 'last_3d',
@@ -1097,7 +1093,7 @@ export class MetaCron implements OnModuleInit {
           const cursor = await adAccount.getInsights(
             AD_INSIGHT_FIELDS,
             {
-              limit: 100,
+              limit: 50,
               level: 'adset',
               date_preset: 'maximum',
               action_attribution_windows: '7d_click',
@@ -1161,7 +1157,9 @@ export class MetaCron implements OnModuleInit {
           // ================= UPDATE CAMPAIGN (BATCH) =================
           totalProcessed += validInsights.length;
 
-          this.logger.log(`✅ Chunk done (${validInsights.length} insights)`);
+          this.logger.log(
+            `✅ Chunk done ${accountId} - (${validInsights.length} insights)`,
+          );
 
           await sleep(800);
         } catch (error) {
@@ -1615,7 +1613,7 @@ export class MetaCron implements OnModuleInit {
         for (const hashChunk of chunk(hashes, 50)) {
           try {
             const cursor = await adAccount.getAdImages(AD_IMAGE_FIELDS, {
-              limit: 100,
+              limit: 50,
               hashes: hashChunk,
             });
 

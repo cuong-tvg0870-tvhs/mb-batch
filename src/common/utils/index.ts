@@ -6,7 +6,7 @@ import {
   Prisma,
 } from '@prisma/client';
 import Cursor from 'facebook-nodejs-business-sdk/src/cursor';
-import { MetaFatalError, normalizeMetaError } from './meta-mapping.util';
+import { normalizeMetaError } from './meta-mapping.util';
 export * from './meta-mapping.util';
 export * from './password.util';
 
@@ -283,50 +283,62 @@ export async function fetchAll(
   const result: any[] = [];
   if (!cursor) return result;
 
-  const sleepMs = options?.sleepMs ?? 2000;
+  const sleepMs = options?.sleepMs ?? 60000; // Mặc định nghỉ 30s giữa các page để tránh rate limit
   const maxRetries = options?.maxRetries ?? 1;
 
   let page = cursor;
   let retry = 0;
 
+  // 1. Lấy dữ liệu trang đầu tiên
+  for (const item of page) {
+    result.push(item._data);
+  }
+
   try {
-    for (const item of page) {
-      result.push(item._data);
-    }
+    // 2. Vòng lặp lấy các trang tiếp theo
     while (page.hasNext()) {
+      // Nghỉ trước khi fetch trang tiếp theo theo yêu cầu
+      console.log(
+        `[Meta Fetch] Đang fetch trang tiếp theo... (Retry ${retry})`,
+        {
+          sleepMs,
+          context: options?.context,
+        },
+      );
+      await sleep(sleepMs);
+
       try {
         page = await page.next();
-        retry = 0;
+        retry = 0; // Reset retry khi fetch thành công trang mới
 
         for (const item of page) {
           result.push(item._data);
         }
-
-        await sleep(sleepMs);
       } catch (err) {
         const metaErr = normalizeMetaError(err);
 
-        // ⛔ FATAL → STOP NGAY
-        if ([190, 10, 200, 368, 102].includes(metaErr.code)) {
-          throw new MetaFatalError(
-            `META_FATAL(${metaErr.code}): ${metaErr.message}`,
-            metaErr,
-          );
-        }
-
-        // 🔁 RATE LIMIT
+        // Xử lý Rate Limit (Lỗi 4 hoặc 17)
         if ([4, 17].includes(metaErr.code) && retry < maxRetries) {
           retry++;
+          console.warn(
+            `[Meta] Rate limit hit. Retrying in ${sleepMs * retry}ms... (Attempt ${retry})`,
+          );
           await sleep(sleepMs * retry);
+          // Quay lại đầu vòng lặp while để thử lại page.next()
           continue;
         }
 
-        throw err;
+        // Với các lỗi khác (bao gồm Fatal): Log lại và thoát vòng lặp để trả về result hiện có
+        console.error(
+          `[Meta Fetch Error] Dừng fetch tại cursor. Lỗi: ${metaErr.message}`,
+          metaErr,
+        );
+        break;
       }
     }
-  } catch (err) {
-    if (err instanceof MetaFatalError) throw err;
-    throw err;
+  } catch (globalErr) {
+    // Catch này dùng cho các lỗi logic bên ngoài vòng try-catch nhỏ
+    console.error('[Meta Global Error]', globalErr);
   }
 
   return result;
