@@ -493,10 +493,72 @@ export class MetaCron implements OnModuleInit {
 
     const parents = await (this.prisma[prismaModel] as any).findMany({
       where: { account: { needsReauth: false } },
-      select: { id: true, accountId: true },
+      select: { id: true, accountId: true, status: true },
     });
 
-    const byAccount = this.groupByAccount(parents);
+    const maxInsights = await (this.prisma[insightModel] as any).findMany({
+      where: {
+        range: InsightRange.MAX,
+        level: levelEnum,
+      },
+      select: {
+        [relationFieldId]: true,
+        dateStop: true,
+      },
+    });
+
+    const maxInsightMap = new Map<string, string>();
+    for (const insight of maxInsights) {
+      if (insight[relationFieldId]) {
+        maxInsightMap.set(insight[relationFieldId], insight.dateStop);
+      }
+    }
+
+    const cutoffDate = dayjs().subtract(15, 'day');
+    const activeParents = [];
+    const inactiveParentIds = [];
+
+    for (const parent of parents) {
+      const dateStop = maxInsightMap.get(parent.id);
+      const isInactiveStatus =
+        parent.status === 'PAUSED' ||
+        parent.status === 'ARCHIVED' ||
+        parent.status === 'DELETED';
+
+      if (
+        isInactiveStatus &&
+        dateStop &&
+        dayjs(dateStop).isBefore(cutoffDate)
+      ) {
+        inactiveParentIds.push(parent.id);
+      } else {
+        activeParents.push(parent);
+      }
+    }
+
+    if (inactiveParentIds.length > 0) {
+      this.logger.log(
+        `⏭️ Skip ${inactiveParentIds.length} ${entityName}s (dateStop > 15 days) & clear short-term insights.`,
+      );
+      for (const chunkIds of chunk(inactiveParentIds, 100)) {
+        await (this.prisma[insightModel] as any).deleteMany({
+          where: {
+            [relationFieldId]: { in: chunkIds },
+            range: { not: InsightRange.MAX },
+          },
+        });
+        await (this.prisma[prismaModel] as any).updateMany({
+          where: { id: { in: chunkIds } },
+          data: {
+            insight3dId: null,
+            insight7dId: null,
+            insightTodayId: null,
+          },
+        });
+      }
+    }
+
+    const byAccount = this.groupByAccount(activeParents);
     let totalProcessed = 0;
 
     const JOBS = [
@@ -529,7 +591,7 @@ export class MetaCron implements OnModuleInit {
               const cursor = await adAccount.getInsights(
                 AD_INSIGHT_FIELDS,
                 {
-                  limit: 100,
+                  limit: 50,
                   level,
                   date_preset: job.datePreset,
                   action_attribution_windows: '7d_click',
@@ -560,6 +622,7 @@ export class MetaCron implements OnModuleInit {
 
             const insightData = insights.map((i: any) => {
               const metrics = extractCampaignMetrics(i);
+
               return {
                 [relationFieldId]: i[insightIdField],
                 level: levelEnum,
@@ -618,6 +681,86 @@ export class MetaCron implements OnModuleInit {
     );
   }
 
+  private async processDailyInsightsBatch(
+    insights: any[],
+    levelEnum: any,
+    insightIdField: string,
+    relationFieldId: string,
+    insightModel: string,
+    prismaHelper: PrismaBatchHelper,
+    today: dayjs.Dayjs,
+  ) {
+    const valid = insights.filter((i: any) => i[insightIdField]);
+    if (!valid.length) return 0;
+
+    const todayStr = today.format('YYYY-MM-DD');
+    const insightData = valid.map((i: any) => {
+      const metrics = extractCampaignMetrics(i);
+      return {
+        [relationFieldId]: i[insightIdField],
+        dateStart: i.date_start,
+        range: InsightRange.DAILY,
+        data: {
+          dateStop: i.date_start,
+          level: levelEnum,
+          ...metrics,
+          rawPayload: i,
+        },
+      };
+    });
+
+    const todayInsightData = insightData.filter(
+      (i: any) => i.dateStart === todayStr,
+    );
+
+    if (todayInsightData.length > 0) {
+      const parentIds = todayInsightData.map((i: any) => i[relationFieldId]);
+      await (
+        this.prisma[insightModel as keyof typeof this.prisma] as any
+      ).deleteMany({
+        where: {
+          [relationFieldId]: { in: parentIds },
+          range: InsightRange.TODAY,
+        },
+      });
+
+      const todayDataToCreate = todayInsightData.map((item: any) => {
+        return {
+          ...item.data,
+          [relationFieldId]: item[relationFieldId],
+          dateStart: item.dateStart,
+          dateStop: item.data.dateStop,
+          range: InsightRange.TODAY,
+        };
+      });
+
+      await prismaHelper.createManySafe(
+        this.prisma[insightModel as keyof typeof this.prisma] as any,
+        todayDataToCreate,
+      );
+    }
+
+    await prismaHelper.upsertMany(insightData, (item: any) =>
+      (this.prisma[insightModel as keyof typeof this.prisma] as any).upsert({
+        where: {
+          [`${relationFieldId}_dateStart_range`]: {
+            [relationFieldId]: item[relationFieldId],
+            dateStart: item.dateStart,
+            range: item.range,
+          },
+        },
+        update: item.data,
+        create: {
+          [relationFieldId]: item[relationFieldId],
+          dateStart: item.dateStart,
+          range: item.range,
+          ...item.data,
+        },
+      }),
+    );
+    return insightData.length;
+  }
+
   private async syncDailyInsightsGeneric(
     entityName: string,
     prismaModel: 'campaign' | 'adSet' | 'ad',
@@ -665,148 +808,148 @@ export class MetaCron implements OnModuleInit {
 
     let totalFetched = 0;
     let totalUpserted = 0;
-    const BATCH_SIZE = 20;
 
-    for (const batch of chunk(maxInsights, BATCH_SIZE)) {
-      await Promise.all(
-        batch.map(async (max: any) => {
-          const accountId = max[prismaModel]?.accountId;
-          if (!accountId) return;
+    const byAccount = new Map<
+      string,
+      { last3dIds: string[]; customItems: any[] }
+    >();
 
-          const maxStart = dayjs(max.dateStart);
-          const maxStopRaw = dayjs(max.dateStop);
-          if (maxStopRaw.add(3, 'day').isBefore(today)) return;
+    for (const max of maxInsights) {
+      const accountId = max[prismaModel]?.accountId;
+      if (!accountId) continue;
 
-          const maxStop = maxStopRaw.isAfter(today) ? today : maxStopRaw;
-          const parentId = max[relationFieldId];
-          const last = lastDailyMap.get(parentId);
+      const maxStart = dayjs(max.dateStart);
+      const maxStopRaw = dayjs(max.dateStop);
+      if (maxStopRaw.add(3, 'day').isBefore(today)) continue;
 
-          if (last && dayjs(last).isSame(today, 'day')) return;
+      const maxStop = maxStopRaw.isAfter(today) ? today : maxStopRaw;
+      const parentId = max[relationFieldId];
+      const last = lastDailyMap.get(parentId);
 
-          let since = last ? dayjs(last).subtract(2, 'day') : maxStart;
-          if (since.isBefore(maxStart)) since = maxStart;
-          if (since.isAfter(maxStop)) return;
+      if (last && dayjs(last).isSame(today, 'day')) continue;
 
-          const adAccount = new AdAccount(accountId);
+      if (!byAccount.has(accountId)) {
+        byAccount.set(accountId, { last3dIds: [], customItems: [] });
+      }
+      const accData = byAccount.get(accountId)!;
+
+      if (last && dayjs(last).isAfter(today.subtract(4, 'day'))) {
+        accData.last3dIds.push(parentId);
+      } else {
+        let since = last ? dayjs(last).subtract(2, 'day') : maxStart;
+        if (since.isBefore(maxStart)) since = maxStart;
+        if (since.isAfter(maxStop)) continue;
+
+        accData.customItems.push({
+          parentId,
+          since: since.format('YYYY-MM-DD'),
+          until: maxStop.format('YYYY-MM-DD'),
+        });
+      }
+    }
+
+    for (const [accountId, { last3dIds, customItems }] of byAccount.entries()) {
+      const adAccount = new AdAccount(accountId);
+
+      // 1. Process last3dIds in chunks of 50
+      if (last3dIds.length > 0) {
+        this.logger.log(
+          `📅 Account ${accountId}: Fetching last_3d for ${last3dIds.length} ${entityName}s`,
+        );
+        for (const chunkIds of chunk(last3dIds, 50)) {
           try {
-            this.logger.log(
-              `📅 ${parentId}: ${since.format('YYYY-MM-DD')} → ${maxStop.format('YYYY-MM-DD')}`,
-            );
             const cursor = await adAccount.getInsights(
               AD_INSIGHT_FIELDS,
               {
                 limit: 100,
                 level,
                 time_increment: 1,
-                date_preset: 'maximum',
+                date_preset: 'last_3d',
                 action_attribution_windows: '7d_click',
                 action_breakdowns: 'action_type',
-                time_range: {
-                  since: since.format('YYYY-MM-DD'),
-                  until: maxStop.format('YYYY-MM-DD'),
-                },
                 filtering: [
-                  { field: parentIdsField, operator: 'EQUAL', value: parentId },
+                  { field: parentIdsField, operator: 'IN', value: chunkIds },
                 ],
               },
               true,
             );
-
             const insights = await fetchAll(cursor);
-            if (!insights.length) return;
-
-            totalFetched += insights.length;
-            const valid = insights.filter((i: any) => i[insightIdField]);
-
-            const insightData = valid.map((i: any) => {
-              const metrics = extractCampaignMetrics(i);
-              return {
-                [relationFieldId]: i[insightIdField],
-                dateStart: i.date_start,
-                range: InsightRange.DAILY,
-                data: {
-                  dateStop: i.date_start,
-                  level: levelEnum,
-                  ...metrics,
-                  rawPayload: i,
-                },
-              };
-            });
-
-            const todayInsight = insightData.find(
-              (item: any) => item.dateStart == today.format('YYYY-MM-DD'),
-            );
-            if (todayInsight) {
-              await (this.prisma[insightModel] as any).upsert({
-                where: {
-                  [`${relationFieldId}_dateStart_range`]: {
-                    dateStart: todayInsight.dateStart,
-                    [relationFieldId]: todayInsight[relationFieldId],
-                    range: InsightRange.TODAY,
-                  },
-                  dateStop: todayInsight.dateStart,
-                },
-                update: { ...todayInsight.data, range: InsightRange.TODAY },
-                create: {
-                  ...todayInsight.data,
-                  range: InsightRange.TODAY,
-                  [relationFieldId]: todayInsight[relationFieldId],
-                  dateStart: todayInsight.dateStart,
-                },
-              });
+            if (insights.length > 0) {
+              const upserted = await this.processDailyInsightsBatch(
+                insights,
+                levelEnum,
+                insightIdField,
+                relationFieldId,
+                insightModel,
+                prismaHelper,
+                today,
+              );
+              totalFetched += insights.length;
+              totalUpserted += upserted;
             }
-
-            await prismaHelper.upsertMany(insightData, (item: any) => {
-              if (item.dateStart == today.format('YYYY-MM-DD')) {
-                return (this.prisma[insightModel] as any).upsert({
-                  where: {
-                    [`${relationFieldId}_dateStart_range`]: {
-                      [relationFieldId]: item[relationFieldId],
-                      dateStart: item.dateStart,
-                      range: InsightRange.TODAY,
-                    },
-                    dateStop: item.dateStart,
-                  },
-                  update: { ...item.data, range: InsightRange.TODAY },
-                  create: {
-                    ...item.data,
-                    [relationFieldId]: item[relationFieldId],
-                    range: InsightRange.TODAY,
-                    dateStart: item.dateStart,
-                    dateStop: item.dateStart,
-                  },
-                });
-              }
-              return null;
-            });
-
-            await prismaHelper.upsertMany(insightData, (item: any) =>
-              (this.prisma[insightModel] as any).upsert({
-                where: {
-                  [`${relationFieldId}_dateStart_range`]: {
-                    [relationFieldId]: item[relationFieldId],
-                    dateStart: item.dateStart,
-                    range: item.range,
-                  },
-                },
-                update: item.data,
-                create: {
-                  [relationFieldId]: item[relationFieldId],
-                  dateStart: item.dateStart,
-                  range: item.range,
-                  ...item.data,
-                },
-              }),
-            );
-            totalUpserted += insightData.length;
           } catch (error: any) {
             this.logger.error(
-              `❌ DAILY failed ${parentId}: ${parseMetaError(error).message}`,
+              `❌ Account ${accountId} last_3d chunk error: ${parseMetaError(error).message}`,
             );
           }
-        }),
-      );
-      await sleep(10000);
+          await sleep(5000);
+        }
+      }
+
+      // 2. Process customItems in chunks by matching ranges
+      if (customItems.length > 0) {
+        this.logger.log(
+          `📅 Account ${accountId}: Fetching custom ranges for ${customItems.length} ${entityName}s`,
+        );
+        const groupedCustom = new Map<string, string[]>();
+        for (const item of customItems) {
+          const key = `${item.since}_${item.until}`;
+          if (!groupedCustom.has(key)) groupedCustom.set(key, []);
+          groupedCustom.get(key)!.push(item.parentId);
+        }
+
+        for (const [key, ids] of groupedCustom.entries()) {
+          const [since, until] = key.split('_');
+          for (const chunkIds of chunk(ids, 50)) {
+            try {
+              const cursor = await adAccount.getInsights(
+                AD_INSIGHT_FIELDS,
+                {
+                  limit: 100,
+                  level,
+                  time_increment: 1,
+                  action_attribution_windows: '7d_click',
+                  action_breakdowns: 'action_type',
+                  time_range: { since, until },
+                  filtering: [
+                    { field: parentIdsField, operator: 'IN', value: chunkIds },
+                  ],
+                },
+                true,
+              );
+              const insights = await fetchAll(cursor);
+              if (insights.length > 0) {
+                const upserted = await this.processDailyInsightsBatch(
+                  insights,
+                  levelEnum,
+                  insightIdField,
+                  relationFieldId,
+                  insightModel,
+                  prismaHelper,
+                  today,
+                );
+                totalFetched += insights.length;
+                totalUpserted += upserted;
+              }
+            } catch (error: any) {
+              this.logger.error(
+                `❌ Account ${accountId} custom chunk error: ${parseMetaError(error).message}`,
+              );
+            }
+            await sleep(5000);
+          }
+        }
+      }
     }
     this.logger.log(
       `✅ DAILY DONE | fetched: ${totalFetched} | upserted: ${totalUpserted}`,
@@ -900,10 +1043,44 @@ export class MetaCron implements OnModuleInit {
 
     const adSets = await this.prisma.adSet.findMany({
       where: { account: { needsReauth: false } },
-      select: { id: true, accountId: true },
+      select: { id: true, accountId: true, status: true },
     });
 
-    const byAccount = this.groupByAccount(adSets);
+    const maxInsights = await this.prisma.adSetInsight.findMany({
+      where: { range: InsightRange.MAX, level: LevelInsight.ADSET },
+      select: { adSetId: true, dateStop: true },
+    });
+
+    const maxInsightMap = new Map<string, string>();
+    for (const insight of maxInsights) {
+      if (insight.adSetId) {
+        maxInsightMap.set(insight.adSetId, insight.dateStop);
+      }
+    }
+
+    const cutoffDate = dayjs().subtract(15, 'day');
+    const activeAdSets = [];
+    const inactiveAdSetIds = [];
+
+    for (const adset of adSets) {
+      const dateStop = maxInsightMap.get(adset.id);
+      const isInactiveStatus =
+        adset.status === 'PAUSED' ||
+        adset.status === 'ARCHIVED' ||
+        adset.status === 'DELETED';
+
+      if (
+        isInactiveStatus &&
+        dateStop &&
+        dayjs(dateStop).isBefore(cutoffDate)
+      ) {
+        inactiveAdSetIds.push(adset.id);
+      } else {
+        activeAdSets.push(adset);
+      }
+    }
+
+    const byAccount = this.groupByAccount(activeAdSets);
 
     let totalProcessed = 0;
 
