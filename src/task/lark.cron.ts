@@ -1,27 +1,68 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import * as fs from 'fs';
-import { drive_v3, google } from 'googleapis';
-import * as path from 'path';
-import { PrismaService } from 'src/modules/prisma/prisma.service';
-
-import { Cron } from '@nestjs/schedule';
-import { AssetType, LarkRecord } from '@prisma/client';
+import { Cron, CronExpression } from '@nestjs/schedule';
+import { AssetType, LarkRecord, Prisma } from '@prisma/client';
 import axios, { AxiosRequestConfig } from 'axios';
 import { FacebookAdsApi } from 'facebook-nodejs-business-sdk';
-import { chunk } from 'src/common/utils';
+import * as fs from 'fs';
+import { drive_v3, google } from 'googleapis';
+import pLimit from 'p-limit';
+import path from 'path';
+import { PrismaService } from 'src/modules/prisma/prisma.service';
 import { pipeline } from 'stream/promises';
-import { mapRecord } from './helper';
+import { extractDriveId, mapRecord } from './helper';
 
 /* =====================================================
-   CRON SERVICE
+   TYPES & INTERFACES (STRICT TYPING)
 ===================================================== */
+export interface FolderRequest {
+  name: string;
+  description?: string;
+  parentId?: string | null;
+}
+
+export interface MetaFolderResponse {
+  id: string;
+  name: string;
+  description?: string | null;
+  parentId?: string | null;
+  creation_time?: Date | null;
+}
+
+// Interfaces cho cây thư mục logic
+interface LogicalProduct {
+  product_code: string;
+  product_name: string;
+}
+
+interface LogicalBrand {
+  brand_name: string;
+  products: LogicalProduct[];
+}
+
+interface LogicalProject {
+  project_name: string;
+  brands: LogicalBrand[];
+}
 
 @Injectable()
 export class LarkCron implements OnModuleInit {
-  constructor(private readonly prisma: PrismaService) {
-    const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON!);
+  private readonly logger = new Logger(LarkCron.name);
+  private driveSA: drive_v3.Drive;
+  private readonly baseURL = 'https://open.larksuite.com/open-apis/bitable/v1';
+  private readonly BASE_DIR = '/app/files';
+  private readonly BUSINESS_ID = '1916878948527753';
+  private readonly ROOT_META_FOLDER = '4303729193176038';
 
-    credentials.private_key = credentials.private_key.replace(/\\n/g, '\n');
+  private accessToken: string | null = null;
+  private expireAt = 0;
+
+  constructor(private readonly prisma: PrismaService) {
+    const credentials = JSON.parse(
+      process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '{}',
+    );
+    if (credentials.private_key) {
+      credentials.private_key = credentials.private_key.replace(/\\n/g, '\n');
+    }
 
     const auth = new google.auth.GoogleAuth({
       credentials,
@@ -31,68 +72,407 @@ export class LarkCron implements OnModuleInit {
     this.driveSA = google.drive({ version: 'v3', auth });
   }
 
-  private readonly logger = new Logger(LarkCron.name);
-  private driveSA: drive_v3.Drive;
-
-  private baseURL = 'https://open.larksuite.com/open-apis/bitable/v1';
-
-  private accessToken: string | null = null;
-  private expireAt = 0;
-
   async onModuleInit() {
-    this.logger.log('🚀 Lark initialized');
+    if (!fs.existsSync(this.BASE_DIR)) {
+      fs.mkdirSync(this.BASE_DIR, { recursive: true });
+    }
+
+    await this.handleMetaUploadWorkflow();
+    this.logger.log('🚀 Lark Cron Service Initialized');
   }
 
-  /**
-   * ================================
-   * 🔹 CORE DATA (1 lần / ngày)
-   * ================================
-   */
-
-  // // @Cron('*/8 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  async uploadContentToMeta() {
-    this.logger.log('🔄 uploadContentToMeta BEGIN');
-    await this.uploadDriveToMeta();
-    this.logger.log('✅ uploadContentToMeta DONE');
-  }
-
-  @Cron('*/5 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  async syncLarkContent() {
-    this.logger.log('🔄 Sync lark Core');
-    await this.searchRecords(
-      'VsGGbP5wkaY7uTsTpZ2l9G9HgWc',
-      'tblzTv9D1LoUcgcq',
-      {
-        conjunction: 'and',
-        conditions: [
-          { field_name: 'Ngày sản xuất', operator: 'is', value: ['Today'] },
-        ],
-      },
-      200,
+  async cleanupDuplicateFolders() {
+    this.logger.log(
+      '🔍 Đang khởi tạo tiến trình dọn dẹp theo mẻ (Batch Cleanup)...',
     );
-    await this.syncDriveAndLark();
 
-    await this.createFolderMeta();
+    const IS_DRY_RUN = false; // Đổi thành false để thực thi thật
+    const LIMIT_DELETE = 100; // Mỗi lần chạy chỉ xử lý tối đa 5 folder
 
-    this.logger.log('✅ Sync lark Core DONE');
+    const allFolders = await this.prisma.creativeFolder.findMany({
+      orderBy: { creation_time: 'asc' },
+    });
+
+    const reportGroup = new Map<
+      string,
+      {
+        keeper: { folder: any; assetCount: number };
+        duplicates: Array<{
+          folder: any;
+          assetCount: number;
+          reason: string;
+          status: 'DELETE' | 'SKIP';
+        }>;
+      }
+    >();
+
+    // 1. Phân tích và gom nhóm dữ liệu
+    for (const folder of allFolders) {
+      const parentId = folder.parentId || 'root';
+      const uniqueKey = `${parentId} | ${folder.name.toLowerCase().trim()}`;
+
+      const assetCount = await this.prisma.creativeAsset.count({
+        where: { folderId: folder.id },
+      });
+
+      if (!reportGroup.has(uniqueKey)) {
+        reportGroup.set(uniqueKey, {
+          keeper: { folder, assetCount },
+          duplicates: [],
+        });
+      } else {
+        const group = reportGroup.get(uniqueKey)!;
+        let status: 'DELETE' | 'SKIP' = 'DELETE';
+        let reason = 'Thư mục rỗng, trùng tên/cấp.';
+
+        if (assetCount > 0) {
+          status = 'SKIP';
+          reason = `⚠️ KHÔNG XOÁ: Đang chứa ${assetCount} assets.`;
+        }
+        group.duplicates.push({ folder, assetCount, reason, status });
+      }
+    }
+
+    // 2. Lọc danh sách thực sự cần xóa
+    const pendingDeleteList = Array.from(reportGroup.values())
+      .flatMap((g) => g.duplicates)
+      .filter((d) => d.status === 'DELETE');
+
+    if (pendingDeleteList.length === 0) {
+      this.logger.log('✅ Không còn thư mục trùng lặp nào đủ điều kiện xóa.');
+      return;
+    }
+
+    // Cắt mẻ 5 cái đầu tiên
+    const batchToDelete = pendingDeleteList.slice(0, LIMIT_DELETE);
+
+    // ====================================================================
+    // BƯỚC 2: IN LOG BÁO CÁO MẺ HIỆN TẠI
+    // ====================================================================
+    this.logger.log(
+      `📊 ====== BÁO CÁO MẺ XÓA (Batch: ${batchToDelete.length}/${pendingDeleteList.length}) ======`,
+    );
+
+    batchToDelete.forEach((item, index) => {
+      const f = item.folder;
+      this.logger.log(
+        `${index + 1}. [SẼ XOÁ] Tên: "${f.name}" | ID: ${f.id} | Parent: ${f.parentId || 'root'} }`,
+      );
+    });
+
+    if (IS_DRY_RUN) {
+      this.logger.log(
+        '\n🛑 DRY_RUN: ON. Vui lòng kiểm tra 5 folder trên. Đổi IS_DRY_RUN = false để xóa.',
+      );
+      return;
+    }
+
+    // ====================================================================
+    // BƯỚC 3: THỰC THI XÓA MẺ 5 FOLDER
+    // ====================================================================
+    const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
+    this.logger.log(`🔥 Đang xóa mẻ ${batchToDelete.length} thư mục...`);
+
+    for (const item of batchToDelete) {
+      const folderId = item.folder.id;
+      try {
+        // 1. Xóa trên Meta
+        await api.call('DELETE', [folderId]);
+        // 2. Xóa trong DB
+        await this.prisma.creativeFolder.delete({ where: { id: folderId } });
+
+        this.logger.log(`✅ Thành công: ${folderId}`);
+      } catch (error: any) {
+        this.logger.error(`❌ Thất bại khi xóa ${folderId}: ${error.message}`);
+      }
+    }
+
+    const remaining = pendingDeleteList.length - batchToDelete.length;
+    this.logger.log(
+      `\n✨ Hoàn tất mẻ này. Còn lại khoảng ${remaining} folder trùng lặp cần xử lý ở lần sau.`,
+    );
+  }
+  /* -------------------------------------------------------------------------- */
+  /* CRON JOBS                                                                  */
+  /* -------------------------------------------------------------------------- */
+
+  // 1. CRON SYNC LARK & DRIVE: Chạy liên tục mỗi 5 phút
+  @Cron(CronExpression.EVERY_5_MINUTES, { timeZone: 'Asia/Ho_Chi_Minh' })
+  async handleSyncWorkflow() {
+    this.logger.log(
+      '🔄 [Sync] Starting periodic data sync (Lark <-> Drive)...',
+    );
+    try {
+      await this.searchRecords(
+        'VsGGbP5wkaY7uTsTpZ2l9G9HgWc',
+        'tblzTv9D1LoUcgcq',
+        {
+          conjunction: 'and',
+          conditions: [
+            { field_name: 'Ngày sản xuất', operator: 'is', value: ['Today'] },
+          ],
+        },
+      );
+
+      await this.syncDriveAndLark();
+      this.logger.log('✅ [Sync] Data sync completed successfully');
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
+      this.logger.error(`❌ [Sync] Critical failure: ${msg}`);
+    }
   }
 
-  // HELPER
-  /* -------------------------------------------------------------------------- */
-  /*                               SEARCH RECORDS                               */
-  /* -------------------------------------------------------------------------- */
+  // 2. CRON META UPLOAD: Chạy mỗi giờ (phút thứ 0 của mỗi giờ) để xử lý đúng 30 files
+  @Cron('0 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async handleMetaUploadWorkflow() {
+    this.logger.log(
+      '🚀 [Meta] Starting hourly Meta upload (Limit: 30 items)...',
+    );
+    try {
+      await this.createFolderMeta();
+      // Truyền tham số 10 vào để giới hạn số lượng mỗi mẻ chạy
+      await this.uploadDriveToMeta(10);
+      this.logger.log('✅ [Meta] Hourly upload completed successfully');
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
+      this.logger.error(`❌ [Meta] Critical failure during upload: ${msg}`);
+    }
+  }
 
   /* -------------------------------------------------------------------------- */
-  /*                              AUTH TOKEN                                    */
+  /* CORE LOGIC                                                                 */
+  /* -------------------------------------------------------------------------- */
+
+  async uploadDriveToMeta(takeLimit: number = 30) {
+    const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
+    const limit = pLimit(3);
+
+    const [folders, cidContents] = await Promise.all([
+      this.prisma.creativeFolder.findFirst({
+        where: { parentId: null }, // Lấy thư mục gốc (Project)
+        include: {
+          children: { include: { children: { include: { children: true } } } },
+        },
+      }),
+      this.prisma.larkRecord.findMany({
+        where: {
+          drive: { drive_permission: true },
+          creative_asset_id: null,
+          drive_id: { not: null },
+        },
+        take: takeLimit,
+        include: { drive: true },
+        orderBy: { id: 'asc' }, // Ưu tiên xử lý các bản ghi tạo trước (cũ nhất)
+      }),
+    ]);
+
+    if (cidContents.length === 0) {
+      this.logger.log('ℹ️ [Meta] No new assets to upload this hour.');
+      return;
+    }
+
+    const tasks = cidContents.map((item) =>
+      limit(async () => {
+        if (!item.drive || !item.drive.webViewLink || !item.drive_id)
+          return null;
+
+        // ====================================================================
+        // 🛡️ CHỐNG TRÙNG LẶP ASSET: Kiểm tra drive_id đã từng upload Meta chưa
+        // ====================================================================
+        const existingAsset = await this.prisma.creativeAsset.findFirst({
+          where: { drive_id: item.drive_id },
+        });
+
+        if (existingAsset) {
+          this.logger.log(
+            `♻️ [Skip] File ${item.drive.name} already in Meta. Mapping ID only.`,
+          );
+          await this.prisma.larkRecord.update({
+            where: { id: item.id },
+            data: { creative_asset_id: existingAsset.id },
+          });
+          return; // Skip Meta upload
+        }
+        // ====================================================================
+
+        const project = folders.children.find(
+          (f) => f.name === item.project_name,
+        );
+        const brand = project?.children?.find(
+          (b) => b.name === item.brand_name,
+        );
+        const product = brand?.children?.find(
+          (p) => p.name === item.product_code,
+        );
+
+        if (!product) {
+          this.logger.warn(
+            `Folder path not found for record: ${item.id}, ${item.project_code} > ${item.brand_code} > ${item.product_code}`,
+          );
+          return null;
+        }
+        const fileType = item.drive.mimeType?.startsWith('image')
+          ? AssetType.IMAGE
+          : AssetType.VIDEO;
+        let assetId: string | null = null;
+        let filePath: string | null = null;
+
+        try {
+          if (fileType === AssetType.IMAGE) {
+            const driveRes = await this.driveSA.files.get(
+              { fileId: item.drive_id, alt: 'media', supportsAllDrives: true },
+              { responseType: 'arraybuffer' },
+            );
+            const buffer = Buffer.from(driveRes.data as ArrayBuffer);
+
+            const res = (await api.call('POST', [this.BUSINESS_ID, 'images'], {
+              name: item.drive.name,
+              bytes: buffer.toString('base64'),
+              creative_folder_id: product.id,
+            })) as Record<string, any>;
+
+            assetId =
+              (Object.values(res.images || {})?.[0] as { id?: string })?.id ||
+              null;
+          } else {
+            filePath = path.join(this.BASE_DIR, `${item.drive_id}.mp4`);
+            const driveRes = await this.driveSA.files.get(
+              { fileId: item.drive_id, alt: 'media', supportsAllDrives: true },
+              { responseType: 'stream' },
+            );
+
+            await pipeline(
+              driveRes.data as NodeJS.ReadableStream,
+              fs.createWriteStream(filePath),
+            );
+
+            const cdnUrl = `${process.env.FRONT_END_DOMAIN}/cdn/${item.drive_id}.mp4`;
+            const res = (await api.call('POST', [this.BUSINESS_ID, 'videos'], {
+              title: item.drive.name,
+              file_url: cdnUrl,
+              creative_folder_id: product.id,
+            })) as Record<string, any>;
+
+            assetId = res?.business_video_id || null;
+          }
+
+          if (assetId) {
+            await this.prisma.$transaction([
+              this.prisma.creativeAsset.upsert({
+                where: { id: assetId },
+                update: {
+                  name: item.drive.name,
+                  drive_url: item.drive.webViewLink,
+                  folderId: product.id,
+                  type: fileType,
+                  drive_id: item.drive_id,
+                },
+                create: {
+                  id: assetId,
+                  name: item.drive.name,
+                  drive_url: item.drive.webViewLink,
+                  folderId: product.id,
+                  type: fileType,
+                  drive_id: item.drive_id,
+                },
+              }),
+              this.prisma.larkRecord.update({
+                where: { id: item.id },
+                data: { creative_asset_id: assetId },
+              }),
+            ]);
+            this.logger.log(`✅ Uploaded ${fileType}: ${item.drive.name}`);
+          }
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.logger.error(`❌ Upload failed for ${item.drive_id}: ${msg}`);
+        } finally {
+          if (filePath && fs.existsSync(filePath)) {
+            await fs.promises.unlink(filePath).catch(() => {});
+          }
+        }
+      }),
+    );
+
+    await Promise.allSettled(tasks);
+  }
+
+  async syncDriveAndLark() {
+    const now = new Date();
+    let pageToken: string | undefined;
+
+    this.logger.log('Bắt đầu quét toàn bộ file trên Google Drive...');
+
+    // =========================================================
+    // 1. QUÉT & LƯU TOÀN BỘ FILE TRÊN DRIVE VÀO DB
+    // =========================================================
+    do {
+      const res = await this.driveSA.files.list({
+        fields:
+          'nextPageToken, files(id,name,mimeType,parents,webViewLink,webContentLink,size)',
+        pageSize: 1000, // Tăng lên 1000 (mức max của Google) để giảm số lần gọi API, chạy nhanh hơn
+        supportsAllDrives: true,
+        includeItemsFromAllDrives: true,
+        pageToken,
+      });
+
+      const files = res.data.files || [];
+
+      const driveOps = files.map((file) => {
+        const id = file.id || '';
+        const name = file.name || 'Untitled';
+        const webViewLink = file.webViewLink || null;
+        const mimeType = file.mimeType || null;
+
+        return this.prisma.driveFile.upsert({
+          where: { id },
+          update: {
+            name,
+            last_seen_at: now, // Cập nhật thời gian nhìn thấy lần cuối
+            webViewLink,
+            drive_permission: true,
+          },
+          create: {
+            id,
+            raw: JSON.stringify(file),
+            name,
+            mimeType,
+            last_seen_at: now,
+            webViewLink,
+            drive_permission: true,
+          },
+        });
+      });
+
+      if (driveOps.length > 0) {
+        await this.prisma.$transaction(driveOps);
+      }
+
+      pageToken = res.data.nextPageToken || undefined;
+    } while (pageToken);
+
+    // =========================================================
+    // 2. XÓA CÁC FILE ĐÃ BỊ THU HỒI QUYỀN / BỊ XÓA KHỎI DRIVE
+    // =========================================================
+    // Những file nào có last_seen_at bé hơn "now" nghĩa là trong lần quét vừa rồi Google không trả về -> Xóa luôn
+    const deletedFiles = await this.prisma.driveFile.deleteMany({
+      where: { last_seen_at: { lt: now } },
+    });
+    if (deletedFiles.count > 0) {
+      this.logger.log(
+        `🗑️ Đã dọn dẹp (xóa) ${deletedFiles.count} files bị thu hồi quyền hoặc đã xóa khỏi Drive.`,
+      );
+    }
+  }
+
+  /* -------------------------------------------------------------------------- */
+  /* HELPERS                                                                    */
   /* -------------------------------------------------------------------------- */
 
   private async getAccessToken(): Promise<string> {
     const now = Date.now();
-
-    // còn hạn thì dùng
-    if (this.accessToken && now < this.expireAt - 60000) {
+    if (this.accessToken && now < this.expireAt - 60000)
       return this.accessToken;
-    }
 
     const res = await axios.post(
       'https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal',
@@ -102,733 +482,284 @@ export class LarkCron implements OnModuleInit {
       },
     );
 
-    if (res.data.code !== 0) {
-      this.logger.error('Lark auth failed', res.data);
-      throw new Error('Cannot get Lark access token');
-    }
-
+    if (res.data.code !== 0) throw new Error('Lark auth failed');
     this.accessToken = res.data.tenant_access_token;
     this.expireAt = now + res.data.expire * 1000;
-
-    this.logger.log('Lark token refreshed');
-
     return this.accessToken!;
   }
 
-  /* -------------------------------------------------------------------------- */
-  /*                              REQUEST WRAPPER                               */
-  /* -------------------------------------------------------------------------- */
-
   private async request(config: AxiosRequestConfig): Promise<any> {
     const token = await this.getAccessToken();
-
     const res = await axios({
       baseURL: this.baseURL,
       ...config,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json; charset=utf-8',
-        ...(config.headers || {}),
-      },
+      headers: { Authorization: `Bearer ${token}`, ...(config.headers || {}) },
     });
-
     return res.data;
-  }
-
-  async uploadDriveToMeta() {
-    const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
-
-    const BUSINESS_ID = '1916878948527753';
-    const BASE_DIR = '/app/files';
-
-    // =========================
-    // 🔥 Ensure folder
-    // =========================
-    if (!fs.existsSync(BASE_DIR)) {
-      fs.mkdirSync(BASE_DIR, { recursive: true });
-    }
-
-    // =========================
-    // 🔥 Helper delete
-    // =========================
-    const safeDelete = async (filePath?: string | null) => {
-      if (!filePath) return;
-
-      try {
-        await fs.promises.unlink(filePath);
-        console.log('🧹 Deleted:', filePath);
-      } catch (err: any) {
-        if (err.code !== 'ENOENT') {
-          console.error('❌ Delete error:', filePath);
-        }
-      }
-    };
-
-    const [folders, cidContents] = await Promise.all([
-      this.prisma.creativeFolder.findMany({
-        where: { parent: { parentId: null } },
-        select: {
-          name: true,
-          id: true,
-          children: {
-            select: {
-              name: true,
-              id: true,
-              children: { select: { name: true, id: true } },
-            },
-          },
-        },
-      }),
-      this.prisma.larkRecord.findMany({
-        orderBy: [{ production_date: 'asc' }],
-        where: { drive: { drive_permission: true }, creative_asset_id: null },
-        take: 20,
-        select: {
-          production_date: true,
-          brand_code: true,
-          project_code: true,
-          product_code: true,
-          drive: {
-            select: {
-              id: true,
-              webViewLink: true,
-              webContentLink: true,
-              mimeType: true,
-              name: true,
-            },
-          },
-        },
-      }),
-    ]);
-
-    // =========================
-    // 🔥 Normalize
-    // =========================
-    const normalizedData = cidContents
-      .map((item) => {
-        const { project_code, brand_code, product_code, drive } = item;
-        if (!drive?.webViewLink) return null;
-
-        const project = folders.find((f) => f.name === project_code);
-        const brand = project?.children?.find((b) => b.name === brand_code);
-        const product = brand?.children?.find((p) => p.name === product_code);
-
-        if (!project || !brand || !product) return null;
-
-        return {
-          name: drive.name,
-          type: drive.mimeType?.startsWith('image')
-            ? AssetType.IMAGE
-            : AssetType.VIDEO,
-          folderId: product.id,
-          drive_id: drive.id,
-          urlView: drive.webViewLink,
-        };
-      })
-      .filter(Boolean);
-
-    // =========================
-    // 🔥 Upload batch
-    // =========================
-    const BATCH_SIZE = 3;
-    const results: any[] = [];
-
-    for (let i = 0; i < normalizedData.length; i += BATCH_SIZE) {
-      const batch = normalizedData.slice(i, i + BATCH_SIZE);
-
-      const batchResults = await Promise.allSettled(
-        batch.map(async (item) => {
-          let filePath: string | null = null;
-
-          try {
-            /**
-             * =========================
-             * 🖼 IMAGE
-             * =========================
-             */
-            if (item.type === AssetType.IMAGE) {
-              const driveRes = await this.driveSA.files.get(
-                {
-                  fileId: item.drive_id,
-                  alt: 'media',
-                  supportsAllDrives: true,
-                },
-                { responseType: 'arraybuffer' },
-              );
-
-              const buffer = Buffer.from(driveRes.data as ArrayBuffer);
-
-              const res: any = await api.call('POST', [BUSINESS_ID, 'images'], {
-                name: item.name,
-                bytes: buffer.toString('base64'),
-                creative_folder_id: item.folderId,
-              });
-
-              const assetId = (Object.values(res.images || {})?.[0] as any)?.id;
-
-              if (!assetId) throw new Error('Upload image fail');
-
-              return { success: true, assetId, item };
-            }
-
-            /**
-             * =========================
-             * 🎬 VIDEO
-             * =========================
-             */
-            if (item.type === AssetType.VIDEO) {
-              filePath = path.join(BASE_DIR, `${item.drive_id}.mp4`);
-
-              const driveRes = await this.driveSA.files.get(
-                {
-                  fileId: item.drive_id,
-                  alt: 'media',
-                  supportsAllDrives: true,
-                },
-                { responseType: 'stream' },
-              );
-
-              // download file
-              await pipeline(driveRes.data, fs.createWriteStream(filePath));
-
-              // check file
-              if (!fs.existsSync(filePath)) {
-                throw new Error('File not downloaded');
-              }
-
-              let res: any;
-
-              // 👉 production dùng CDN
-              const cdnUrl = `${process.env.FRONT_END_DOMAIN}/cdn/${item.drive_id}.mp4`;
-
-              res = await api.call('POST', [BUSINESS_ID, 'videos'], {
-                title: item.name,
-                file_url: cdnUrl,
-                creative_folder_id: item.folderId,
-              });
-              const assetId = res?.business_video_id;
-
-              if (!assetId) throw new Error('Upload video fail');
-
-              return { success: true, assetId, item };
-            }
-          } catch (err: any) {
-            console.error(
-              '❌ Upload fail:',
-              item.name,
-              err?.response?.body || err.message || err,
-            );
-
-            return { success: false, error: err, item };
-          } finally {
-            // 🔥 ALWAYS DELETE FILE
-            await safeDelete(filePath);
-          }
-        }),
-      );
-
-      results.push(...batchResults);
-    }
-
-    // =========================
-    // 🔥 SUCCESS FILTER
-    // =========================
-    const successUploads = results
-      .filter((r) => r.status === 'fulfilled' && r.value?.success)
-      .map((r: any) => r.value);
-
-    if (!successUploads.length) {
-      console.log('❌ No successful uploads');
-      return { results };
-    }
-
-    // =========================
-    // 🔥 UPSERT DB
-    // =========================
-    await Promise.allSettled(
-      successUploads.map(({ assetId, item }) =>
-        this.prisma.creativeAsset.upsert({
-          where: { id: assetId },
-          update: {
-            drive_url: item.urlView,
-            name: item.name,
-            folderId: item.folderId,
-            type: item.type,
-          },
-          create: {
-            id: assetId,
-            drive_url: item.urlView,
-            name: item.name,
-            folderId: item.folderId,
-            type: item.type,
-          },
-        }),
-      ),
-    );
-
-    // =========================
-    // 🔥 UPDATE LARK
-    // =========================
-    await Promise.allSettled(
-      successUploads.map(({ assetId, item }) =>
-        this.prisma.larkRecord.updateMany({
-          where: { drive_id: item.drive_id },
-          data: { creative_asset_id: assetId },
-        }),
-      ),
-    );
-
-    console.log('✅ DONE ALL');
-
-    return { results };
-  }
-
-  async syncDriveAndLark() {
-    let pageToken: string | undefined;
-    const now = new Date();
-
-    // ========= HELPERS =========
-    const extractDriveId = (url?: string | null): string | null => {
-      if (!url) return null;
-
-      const match1 = url.match(/\/d\/([a-zA-Z0-9_-]+)/);
-      if (match1) return match1[1];
-
-      const match2 = url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
-      if (match2) return match2[1];
-
-      return null;
-    };
-
-    const mapDriveFile = (file: any) => ({
-      id: file.id,
-      raw: file,
-      parentId: file.parents?.[0] || null,
-      name: file.name,
-      mimeType: file.mimeType,
-      webContentLink: file.webContentLink,
-      webViewLink: file.webViewLink,
-      size: file.size,
-      drive_permission: true,
-      last_seen_at: now,
-    });
-
-    // ========= 1. SYNC DRIVE =========
-    do {
-      const res = await this.driveSA.files.list({
-        fields:
-          'nextPageToken, files(id,name,mimeType,parents,webViewLink,webContentLink,size)',
-        pageSize: 100,
-        supportsAllDrives: true,
-        includeItemsFromAllDrives: true,
-        pageToken,
-      });
-
-      const files = res.data.files || [];
-      // 🚀 batch upsert
-      await Promise.all(
-        files.map((file) =>
-          this.prisma.driveFile.upsert({
-            where: { id: file.id },
-            update: mapDriveFile(file),
-            create: mapDriveFile(file),
-          }),
-        ),
-      );
-
-      pageToken = res.data.nextPageToken || undefined;
-    } while (pageToken);
-
-    // ========= 2. MARK FILE DELETED =========
-    await this.prisma.driveFile.updateMany({
-      where: { last_seen_at: { lt: now } },
-      data: { drive_permission: false },
-    });
-
-    // ========= 3. PRELOAD DATA =========
-    const [records, driveFiles, creativeAssets] = await Promise.all([
-      this.prisma.larkRecord.findMany({
-        where: { drive_url: { not: null } },
-        select: { id: true, drive_url: true },
-      }),
-      this.prisma.driveFile.findMany({
-        select: { id: true, name: true, webViewLink: true },
-      }),
-      this.prisma.creativeAsset.findMany({
-        select: {
-          id: true,
-          name: true,
-          drive_id: true,
-          folder: {
-            select: {
-              id: true,
-              name: true,
-              parent: {
-                select: {
-                  id: true,
-                  name: true,
-                  parent: { select: { id: true, name: true } },
-                },
-              },
-            },
-          },
-        },
-      }),
-    ]);
-
-    // ========= 4. BUILD MAP =========
-    const driveMap = new Map(driveFiles.map((d) => [d.id, d]));
-    const creativeMap = new Map(creativeAssets.map((c) => [c.name, c]));
-    // ========= 5. PREPARE UPDATE =========
-    const larkUpdates: any[] = [];
-    const creativeUpdates: any[] = [];
-
-    for (const r of records) {
-      const driveId = extractDriveId(r.drive_url);
-      if (!driveId) continue;
-
-      const driveItem = driveMap.get(driveId);
-      if (!driveItem) continue;
-
-      // update Creative
-      const creative = creativeMap.get(driveItem.name);
-
-      larkUpdates.push({
-        where: { id: r.id },
-        data: {
-          drive_id: driveId,
-          ...(creative && { creative_asset_id: creative.id }), // 👈 thêm dòng này
-        },
-      });
-      if (creative && creative.drive_id !== driveId) {
-        creativeUpdates.push({
-          where: { id: creative.id },
-          data: {
-            drive_id: driveItem.id,
-            drive_url: driveItem.webViewLink,
-          },
-        });
-      }
-    }
-
-    // ========= 6. EXECUTE BATCH =========
-    const chunkSize = 100;
-
-    const chunk = (arr: any[], size: number) =>
-      Array.from({ length: Math.ceil(arr.length / size) }, (_, i) =>
-        arr.slice(i * size, i * size + size),
-      );
-
-    for (const batch of chunk(larkUpdates, chunkSize)) {
-      await Promise.all(batch.map((u) => this.prisma.larkRecord.update(u)));
-    }
-
-    for (const batch of chunk(creativeUpdates, chunkSize)) {
-      await Promise.all(batch.map((u) => this.prisma.creativeAsset.update(u)));
-    }
-
-    return true;
   }
 
   async searchRecords(
     appToken: string,
     tableId: string,
-    filter: any,
-    pageSize = 500,
+    filter: Record<string, any>,
   ) {
     let hasMore = true;
     let pageToken: string | undefined;
-    const seenTokens = new Set<string>();
 
     while (hasMore) {
       const res = await this.request({
         method: 'POST',
         url: `/apps/${appToken}/tables/${tableId}/records/search`,
-        params: { page_size: pageSize, page_token: pageToken },
+        params: { page_size: 500, page_token: pageToken },
         data: { automatic_fields: false, filter },
       });
 
-      if (res.code !== 0) {
-        this.logger.error('Lark searchRecords error', res);
-        break;
+      if (res.code !== 0) break;
+      const items = res.data.items || [];
+      console.log(items.length + ' records fetched from Lark');
+      if (items.length > 0) {
+        const mapped = items.map(
+          (item: any) =>
+            mapRecord(item) as unknown as Prisma.LarkRecordCreateInput,
+        );
+
+        await this.upsertLarkBatch(mapped);
       }
 
-      const data = res.data;
-      const items = data.items || [];
-      if (items.length === 0) break;
-
-      // 🔥 map data
-      const mapped = items.map((item) => mapRecord(item)) as LarkRecord[];
-      await this.upsertBatch(mapped);
-
-      this.logger.log(
-        `Fetched ${data.items?.length || 0} filtered records (total: ${data.total} / ${data?.items?.length})`,
-      );
-
-      // 🛑 chống loop vô hạn
-      if (pageToken && seenTokens.has(pageToken)) {
-        this.logger.warn('Duplicate page_token → stop');
-        break;
-      }
-
-      if (pageToken) seenTokens.add(pageToken);
-
-      hasMore = data.has_more;
-      pageToken = data.page_token;
+      hasMore = res.data.has_more;
+      pageToken = res.data.page_token;
     }
-    return true;
   }
 
-  async upsertBatch(records: LarkRecord[]) {
-    const ids = records.map((r) => r.id);
+  private async upsertLarkBatch(records: Prisma.LarkRecordCreateInput[]) {
+    const validRecords = records.filter((r) => r.id);
+    const ids = validRecords.map((r) => String(r.id));
+
+    const uniqueDriveIds = Array.from(
+      new Set(
+        validRecords
+          .map((r) => {
+            const drive_id = extractDriveId(r.drive_url);
+            return drive_id;
+          })
+          .filter(Boolean),
+      ),
+    ) as string[];
+
+    console.log(
+      uniqueDriveIds.length + ' unique drive IDs to map in Lark records...',
+    );
 
     const existing = await this.prisma.larkRecord.findMany({
       where: { id: { in: ids } },
       select: { id: true },
     });
-
     const existingIds = new Set(existing.map((e) => e.id));
 
-    const toCreate = [] as LarkRecord[];
-    const toUpdate = [] as LarkRecord[];
+    const toCreate = validRecords.filter((r) => !existingIds.has(String(r.id)));
+    const toUpdate = validRecords.filter((r) => existingIds.has(String(r.id)));
 
-    for (const r of records) {
-      if (existingIds.has(r.id)) {
-        toUpdate.push(r);
-      } else {
-        toCreate.push(r);
-      }
-    }
     await this.prisma.$transaction(
       async (tx) => {
-        // CREATE MANY
         if (toCreate.length > 0) {
           await tx.larkRecord.createMany({
-            data: toCreate as any,
+            data: toCreate as Prisma.LarkRecordCreateManyInput[],
             skipDuplicates: true,
           });
         }
 
-        // UPDATE (loop)
+        if (uniqueDriveIds.length > 0) {
+          const driveData = uniqueDriveIds.map((id) => ({
+            id,
+            name: 'Pending Sync...', // Tên tạm thời
+            raw: '{}',
+            drive_permission: false, // Tạm thời coi như chưa có quyền, chờ Google check
+          }));
+
+          await tx.driveFile.createMany({
+            data: driveData as any[],
+
+            skipDuplicates: true, // Nếu ID này đã có ở lần chạy trước rồi thì thôi, không ghi đè
+          });
+        }
         for (const r of toUpdate) {
           await tx.larkRecord.update({
-            where: { id: r.id },
-            data: r as any,
+            where: { id: String(r.id) },
+            data: r,
           });
         }
       },
-      { timeout: 50000 },
+      { timeout: 30000 },
     );
   }
 
-  // Helper: Xử lý Batch cho một danh sách folder cùng cấp
-
   async createFolderMeta() {
-    // 1. Lấy dữ liệu và xây dựng cây thư mục logic
     const records = await this.prisma.larkRecord.findMany({
       where: { product_code: { contains: 'SP', mode: 'insensitive' } },
     });
-    const tree = await this.buildTree(records);
-    const businessId = '1916878948527753';
-    const rootParentId = '4303729193176038';
 
-    // --- LEVEL 1: PROJECTS ---
-    const projectFolders = await this.ensureFoldersInBatch(
-      tree.map((p) => ({
-        name: p.project_name,
-        description: p.project_name,
-        parentId: rootParentId,
-      })),
-      businessId,
-    );
-    // --- LEVEL 2: BRANDS ---
-    const brandRequests = [] as FolderRequest[];
+    const tree = this.buildLogicalTree(records);
+    const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
 
-    for (const project of tree) {
-      const parentFolder = projectFolders.find(
-        (f) => f.name === project.project_name,
-      );
-      if (parentFolder) {
-        project.brands.forEach((brand) => {
-          brandRequests.push({
-            name: brand.brand_name,
-            description: brand.brand_name,
-            parentId: parentFolder.id,
-          });
-        });
-      }
-    }
-    const brandFolders = await this.ensureFoldersInBatch(
-      brandRequests,
-      businessId,
-    );
-    // --- LEVEL 3: PRODUCTS ---
-    const productRequests = [] as FolderRequest[];
-    for (const project of tree) {
-      project.brands.forEach((brand) => {
-        const parentFolder = brandFolders.find(
-          (f) => f.name === brand.brand_name,
+    // Level 1: Projects
+    const projectReqs: FolderRequest[] = tree.map((p) => ({
+      name: p.project_name,
+      parentId: this.ROOT_META_FOLDER,
+    }));
+    const projectFolders = await this.ensureFoldersInBatch(projectReqs, api);
+
+    // Level 2: Brands
+    const brandReqs: FolderRequest[] = [];
+    tree.forEach((p) => {
+      const parent = projectFolders.find((f) => f.name === p.project_name);
+      if (parent) {
+        p.brands.forEach((b) =>
+          brandReqs.push({ name: b.brand_name, parentId: parent.id }),
         );
-        if (parentFolder) {
-          brand.products.forEach((product) => {
-            productRequests.push({
-              name: product.product_code,
-              description: product.product_name,
-              parentId: parentFolder.id,
-            });
-          });
+      }
+    });
+    const brandFolders = await this.ensureFoldersInBatch(brandReqs, api);
+
+    // Level 3: Products
+    const productReqs: FolderRequest[] = [];
+    tree.forEach((p) => {
+      p.brands.forEach((b) => {
+        const parent = brandFolders.find((f) => f.name === b.brand_name);
+        if (parent) {
+          b.products.forEach((prod) =>
+            productReqs.push({
+              name: prod.product_code,
+              description: prod.product_name,
+              parentId: parent.id,
+            }),
+          );
         }
       });
-    }
-    await this.ensureFoldersInBatch(productRequests, businessId);
+    });
 
-    return { message: 'Done sync folders in batch' };
+    await this.ensureFoldersInBatch(productReqs, api);
   }
 
-  async ensureFoldersInBatch(
-    folderRequests: FolderRequest[],
-    businessId: string,
+  private async ensureFoldersInBatch(
+    requests: FolderRequest[],
+    api: FacebookAdsApi,
   ): Promise<MetaFolderResponse[]> {
-    const results: MetaFolderResponse[] = [];
+    if (requests.length === 0) return [];
 
-    // 1. Lấy danh sách đã tồn tại trong DB
-    const existedInDb = await this.prisma.creativeFolder.findMany({
+    // ====================================================================
+    // 🛡️ CHỐNG TRÙNG LẶP FOLDER TÊN CON TRONG FOLDER CHA
+    // Dòng dưới đây đảm bảo: Nếu mảng truyền vào có 2 thư mục tên "SP01"
+    // và có chung 1 parentId, nó sẽ gộp lại thành 1 request duy nhất.
+    // ====================================================================
+    const uniqueReqs = requests.filter(
+      (v, i, a) =>
+        a.findIndex((t) => t.name === v.name && t.parentId === v.parentId) ===
+        i,
+    );
+
+    // Lấy những thư mục "Đã tồn tại trong DB theo điều kiện Name + ParentId"
+    const existedDb = await this.prisma.creativeFolder.findMany({
       where: {
-        OR: folderRequests.map((f) => ({
-          name: f.name,
-          parentId: f.parentId,
+        OR: uniqueReqs.map((r) => ({
+          name: r.name,
+          parentId: r.parentId || null,
         })),
       },
     });
 
-    // Convert DB -> response format
-    const existedFormatted: MetaFolderResponse[] = existedInDb.map((f) => ({
+    const results: MetaFolderResponse[] = existedDb.map((f) => ({
       id: f.id,
       name: f.name,
-      description: f.description ?? undefined,
-      creation_time: f.creation_time ?? undefined,
+      description: f.description,
+      parentId: f.parentId,
+      creation_time: f.creation_time ? new Date(f.creation_time) : null,
     }));
 
-    results.push(...existedFormatted);
-
-    // 2. Filter folder cần tạo
-    const foldersToCreate = folderRequests.filter(
-      (req) =>
-        !existedInDb.some(
-          (db) => db.name === req.name && db.parentId === req.parentId,
-        ),
+    // Bỏ qua những folder đã có, chỉ tạo folder MỚI
+    const toCreate = uniqueReqs.filter(
+      (r) =>
+        !existedDb.some((e) => e.name === r.name && e.parentId === r.parentId),
     );
+    if (toCreate.length === 0) return results;
 
-    if (foldersToCreate.length === 0) return results;
-    const apiChunks = chunk(foldersToCreate, 50);
-    const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
-
-    for (const batch of apiChunks) {
-      const metaRequests = batch.map((f) => ({
+    for (let i = 0; i < toCreate.length; i += 50) {
+      const batch = toCreate.slice(i, i + 50);
+      const metaBatch = batch.map((f) => ({
         method: 'POST',
-        relative_url: `${businessId}/creative_folders`,
-        body: `name=${encodeURIComponent(f.name)}&description=${encodeURIComponent(
-          f.description || '',
-        )}&parent_folder_id=${f.parentId ?? ''}&fields=id,name,description,creation_time`,
+        relative_url: `${this.BUSINESS_ID}/creative_folders`,
+        body: `name=${encodeURIComponent(f.name)}&description=${encodeURIComponent(f.description || '')}&parent_folder_id=${f.parentId || ''}&fields=id,name,description`,
       }));
 
       try {
         const responses = (await api.call('POST', [''], {
-          batch: JSON.stringify(metaRequests),
-        })) as Array<{
-          code: number;
-          body: string;
-        }>;
-        const dbOps: any[] = [];
+          batch: JSON.stringify(metaBatch),
+        })) as Array<Record<string, any>>;
 
-        responses.forEach((res, index) => {
-          if (res.code === 200) {
-            try {
-              const folder: MetaFolderResponse = JSON.parse(res.body);
+        const dbCreations = responses
+          .map((res, idx) => {
+            if (res.code === 200 && res.body) {
+              const folder = JSON.parse(res.body) as MetaFolderResponse;
+              results.push({
+                id: folder.id,
+                name: folder.name,
+                description: folder.description,
+                parentId: batch[idx].parentId,
+                creation_time: folder.creation_time
+                  ? new Date(folder.creation_time)
+                  : new Date(),
+              });
 
-              results.push(folder);
-
-              dbOps.push(
-                this.prisma.creativeFolder.create({
-                  data: {
-                    id: folder.id,
-                    name: folder.name,
-                    description: folder.description ?? null,
-                    parentId: batch[index].parentId ?? null,
-                    creation_time: folder.creation_time ?? null,
-                  },
-                }),
-              );
-            } catch (err) {
-              console.error('Parse folder error', err);
+              return this.prisma.creativeFolder.create({
+                data: {
+                  id: folder.id,
+                  name: folder.name,
+                  parentId: batch[idx].parentId || null,
+                  description: folder.description,
+                  creation_time: folder.creation_time?.toString(),
+                },
+              });
             }
-          }
-        });
+            return null;
+          })
+          .filter(Boolean) as Prisma.PrismaPromise<any>[];
 
-        if (dbOps.length > 0) {
-          await this.prisma.$transaction(dbOps);
+        if (dbCreations.length > 0) {
+          await this.prisma.$transaction(dbCreations);
         }
-      } catch (error) {
-        console.error('Batch creation failed', error);
+      } catch (err) {
+        this.logger.error('Failed to create folder batch in Meta', err);
       }
     }
-
     return results;
   }
-  async buildTree(records: any[]): Promise<
-    Array<{
-      id: string | undefined;
-      project_code: string;
-      project_name: string;
-      brands: Array<{
-        id: string | undefined;
-        brand_code: string;
-        brand_name: string;
-        products: Array<{
-          id: string | undefined;
-          product_code: string;
-          product_name: string;
-        }>;
-      }>;
-    }>
-  > {
-    const projectMap = new Map();
-    const folders = await this.prisma.creativeFolder.findMany({
-      select: { id: true, name: true },
-    });
-    for (const r of records) {
-      if (!r.project_code) continue;
 
-      // 🟢 PROJECT
+  private buildLogicalTree(records: LarkRecord[]): LogicalProject[] {
+    const projectMap = new Map<string, LogicalProject>();
+
+    for (const r of records) {
+      if (!r.project_code || !r.project_name) continue;
+
       if (!projectMap.has(r.project_code)) {
         projectMap.set(r.project_code, {
-          id: folders.find((f) => f.name == r.project_name)?.id,
-          project_code: r.project_code,
           project_name: r.project_name,
-          brands: new Map(),
+          brands: [],
         });
       }
+      const project = projectMap.get(r.project_code)!;
 
-      const project = projectMap.get(r.project_code);
-
-      // 🔵 BRAND
-      if (r.brand_code) {
-        if (!project.brands.has(r.brand_code)) {
-          project.brands.set(r.brand_code, {
-            id: folders.find((f) => f.name == r.brand_name)?.id,
-            brand_code: r.brand_code,
-            brand_name: r.brand_name,
-            products: new Map(),
-          });
+      if (r.brand_code && r.brand_name) {
+        let brand = project.brands.find((b) => b.brand_name === r.brand_name);
+        if (!brand) {
+          brand = { brand_name: r.brand_name, products: [] };
+          project.brands.push(brand);
         }
 
-        const brand = project.brands.get(r.brand_code);
-
-        // 🟣 PRODUCT
-        if (r.product_code) {
-          if (!brand.products.has(r.product_code)) {
-            brand.products.set(r.product_code, {
-              id: folders.find((f) => f.name == r.product_name)?.id,
+        if (r.product_code && r.product_name) {
+          const productExists = brand.products.some(
+            (p) => p.product_code === r.product_code,
+          );
+          if (!productExists) {
+            brand.products.push({
               product_code: r.product_code,
               product_name: r.product_name,
             });
@@ -837,51 +768,6 @@ export class LarkCron implements OnModuleInit {
       }
     }
 
-    // 🔄 convert Map → Array
-    return Array.from(projectMap.values()).map((p) => ({
-      id: p.id,
-      project_code: p.project_code,
-      project_name: p.project_name,
-      brands: Array.from(p.brands.values()).map((b: any) => ({
-        id: b.id,
-        brand_code: b.brand_code,
-        brand_name: b.brand_name,
-        products: Array.from(b.products.values()),
-      })),
-    }));
-  }
-
-  // HELPER DRIVE
-  async addPublicPermission(fileId: string) {
-    const res = await this.driveSA.permissions.create({
-      fileId,
-      requestBody: { role: 'reader', type: 'anyone' },
-    });
-
-    return res.data; // chứa permissionId
-  }
-
-  async removePublicPermission(fileId: string) {
-    // 1. Lấy danh sách permission
-    const res = await this.driveSA.permissions.list({
-      fileId,
-      fields: 'permissions(id,type)',
-    });
-
-    const anyonePermission = res.data.permissions?.find(
-      (p) => p.type === 'anyone',
-    );
-
-    if (!anyonePermission) {
-      return { message: 'No public permission found' };
-    }
-
-    // 2. Xóa permission
-    await this.driveSA.permissions.delete({
-      fileId,
-      permissionId: anyonePermission.id!,
-    });
-
-    return { message: 'Public permission removed' };
+    return Array.from(projectMap.values());
   }
 }

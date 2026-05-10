@@ -601,7 +601,7 @@ export class MetaCron implements OnModuleInit {
               `✅ ${job.range} done (${insights.length} insights)`,
             );
           }
-          await sleep(800);
+          await sleep(30000);
         } catch (error: any) {
           this.logger.error(
             `❌ Account ${accountId}: ${parseMetaError(error).message}`,
@@ -802,7 +802,7 @@ export class MetaCron implements OnModuleInit {
           }
         }),
       );
-      await sleep(800);
+      await sleep(10000);
     }
     this.logger.log(
       `✅ DAILY DONE | fetched: ${totalFetched} | upserted: ${totalUpserted}`,

@@ -1713,7 +1713,7 @@ model LarkRecord {
 
     drive_url String?
 
-    drive_id String?    @unique
+    drive_id String?
     drive    DriveFile? @relation(fields: [drive_id], references: [id])
 
     creative_asset_id String?        @unique
@@ -1739,7 +1739,7 @@ model DriveFile {
     webViewLink    String?
     size           String?
 
-    larkRecord    LarkRecord?
+    larkRecord    LarkRecord[]
     creativeAsset CreativeAsset?
 
     drive_permission Boolean?

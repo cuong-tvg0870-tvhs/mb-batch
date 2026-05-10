@@ -17,6 +17,12 @@ export function getSelect(field?: SelectField) {
 export function getLink(field?: LinkField) {
   return field?.[0]?.link || field?.[0]?.text || null;
 }
+export function extractDriveId(url?: string | null): string | null {
+  if (!url) return null;
+  const match =
+    url.match(/\/d\/([a-zA-Z0-9_-]+)/) || url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  return match ? match[1] : null;
+}
 
 // mapper
 export function mapRecord(item: RecordItem) {
