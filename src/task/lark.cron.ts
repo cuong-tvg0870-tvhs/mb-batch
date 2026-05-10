@@ -78,7 +78,6 @@ export class LarkCron implements OnModuleInit {
       fs.mkdirSync(this.BASE_DIR, { recursive: true });
     }
 
-    await this.handleMetaUploadWorkflow();
     this.logger.log('🚀 Lark Cron Service Initialized');
   }
 
