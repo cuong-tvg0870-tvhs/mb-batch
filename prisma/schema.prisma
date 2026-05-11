@@ -1541,7 +1541,8 @@ model SystemCampaign {
     campaigns            Campaign[]
     templateCampaigns    TemplateCampaign[]
 
-    errors Json?
+    errors       Json?
+    isPublishing Boolean @default(false)
 
     @@index([status])
     @@index([createdById, createdAt(sort: Desc)])
