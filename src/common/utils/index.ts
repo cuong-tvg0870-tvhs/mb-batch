@@ -34,11 +34,12 @@ export interface DriverAdapterError {
 }
 
 export function metaError(e: any) {
-  return e?.response?.error || e;
+  return e?.response || e;
 }
 
 export function isRateLimit(e: any) {
   const err = metaError(e);
+  console.log(err.code);
   return (
     [4, 17, 32, 613, 80004].includes(err?.code) ||
     err?.error_subcode === 2446079 ||
@@ -142,6 +143,35 @@ export const ThrowErrorWithFormDatabase = (
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+export async function executeMetaApiWithRetry<T>(
+  action: () => Promise<T> | T,
+  options?: {
+    maxRetries?: number;
+    initialSleepMs?: number;
+    logger?: any;
+  },
+): Promise<T> {
+  const maxRetries = options?.maxRetries ?? 2;
+  const initialSleepMs = options?.initialSleepMs ?? 60000;
+  let retry = 0;
+
+  while (true) {
+    try {
+      return await action();
+    } catch (error: any) {
+      if (isRateLimit(error) && retry < maxRetries) {
+        retry++;
+        const sleepTime = initialSleepMs * retry;
+        options?.logger?.warn?.(
+          `[Meta API Limit] Rate limit hit on initial request! Retrying ${retry}/${maxRetries} after ${Math.round(sleepTime / 1000)}s...`,
+        );
+        await sleep(sleepTime);
+      } else {
+        throw error;
+      }
+    }
+  }
+}
 // 2. Từ khóa phổ biến
 export const commonKeywords = [
   'food',

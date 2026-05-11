@@ -10,6 +10,7 @@ import { PrismaService } from 'src/modules/prisma/prisma.service';
 
 import {
   chunk,
+  executeMetaApiWithRetry,
   extractCampaignMetrics,
   fetchAll,
   parseMetaError,
@@ -28,6 +29,7 @@ import {
 
 import dayjs from 'dayjs';
 
+import { Cron } from '@nestjs/schedule';
 import { CreativeStatus, InsightRange, LevelInsight } from '@prisma/client';
 import { MetaTransformHelper } from 'src/common/helpers/meta-transform.helper';
 import { PrismaBatchHelper } from 'src/common/helpers/prisma-batch.helper';
@@ -55,7 +57,16 @@ export class MetaCron implements OnModuleInit {
 
   async onModuleInit() {
     this.logger.log('🚀 TaskCron initialized');
-    await this.syncMaxCampaignInsightsJob();
+    // await this.syncMaxCampaignInsightsJob();
+    // await this.syncMaxAdsetInsightsJob();
+    await this.syncMaxAdInsightsJob();
+
+    // TEST
+    await this.syncDailyCampaignInsightsJob();
+    await this.syncDailyAdsetInsightsJob();
+    await this.syncDailyAdInsightsJob();
+
+    // await this.syncMaxAdsetAudienceInsightsJob();
   }
 
   /**
@@ -64,39 +75,39 @@ export class MetaCron implements OnModuleInit {
    * ================================
    */
 
-  //@Cron('5 0 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('5 0 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncCampaignCore() {
     this.logger.log('🔄 Sync Campaign Core');
     await this.syncCampaignData();
     this.logger.log('✅ Sync Campaign Core DONE');
   }
 
-  //@Cron('5 21 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  //@Cron('5 20 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  //@Cron('5 19 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('5 21 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('5 20 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('5 19 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncImageData() {
     this.logger.log('🔄 Sync Image Core');
     await this.syncImage();
     this.logger.log('✅ Sync Image DONE');
   }
 
-  //@Cron('5 22 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  //@Cron('5 21 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  //@Cron('5 20 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('5 22 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('5 21 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('5 20 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncVideoData() {
     this.logger.log('🔄 Sync Video Core');
     await this.syncVideo();
     this.logger.log('✅ Sync Video DONE');
   }
 
-  //@Cron('20 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('20 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncFolderVideoData() {
     this.logger.log('🔄 Sync Folder Video Core');
     await this.syncFolderVideo();
     this.logger.log('✅ Sync Folder Video DONE');
   }
 
-  //@Cron('40 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('40 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncFolderImageData() {
     this.logger.log('🔄 Sync Folder Image Core');
     await this.syncFolderImage();
@@ -110,28 +121,28 @@ export class MetaCron implements OnModuleInit {
    * ================================
    */
 
-  //@Cron('5 1 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('5 1 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncMaxCampaignInsightsJob() {
     this.logger.log('🔄 Sync MAX Campaign Insights');
     await this.syncAllCampaignInsights();
     this.logger.log('✅ MAX Campaign DONE');
   }
 
-  //@Cron('15 2 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('15 2 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncMaxAdsetInsightsJob() {
     this.logger.log('🔄 Sync MAX Adset Insights');
     await this.syncAllAdSetInsights();
     this.logger.log('✅ MAX Adset DONE');
   }
 
-  //@Cron('25 3 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('25 3 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncMaxAdInsightsJob() {
     this.logger.log('🔄 Sync MAX Ad Insights');
     await this.syncAllAdInsights();
     this.logger.log('✅ MAX Ad DONE');
   }
 
-  //@Cron('35 4 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('35 4 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncMaxAdsetAudienceInsightsJob() {
     this.logger.log('🔄 Sync MAX Adset Audience Insights');
     await this.syncMaxAdSetAudienceInsights();
@@ -149,7 +160,7 @@ export class MetaCron implements OnModuleInit {
   /**
    * 🟢 Campaign DAILY
    */
-  //@Cron('0 6,12,18 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('0 6,12,18 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncDailyCampaignInsightsJob() {
     this.logger.log('🔄 Sync DAILY Campaign Insights');
     await this.syncDailyCampaignInsights();
@@ -159,7 +170,7 @@ export class MetaCron implements OnModuleInit {
   /**
    * 🟡 AdSet DAILY (delay sau Campaign)
    */
-  //@Cron('15 6,12,18 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('15 6,12,18 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async syncDailyAdsetInsightsJob() {
     this.logger.log('🔄 Sync DAILY Adset Insights');
     await this.syncDailyAdSetInsights();
@@ -169,9 +180,9 @@ export class MetaCron implements OnModuleInit {
   /**
    * 🔵 Ad DAILY + Creative Analytics (delay sau AdSet)
    */
-  //@Cron('30 6 * * *', { timeZone: 'Asia/Ho_Chi_Minh' }) // 06:30
-  //@Cron('0 13 * * *', { timeZone: 'Asia/Ho_Chi_Minh' }) // 13:00
-  //@Cron('40 18 * * *', { timeZone: 'Asia/Ho_Chi_Minh' }) // 18:40
+  @Cron('30 6 * * *', { timeZone: 'Asia/Ho_Chi_Minh' }) // 06:30
+  @Cron('0 13 * * *', { timeZone: 'Asia/Ho_Chi_Minh' }) // 13:00
+  @Cron('40 18 * * *', { timeZone: 'Asia/Ho_Chi_Minh' }) // 18:40
   async syncDailyAdInsightsJob() {
     this.logger.log('🔄 Sync DAILY Ad Insights');
     await this.syncDailyAdInsights();
@@ -353,18 +364,16 @@ export class MetaCron implements OnModuleInit {
           };
 
           // 1. Fetch Campaigns Flat
-          const campaignsCursor = await adAccount.getCampaigns(
-            CAMPAIGN_FIELDS,
-            filter,
-            true,
+          const campaignsCursor = await executeMetaApiWithRetry(
+            () => adAccount.getCampaigns(CAMPAIGN_FIELDS, filter, true),
+            { logger: this.logger },
           );
           const campaigns = await fetchAll(campaignsCursor);
 
           // 2. Fetch AdSets Flat
-          const adsetsCursor = await adAccount.getAdSets(
-            ADSET_FIELDS,
-            filter,
-            true,
+          const adsetsCursor = await executeMetaApiWithRetry(
+            () => adAccount.getAdSets(ADSET_FIELDS, filter, true),
+            { logger: this.logger },
           );
           const adsets = await fetchAll(adsetsCursor);
 
@@ -373,7 +382,10 @@ export class MetaCron implements OnModuleInit {
             ...AD_FIELDS.filter((f) => f !== 'creative'),
             `creative{${CREATIVE_FIELDS.join(',')}}`,
           ];
-          const adsCursor = await adAccount.getAds(adFields, filter, true);
+          const adsCursor = await executeMetaApiWithRetry(
+            () => adAccount.getAds(adFields, filter, true),
+            { logger: this.logger },
+          );
           const ads = await fetchAll(adsCursor);
 
           // ------------------------------------------------------------------------------------------------
@@ -406,15 +418,19 @@ export class MetaCron implements OnModuleInit {
                 `⚠️ Fetching ${missingCampaignIds.length} missing campaigns...`,
               );
               for (const chunkIds of chunk(missingCampaignIds, 50)) {
-                const missingCursor = await adAccount.getCampaigns(
-                  CAMPAIGN_FIELDS,
-                  {
-                    limit: 50,
-                    filtering: [
-                      { field: 'id', operator: 'IN', value: chunkIds },
-                    ],
-                  },
-                  true,
+                const missingCursor = await executeMetaApiWithRetry(
+                  () =>
+                    adAccount.getCampaigns(
+                      CAMPAIGN_FIELDS,
+                      {
+                        limit: 50,
+                        filtering: [
+                          { field: 'id', operator: 'IN', value: chunkIds },
+                        ],
+                      },
+                      true,
+                    ),
+                  { logger: this.logger },
                 );
                 campaigns.push(...(await fetchAll(missingCursor)));
               }
@@ -444,15 +460,19 @@ export class MetaCron implements OnModuleInit {
                 `⚠️ Fetching ${missingAdSetIds.length} missing adsets...`,
               );
               for (const chunkIds of chunk(missingAdSetIds, 50)) {
-                const missingCursor = await adAccount.getAdSets(
-                  ADSET_FIELDS,
-                  {
-                    limit: 50,
-                    filtering: [
-                      { field: 'id', operator: 'IN', value: chunkIds },
-                    ],
-                  },
-                  true,
+                const missingCursor = await executeMetaApiWithRetry(
+                  () =>
+                    adAccount.getAdSets(
+                      ADSET_FIELDS,
+                      {
+                        limit: 50,
+                        filtering: [
+                          { field: 'id', operator: 'IN', value: chunkIds },
+                        ],
+                      },
+                      true,
+                    ),
+                  { logger: this.logger },
                 );
                 adsets.push(...(await fetchAll(missingCursor)));
               }
@@ -492,7 +512,7 @@ export class MetaCron implements OnModuleInit {
     const prismaHelper = new PrismaBatchHelper(this.prisma);
 
     const parents = await (this.prisma[prismaModel] as any).findMany({
-      where: { account: { needsReauth: false, id: 'act_550524602247311' } },
+      where: { account: { needsReauth: false } },
       select: { id: true, accountId: true, status: true },
     });
 
@@ -580,97 +600,109 @@ export class MetaCron implements OnModuleInit {
       },
     ];
 
-    for (const [accountId, ids] of Object.entries(byAccount)) {
-      const adAccount = new AdAccount(accountId);
-      this.logger.log(`➡️ Account ${accountId} - ${ids.length} ${entityName}s`);
-
-      for (const idsChunk of chunk(ids, 50)) {
-        try {
-          // 1. Chuyển sang vòng lặp for...of để chạy từng Job một
-          for (const job of JOBS) {
-            this.logger.log(
-              `⏳ Đang xử lý Job: ${job.range} cho mẻ ${idsChunk.length} IDs...`,
-            );
-
-            const cursor = await adAccount.getInsights(
-              AD_INSIGHT_FIELDS,
-              {
-                limit: 50,
-                level,
-                date_preset: job.datePreset,
-                action_attribution_windows: '7d_click',
-                action_breakdowns: 'action_type',
-                filtering: [
-                  { field: parentIdsField, operator: 'IN', value: idsChunk },
-                ],
-              },
-              true,
-            );
-
-            const insights = await fetchAll(cursor);
-
-            // 2. Xử lý logic lưu DB cho từng Job ngay tại đây
-            if (insights.length > 0) {
-              const filteredInsights = insights.filter(
-                (i: any) => i[insightIdField],
-              );
-              const parentIds = [
-                ...new Set(filteredInsights.map((i: any) => i[insightIdField])),
-              ];
-
-              // --- Logic Prisma của bạn giữ nguyên nhưng đưa vào đây ---
-              await (this.prisma[insightModel] as any).deleteMany({
-                where: {
-                  [relationFieldId]: { in: parentIds },
-                  range: job.range,
-                },
-              });
-
-              const insightData = filteredInsights.map((i: any) => {
-                const metrics = extractCampaignMetrics(i);
-                return {
-                  [relationFieldId]: i[insightIdField],
-                  level: levelEnum,
-                  range: job.range,
-                  dateStart: i.date_start,
-                  dateStop: i.date_stop,
-                  ...metrics,
-                  rawPayload: i,
-                };
-              });
-
-              await prismaHelper.createManySafe(
-                this.prisma[insightModel] as any,
-                insightData,
-              );
-
-              // ... các logic update map và upsertMany của bạn ...
-              // (Giữ nguyên phần code cập nhật bảng chính)
-
-              totalProcessed += filteredInsights.length;
-              this.logger.log(
-                `✅ ${accountId} - ${job.range} done (${filteredInsights.length} insights)`,
-              );
-            }
-
-            // 3. SLEEP GIỮA CÁC JOB: Nghỉ một chút trước khi sang mốc thời gian (Job) tiếp theo
-            // Khoảng 2-5 giây là ổn để tránh bị Facebook quét spam API
-            await sleep(30000);
-          }
-
-          // 4. SLEEP GIỮA CÁC CHUNK: Sau khi xong tất cả Job của 50 ID này, nghỉ lâu hơn
+    const accountEntries = Object.entries(byAccount);
+    for (const accountChunk of chunk(accountEntries, 30)) {
+      await Promise.all(
+        accountChunk.map(async ([accountId, ids]) => {
+          const adAccount = new AdAccount(accountId);
           this.logger.log(
-            `💤 Đã xong 1 mẻ 50 IDs. Nghỉ 30s để hồi Rate Limit...`,
+            `[Account ${accountId}] ➡️ ${ids.length} ${entityName}s`,
           );
-          await sleep(30000);
-        } catch (error: any) {
-          this.logger.error(
-            `❌ Account ${accountId}: ${parseMetaError(error).message}`,
-          );
-          // Nếu lỗi nặng (như Rate Limit), bạn có thể thêm sleep lâu hơn ở đây
-          await sleep(60000);
-        }
-      }
+
+          for (const idsChunk of chunk(ids, 50)) {
+            try {
+              // 1. Chuyển sang vòng lặp for...of để chạy từng Job một
+              for (const job of JOBS) {
+                // Random sleep 20s - 30s trước mỗi lần gọi API
+                const sleepMs = Math.floor(Math.random() * 10000) + 20000;
+                this.logger.log(
+                  `[Account ${accountId}] ⏳ Đang xử lý Job: ${job.range} cho mẻ ${idsChunk.length} IDs... (Nghỉ ${Math.round(sleepMs / 1000)}s trước khi gọi API)`,
+                );
+                await sleep(sleepMs);
+
+                const cursor = await executeMetaApiWithRetry(
+                  () =>
+                    adAccount.getInsights(
+                      AD_INSIGHT_FIELDS,
+                      {
+                        limit: 50,
+                        level,
+                        date_preset: job.datePreset,
+                        action_attribution_windows: '7d_click',
+                        action_breakdowns: 'action_type',
+                        filtering: [
+                          {
+                            field: parentIdsField,
+                            operator: 'IN',
+                            value: idsChunk,
+                          },
+                        ],
+                      },
+                      true,
+                    ),
+                  { logger: this.logger },
+                );
+
+                const insights = await fetchAll(cursor, { sleepMs });
+
+                // Luôn xoá dữ liệu cũ của cả mẻ để loại bỏ rác (ví dụ: data TODAY, 3DAY cũ không còn data mới)
+                await (this.prisma[insightModel] as any).deleteMany({
+                  where: {
+                    [relationFieldId]: { in: idsChunk },
+                    range: job.range,
+                  },
+                });
+
+                // 2. Xử lý logic lưu DB cho từng Job ngay tại đây
+                if (insights.length > 0) {
+                  const filteredInsights = insights.filter(
+                    (i: any) => i[insightIdField],
+                  );
+
+                  const insightData = filteredInsights.map((i: any) => {
+                    const metrics = extractCampaignMetrics(i);
+                    return {
+                      [relationFieldId]: i[insightIdField],
+                      level: levelEnum,
+                      range: job.range,
+                      dateStart: i.date_start,
+                      dateStop: i.date_stop,
+                      ...metrics,
+                      rawPayload: i,
+                    };
+                  });
+
+                  await prismaHelper.createManySafe(
+                    this.prisma[insightModel] as any,
+                    insightData,
+                  );
+
+                  // ... các logic update map và upsertMany của bạn ...
+                  // (Giữ nguyên phần code cập nhật bảng chính)
+
+                  totalProcessed += filteredInsights.length;
+                  this.logger.log(
+                    `[Account ${accountId}] ✅ ${job.range} done (${filteredInsights.length} insights)`,
+                  );
+                }
+              }
+
+              // 4. SLEEP GIỮA CÁC CHUNK: Sau khi xong tất cả Job của 50 ID này, nghỉ lâu hơn
+              const chunkSleep = Math.floor(Math.random() * 10000) + 20000;
+              this.logger.log(
+                `[Account ${accountId}] 💤 Đã xong 1 mẻ 50 IDs. Nghỉ ${Math.round(chunkSleep / 1000)}s để hồi Rate Limit...`,
+              );
+              await sleep(chunkSleep);
+            } catch (error: any) {
+              this.logger.error(
+                `[Account ${accountId}] ❌ ${parseMetaError(error).message}`,
+              );
+              // Nếu lỗi nặng (như Rate Limit), bạn có thể thêm sleep lâu hơn ở đây
+              await sleep(60000);
+            }
+          }
+        }),
+      );
     }
     this.logger.log(
       `🎯 DONE MAX + 3D + 7D ${entityName} Insight - Total: ${totalProcessed}`,
@@ -710,16 +742,6 @@ export class MetaCron implements OnModuleInit {
     );
 
     if (todayInsightData.length > 0) {
-      const parentIds = todayInsightData.map((i: any) => i[relationFieldId]);
-      await (
-        this.prisma[insightModel as keyof typeof this.prisma] as any
-      ).deleteMany({
-        where: {
-          [relationFieldId]: { in: parentIds },
-          range: InsightRange.TODAY,
-        },
-      });
-
       const todayDataToCreate = todayInsightData.map((item: any) => {
         return {
           ...item.data,
@@ -844,108 +866,170 @@ export class MetaCron implements OnModuleInit {
       }
     }
 
-    for (const [accountId, { last3dIds, customItems }] of byAccount.entries()) {
-      const adAccount = new AdAccount(accountId);
+    const accountEntries = Array.from(byAccount.entries());
+    for (const accountChunk of chunk(accountEntries, 30)) {
+      await Promise.all(
+        accountChunk.map(async ([accountId, { last3dIds, customItems }]) => {
+          const adAccount = new AdAccount(accountId);
 
-      // 1. Process last3dIds in chunks of 50
-      if (last3dIds.length > 0) {
-        this.logger.log(
-          `📅 Account ${accountId}: Fetching last_3d for ${last3dIds.length} ${entityName}s`,
-        );
-        for (const chunkIds of chunk(last3dIds, 50)) {
-          try {
-            const cursor = await adAccount.getInsights(
-              AD_INSIGHT_FIELDS,
-              {
-                limit: 50,
-                level,
-                time_increment: 1,
-                date_preset: 'last_3d',
-                action_attribution_windows: '7d_click',
-                action_breakdowns: 'action_type',
-                filtering: [
-                  { field: parentIdsField, operator: 'IN', value: chunkIds },
-                ],
-              },
-              true,
+          // 1. Process last3dIds in chunks of 50
+          if (last3dIds.length > 0) {
+            this.logger.log(
+              `[Account ${accountId}] 📅 Fetching last_3d for ${last3dIds.length} ${entityName}s`,
             );
-            const insights = await fetchAll(cursor);
-            if (insights.length > 0) {
-              const upserted = await this.processDailyInsightsBatch(
-                insights,
-                levelEnum,
-                insightIdField,
-                relationFieldId,
-                insightModel,
-                prismaHelper,
-                today,
-              );
-              totalFetched += insights.length;
-              totalUpserted += upserted;
-            }
-          } catch (error: any) {
-            this.logger.error(
-              `❌ Account ${accountId} last_3d chunk error: ${parseMetaError(error).message}`,
-            );
-          }
-          await sleep(5000);
-        }
-      }
-
-      // 2. Process customItems in chunks by matching ranges
-      if (customItems.length > 0) {
-        this.logger.log(
-          `📅 Account ${accountId}: Fetching custom ranges for ${customItems.length} ${entityName}s`,
-        );
-        const groupedCustom = new Map<string, string[]>();
-        for (const item of customItems) {
-          const key = `${item.since}_${item.until}`;
-          if (!groupedCustom.has(key)) groupedCustom.set(key, []);
-          groupedCustom.get(key)!.push(item.parentId);
-        }
-
-        for (const [key, ids] of groupedCustom.entries()) {
-          const [since, until] = key.split('_');
-          for (const chunkIds of chunk(ids, 50)) {
-            try {
-              const cursor = await adAccount.getInsights(
-                AD_INSIGHT_FIELDS,
-                {
-                  limit: 100,
-                  level,
-                  time_increment: 1,
-                  action_attribution_windows: '7d_click',
-                  action_breakdowns: 'action_type',
-                  time_range: { since, until },
-                  filtering: [
-                    { field: parentIdsField, operator: 'IN', value: chunkIds },
-                  ],
-                },
-                true,
-              );
-              const insights = await fetchAll(cursor);
-              if (insights.length > 0) {
-                const upserted = await this.processDailyInsightsBatch(
-                  insights,
-                  levelEnum,
-                  insightIdField,
-                  relationFieldId,
-                  insightModel,
-                  prismaHelper,
-                  today,
+            for (const chunkIds of chunk(last3dIds, 50)) {
+              try {
+                const sleepMs = Math.floor(Math.random() * 10000) + 20000;
+                this.logger.log(
+                  `[Account ${accountId}] ⏳ Đang xử lý last_3d cho mẻ ${chunkIds.length} IDs... (Nghỉ ${Math.round(sleepMs / 1000)}s trước khi gọi API)`,
                 );
-                totalFetched += insights.length;
-                totalUpserted += upserted;
+                await sleep(sleepMs);
+
+                const cursor = await executeMetaApiWithRetry(
+                  () =>
+                    adAccount.getInsights(
+                      AD_INSIGHT_FIELDS,
+                      {
+                        limit: 50,
+                        level,
+                        time_increment: 1,
+                        time_range: {
+                          since: today.subtract(2, 'day').format('YYYY-MM-DD'),
+                          until: today.format('YYYY-MM-DD'),
+                        },
+                        action_attribution_windows: '7d_click',
+                        action_breakdowns: 'action_type',
+                        filtering: [
+                          {
+                            field: parentIdsField,
+                            operator: 'IN',
+                            value: chunkIds,
+                          },
+                        ],
+                      },
+                      true,
+                    ),
+                  { logger: this.logger },
+                );
+                const insights = await fetchAll(cursor, { sleepMs });
+
+                // Xoá dữ liệu TODAY cũ của cả mẻ để tránh rác nếu hôm nay không có số liệu
+                await (this.prisma[insightModel] as any).deleteMany({
+                  where: {
+                    [relationFieldId]: { in: chunkIds },
+                    range: InsightRange.TODAY,
+                  },
+                });
+
+                if (insights.length > 0) {
+                  const upserted = await this.processDailyInsightsBatch(
+                    insights,
+                    levelEnum,
+                    insightIdField,
+                    relationFieldId,
+                    insightModel,
+                    prismaHelper,
+                    today,
+                  );
+                  totalFetched += insights.length;
+                  totalUpserted += upserted;
+                }
+              } catch (error: any) {
+                this.logger.error(
+                  `[Account ${accountId}] ❌ last_3d chunk error: ${parseMetaError(error).message}`,
+                );
               }
-            } catch (error: any) {
-              this.logger.error(
-                `❌ Account ${accountId} custom chunk error: ${parseMetaError(error).message}`,
+              const chunkSleep = Math.floor(Math.random() * 10000) + 20000;
+              this.logger.log(
+                `[Account ${accountId}] 💤 Đã xong 1 mẻ last_3d. Nghỉ ${Math.round(chunkSleep / 1000)}s...`,
               );
+              await sleep(chunkSleep);
             }
-            await sleep(5000);
           }
-        }
-      }
+
+          // 2. Process customItems in chunks by matching ranges
+          if (customItems.length > 0) {
+            this.logger.log(
+              `[Account ${accountId}] 📅 Fetching custom ranges for ${customItems.length} ${entityName}s`,
+            );
+            const groupedCustom = new Map<string, string[]>();
+            for (const item of customItems) {
+              const key = `${item.since}_${item.until}`;
+              if (!groupedCustom.has(key)) groupedCustom.set(key, []);
+              groupedCustom.get(key)!.push(item.parentId);
+            }
+
+            for (const [key, ids] of groupedCustom.entries()) {
+              const [since, until] = key.split('_');
+              for (const chunkIds of chunk(ids, 50)) {
+                try {
+                  const sleepMs = Math.floor(Math.random() * 10000) + 20000;
+                  this.logger.log(
+                    `[Account ${accountId}] ⏳ Đang xử lý custom range cho mẻ ${chunkIds.length} IDs... (Nghỉ ${Math.round(sleepMs / 1000)}s trước khi gọi API)`,
+                  );
+                  await sleep(sleepMs);
+
+                  const cursor = await executeMetaApiWithRetry(
+                    () =>
+                      adAccount.getInsights(
+                        AD_INSIGHT_FIELDS,
+                        {
+                          limit: 100,
+                          level,
+                          time_increment: 1,
+                          action_attribution_windows: '7d_click',
+                          action_breakdowns: 'action_type',
+                          time_range: { since, until },
+                          filtering: [
+                            {
+                              field: parentIdsField,
+                              operator: 'IN',
+                              value: chunkIds,
+                            },
+                          ],
+                        },
+                        true,
+                      ),
+                    { logger: this.logger },
+                  );
+                  const insights = await fetchAll(cursor, { sleepMs });
+
+                  // Xoá dữ liệu TODAY cũ của cả mẻ để tránh rác nếu hôm nay không có số liệu
+                  await (this.prisma[insightModel] as any).deleteMany({
+                    where: {
+                      [relationFieldId]: { in: chunkIds },
+                      range: InsightRange.TODAY,
+                    },
+                  });
+
+                  if (insights.length > 0) {
+                    const upserted = await this.processDailyInsightsBatch(
+                      insights,
+                      levelEnum,
+                      insightIdField,
+                      relationFieldId,
+                      insightModel,
+                      prismaHelper,
+                      today,
+                    );
+                    totalFetched += insights.length;
+                    totalUpserted += upserted;
+                  }
+                } catch (error: any) {
+                  this.logger.error(
+                    `[Account ${accountId}] ❌ custom chunk error: ${parseMetaError(error).message}`,
+                  );
+                }
+                const chunkSleep = Math.floor(Math.random() * 10000) + 20000;
+                this.logger.log(
+                  `[Account ${accountId}] 💤 Đã xong 1 mẻ custom range. Nghỉ ${Math.round(chunkSleep / 1000)}s...`,
+                );
+                await sleep(chunkSleep);
+              }
+            }
+          }
+        }),
+      );
     }
     this.logger.log(
       `✅ DAILY DONE | fetched: ${totalFetched} | upserted: ${totalUpserted}`,
@@ -1090,20 +1174,24 @@ export class MetaCron implements OnModuleInit {
       for (const idsChunk of chunk(ids, 50)) {
         try {
           // ================= FETCH =================
-          const cursor = await adAccount.getInsights(
-            AD_INSIGHT_FIELDS,
-            {
-              limit: 50,
-              level: 'adset',
-              date_preset: 'maximum',
-              action_attribution_windows: '7d_click',
-              action_breakdowns: 'action_type',
-              breakdowns: ['age', 'gender'],
-              filtering: [
-                { field: 'adset.id', operator: 'IN', value: idsChunk },
-              ],
-            },
-            true,
+          const cursor = await executeMetaApiWithRetry(
+            () =>
+              adAccount.getInsights(
+                AD_INSIGHT_FIELDS,
+                {
+                  limit: 50,
+                  level: 'adset',
+                  date_preset: 'maximum',
+                  action_attribution_windows: '7d_click',
+                  action_breakdowns: 'action_type',
+                  breakdowns: ['age', 'gender'],
+                  filtering: [
+                    { field: 'adset.id', operator: 'IN', value: idsChunk },
+                  ],
+                },
+                true,
+              ),
+            { logger: this.logger },
           );
 
           const insights = await fetchAll(cursor);
@@ -1612,10 +1700,14 @@ export class MetaCron implements OnModuleInit {
 
         for (const hashChunk of chunk(hashes, 50)) {
           try {
-            const cursor = await adAccount.getAdImages(AD_IMAGE_FIELDS, {
-              limit: 50,
-              hashes: hashChunk,
-            });
+            const cursor = await executeMetaApiWithRetry(
+              () =>
+                adAccount.getAdImages(AD_IMAGE_FIELDS, {
+                  limit: 50,
+                  hashes: hashChunk,
+                }),
+              { logger: this.logger },
+            );
 
             const images = await fetchAll(cursor);
 
