@@ -313,8 +313,9 @@ export async function fetchAll(
   const result: any[] = [];
   if (!cursor) return result;
 
-  const sleepMs = options?.sleepMs ?? 60000; // Mặc định nghỉ 30s giữa các page để tránh rate limit
-  const maxRetries = options?.maxRetries ?? 1;
+  const sleepMs = options?.sleepMs ?? 1000; // Nghỉ 1s giữa các page bình thường để tránh dồn dập
+  const rateLimitSleepMs = 60000; // Khi dính Rate Limit sẽ nghỉ 60s
+  const maxRetries = options?.maxRetries ?? 2;
 
   let page = cursor;
   let retry = 0;
@@ -328,13 +329,6 @@ export async function fetchAll(
     // 2. Vòng lặp lấy các trang tiếp theo
     while (page.hasNext()) {
       // Nghỉ trước khi fetch trang tiếp theo theo yêu cầu
-      console.log(
-        `[Meta Fetch] Đang fetch trang tiếp theo... (Retry ${retry})`,
-        {
-          sleepMs,
-          context: options?.context,
-        },
-      );
       await sleep(sleepMs);
 
       try {
@@ -350,10 +344,11 @@ export async function fetchAll(
         // Xử lý Rate Limit (Lỗi 4 hoặc 17)
         if ([4, 17].includes(metaErr.code) && retry < maxRetries) {
           retry++;
+          const waitTime = rateLimitSleepMs * retry;
           console.warn(
-            `[Meta] Rate limit hit. Retrying in ${sleepMs * retry}ms... (Attempt ${retry})`,
+            `[Meta] Rate limit hit. Retrying in ${waitTime}ms... (Attempt ${retry})`,
           );
-          await sleep(sleepMs * retry);
+          await sleep(waitTime);
           // Quay lại đầu vòng lặp while để thử lại page.next()
           continue;
         }

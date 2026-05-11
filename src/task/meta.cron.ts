@@ -31,6 +31,7 @@ import dayjs from 'dayjs';
 
 import { Cron } from '@nestjs/schedule';
 import { CreativeStatus, InsightRange, LevelInsight } from '@prisma/client';
+import pLimit from 'p-limit';
 import { MetaTransformHelper } from 'src/common/helpers/meta-transform.helper';
 import { PrismaBatchHelper } from 'src/common/helpers/prisma-batch.helper';
 
@@ -57,16 +58,6 @@ export class MetaCron implements OnModuleInit {
 
   async onModuleInit() {
     this.logger.log('🚀 TaskCron initialized');
-    // await this.syncMaxCampaignInsightsJob();
-    // await this.syncMaxAdsetInsightsJob();
-    await this.syncMaxAdInsightsJob();
-
-    // TEST
-    await this.syncDailyCampaignInsightsJob();
-    await this.syncDailyAdsetInsightsJob();
-    await this.syncDailyAdInsightsJob();
-
-    // await this.syncMaxAdsetAudienceInsightsJob();
   }
 
   /**
@@ -204,28 +195,43 @@ export class MetaCron implements OnModuleInit {
   ) {
     const prismaHelper = new PrismaBatchHelper(this.prisma);
 
-    const campaignData = campaigns.map((c) =>
+    // 1. Deduplicate by ID to prevent parallel upsert conflicts
+    const uniqueCampaigns = Array.from(
+      new Map(campaigns.map((c) => [c.id, c])).values(),
+    );
+    const uniqueAdSets = Array.from(
+      new Map(adsets.map((as) => [as.id, as])).values(),
+    );
+    const uniqueAds = Array.from(
+      new Map(ads.map((ad) => [ad.id, ad])).values(),
+    );
+
+    const campaignData = uniqueCampaigns.map((c) =>
       MetaTransformHelper.campaign(c, accountId),
     );
-    const adsetData = adsets.map((as) =>
+    const adsetData = uniqueAdSets.map((as) =>
       MetaTransformHelper.adset(as, accountId, as.campaign_id),
     );
-    const adData = ads.map((ad) =>
+    const adData = uniqueAds.map((ad) =>
       MetaTransformHelper.ad(ad, accountId, ad.campaign_id, ad.adset_id),
     );
 
     const creativeData = [];
-    for (const ad of ads) {
+    for (const ad of uniqueAds) {
       const creative = MetaTransformHelper.creative(ad, accountId);
       if (creative) creativeData.push(creative);
     }
 
+    const uniqueCreatives = Array.from(
+      new Map(creativeData.map((c) => [c.id, c])).values(),
+    );
+
     this.logger.log(
-      `📦 Data: campaign=${campaignData.length}, adset=${adsetData.length}, ad=${adData.length}`,
+      `📦 Finalizing Data: campaign=${campaignData.length}, adset=${adsetData.length}, ad=${adData.length}`,
     );
 
     const pageIds = [
-      ...new Set(creativeData.map((c) => c.pageId).filter(Boolean)),
+      ...new Set(uniqueCreatives.map((c) => c.pageId).filter(Boolean)),
     ];
 
     const videoMap = new Map<string, any>();
@@ -237,7 +243,7 @@ export class MetaCron implements OnModuleInit {
 
     const fanpageMap = new Map(fanpages.map((f) => [f.id, f]));
 
-    for (const item of creativeData) {
+    for (const item of uniqueCreatives) {
       // ✅ map systemPageId
       if (item.pageId && fanpageMap.has(item.pageId)) {
         item.systemPageId = item.pageId;
@@ -301,7 +307,7 @@ export class MetaCron implements OnModuleInit {
     );
 
     await prismaHelper.upsertMany(
-      creativeData,
+      uniqueCreatives,
       (item) =>
         this.prisma.creative.upsert({
           where: { id: item.id },
@@ -327,7 +333,7 @@ export class MetaCron implements OnModuleInit {
      MAIN SYNC
   ===================================================== */
   async syncCampaignData() {
-    this.logger.log('⏰ Sync Campaign Data...');
+    this.logger.log('⏰ Starting Batch Sync Campaign Data...');
     this.init();
 
     try {
@@ -335,168 +341,262 @@ export class MetaCron implements OnModuleInit {
         where: { needsReauth: false },
       });
 
-      for (const account of accounts) {
-        try {
-          const adAccount = new AdAccount(account.id);
+      // 🚀 THIẾT LẬP GIỚI HẠN: Chạy song song 5 account cùng lúc
+      const limit = pLimit(30);
 
-          const lastCampaign = await this.prisma.campaign.findFirst({
-            where: { accountId: account.id },
-            orderBy: { updatedAt: 'desc' },
-            select: { updatedAt: true },
-          });
-
-          const lastSyncUnix = lastCampaign
-            ? Math.floor(
-                (new Date(lastCampaign.updatedAt).getTime() - 5 * 60 * 1000) /
-                  1000,
-              )
-            : Math.floor((Date.now() - 30 * 24 * 60 * 60 * 1000) / 1000);
-
-          const filter = {
-            limit: 50,
-            filtering: [
-              {
-                field: 'updated_time',
-                operator: 'GREATER_THAN',
-                value: lastSyncUnix,
-              },
-            ],
-          };
-
-          // 1. Fetch Campaigns Flat
-          const campaignsCursor = await executeMetaApiWithRetry(
-            () => adAccount.getCampaigns(CAMPAIGN_FIELDS, filter, true),
-            { logger: this.logger },
-          );
-          const campaigns = await fetchAll(campaignsCursor);
-
-          // 2. Fetch AdSets Flat
-          const adsetsCursor = await executeMetaApiWithRetry(
-            () => adAccount.getAdSets(ADSET_FIELDS, filter, true),
-            { logger: this.logger },
-          );
-          const adsets = await fetchAll(adsetsCursor);
-
-          // 3. Fetch Ads Flat (with creative)
-          const adFields = [
-            ...AD_FIELDS.filter((f) => f !== 'creative'),
-            `creative{${CREATIVE_FIELDS.join(',')}}`,
-          ];
-          const adsCursor = await executeMetaApiWithRetry(
-            () => adAccount.getAds(adFields, filter, true),
-            { logger: this.logger },
-          );
-          const ads = await fetchAll(adsCursor);
-
-          // ------------------------------------------------------------------------------------------------
-          // FIX: DYNAMICALLY FETCH MISSING PARENTS TO PREVENT FOREIGN KEY ERRORS
-          // ------------------------------------------------------------------------------------------------
-
-          // 1. Missing Campaigns
-          const fetchedCampaignIds = new Set(campaigns.map((c) => c.id));
-          const requiredCampaignIds = [
-            ...new Set([
-              ...adsets.map((as) => as.campaign_id),
-              ...ads.map((ad) => ad.campaign_id),
-            ]),
-          ].filter((id) => id && !fetchedCampaignIds.has(id));
-
-          if (requiredCampaignIds.length > 0) {
-            const existingCampaignIds = await this.prisma.campaign
-              .findMany({
-                where: { id: { in: requiredCampaignIds } },
-                select: { id: true },
-              })
-              .then((r) => new Set(r.map((x) => x.id)));
-
-            const missingCampaignIds = requiredCampaignIds.filter(
-              (id) => !existingCampaignIds.has(id),
+      const syncTasks = accounts.map((account) => {
+        return limit(async () => {
+          try {
+            const adAccount = new AdAccount(account.id);
+            const lastSyncUnix = Math.floor(
+              (Date.now() - 90 * 24 * 60 * 60 * 1000) / 1000,
             );
 
-            if (missingCampaignIds.length > 0) {
-              this.logger.log(
-                `⚠️ Fetching ${missingCampaignIds.length} missing campaigns...`,
-              );
-              for (const chunkIds of chunk(missingCampaignIds, 50)) {
-                const missingCursor = await executeMetaApiWithRetry(
-                  () =>
-                    adAccount.getCampaigns(
-                      CAMPAIGN_FIELDS,
-                      {
-                        limit: 50,
-                        filtering: [
-                          { field: 'id', operator: 'IN', value: chunkIds },
-                        ],
-                      },
-                      true,
-                    ),
-                  { logger: this.logger },
-                );
-                campaigns.push(...(await fetchAll(missingCursor)));
-              }
-            }
-          }
-
-          // 2. Missing AdSets
-          const fetchedAdSetIds = new Set(adsets.map((as) => as.id));
-          const requiredAdSetIds = [
-            ...new Set(ads.map((ad) => ad.adset_id)),
-          ].filter((id) => id && !fetchedAdSetIds.has(id));
-
-          if (requiredAdSetIds.length > 0) {
-            const existingAdSetIds = await this.prisma.adSet
-              .findMany({
-                where: { id: { in: requiredAdSetIds } },
-                select: { id: true },
-              })
-              .then((r) => new Set(r.map((x) => x.id)));
-
-            const missingAdSetIds = requiredAdSetIds.filter(
-              (id) => !existingAdSetIds.has(id),
+            this.logger.log(
+              `🔄 [${account.id}] Syncing data updated since ${dayjs.unix(lastSyncUnix).format('YYYY-MM-DD HH:mm:ss')}`,
             );
 
-            if (missingAdSetIds.length > 0) {
+            const baseFilter = {
+              limit: 50,
+              filtering: [
+                {
+                  field: 'updated_time',
+                  operator: 'GREATER_THAN',
+                  value: lastSyncUnix,
+                },
+              ],
+            };
+
+            // 1. FETCH CAMPAIGNS (90 NGÀY)
+            const campaignsCursor = await executeMetaApiWithRetry(
+              () => adAccount.getCampaigns(CAMPAIGN_FIELDS, baseFilter, true),
+              { logger: this.logger },
+            );
+            const allCampaigns = await fetchAll(campaignsCursor);
+            const campaignIds = allCampaigns.map((c) => c.id);
+
+            const allAdSets: any[] = [];
+            const allAds: any[] = [];
+
+            // 2. FETCH ADSETS & ADS THEO CAMPAIGN ID (RELATIONAL)
+            // Lấy toàn bộ con của các campaign vừa tìm thấy để đảm bảo tính đầy đủ
+            if (campaignIds.length > 0) {
               this.logger.log(
-                `⚠️ Fetching ${missingAdSetIds.length} missing adsets...`,
+                `📂 [${account.id}] Fetching children for ${campaignIds.length} active campaigns...`,
               );
-              for (const chunkIds of chunk(missingAdSetIds, 50)) {
-                const missingCursor = await executeMetaApiWithRetry(
-                  () =>
-                    adAccount.getAdSets(
-                      ADSET_FIELDS,
-                      {
-                        limit: 50,
-                        filtering: [
-                          { field: 'id', operator: 'IN', value: chunkIds },
-                        ],
-                      },
-                      true,
-                    ),
-                  { logger: this.logger },
-                );
-                adsets.push(...(await fetchAll(missingCursor)));
+              for (const chunkIds of chunk(campaignIds, 50)) {
+                const [asCursor, aCursor] = await Promise.all([
+                  executeMetaApiWithRetry(
+                    () =>
+                      adAccount.getAdSets(
+                        ADSET_FIELDS,
+                        {
+                          limit: 50,
+                          filtering: [
+                            {
+                              field: 'campaign.id',
+                              operator: 'IN',
+                              value: chunkIds,
+                            },
+                          ],
+                        },
+                        true,
+                      ),
+                    { logger: this.logger },
+                  ),
+                  executeMetaApiWithRetry(
+                    () => {
+                      const adFields = [
+                        ...AD_FIELDS.filter((f) => f !== 'creative'),
+                        `creative{${CREATIVE_FIELDS.join(',')}}`,
+                      ];
+                      return adAccount.getAds(
+                        adFields,
+                        {
+                          limit: 50,
+                          filtering: [
+                            {
+                              field: 'campaign.id',
+                              operator: 'IN',
+                              value: chunkIds,
+                            },
+                          ],
+                        },
+                        true,
+                      );
+                    },
+                    { logger: this.logger },
+                  ),
+                ]);
+
+                const [asData, aData] = await Promise.all([
+                  fetchAll(asCursor),
+                  fetchAll(aCursor),
+                ]);
+                allAdSets.push(...asData);
+                allAds.push(...aData);
               }
             }
+
+            // 3. FETCH FLAT BACKUP (CẬP NHẬT LẺ TẺ)
+            // Fetch thêm các AdSet/Ad update trong 90 ngày ở account level
+            // Điều này quan trọng để bắt được các AdSet thay đổi trong các Campaign "cũ" (> 90 ngày)
+            const [extraAdsetsCursor, extraAdsCursor] = await Promise.all([
+              executeMetaApiWithRetry(
+                () => adAccount.getAdSets(ADSET_FIELDS, baseFilter, true),
+                { logger: this.logger },
+              ),
+              executeMetaApiWithRetry(
+                () => {
+                  const adFields = [
+                    ...AD_FIELDS.filter((f) => f !== 'creative'),
+                    `creative{${CREATIVE_FIELDS.join(',')}}`,
+                  ];
+                  return adAccount.getAds(adFields, baseFilter, true);
+                },
+                { logger: this.logger },
+              ),
+            ]);
+
+            const [extraAdsets, extraAds] = await Promise.all([
+              fetchAll(extraAdsetsCursor),
+              fetchAll(extraAdsCursor),
+            ]);
+
+            // Merge và loại bỏ trùng lặp
+            const adsetIds = new Set(allAdSets.map((as) => as.id));
+            for (const as of extraAdsets) {
+              if (!adsetIds.has(as.id)) allAdSets.push(as);
+            }
+
+            const adIds = new Set(allAds.map((ad) => ad.id));
+            for (const ad of extraAds) {
+              if (!adIds.has(ad.id)) allAds.push(ad);
+            }
+
+            // ------------------------------------------------------------------------------------------------
+            // 🛡️ BẢO VỆ TOÀN VẸN DỮ LIỆU (MISSING PARENT FETCHING)
+            // Nếu AdSet/Ad trỏ về Campaign/AdSet chưa có trong DB, ta phải fetch bổ sung để tránh lỗi Foreign Key
+            // ------------------------------------------------------------------------------------------------
+
+            // 1. Fetch Campaign thiếu
+            const fetchedCampaignIds = new Set(allCampaigns.map((c) => c.id));
+            const requiredCampaignIds = [
+              ...new Set([
+                ...allAdSets.map((as) => as.campaign_id),
+                ...allAds.map((ad) => ad.campaign_id),
+              ]),
+            ].filter((id) => id && !fetchedCampaignIds.has(id));
+
+            if (requiredCampaignIds.length > 0) {
+              const existingInDb = await this.prisma.campaign
+                .findMany({
+                  where: { id: { in: requiredCampaignIds } },
+                  select: { id: true },
+                })
+                .then((r) => new Set(r.map((x) => x.id)));
+
+              const missingCampaignIds = requiredCampaignIds.filter(
+                (id) => !existingInDb.has(id),
+              );
+
+              if (missingCampaignIds.length > 0) {
+                this.logger.log(
+                  `⚠️ [${account.id}] Fetching ${missingCampaignIds.length} missing parent campaigns...`,
+                );
+                for (const chunkIds of chunk(missingCampaignIds, 50)) {
+                  const cursor = await executeMetaApiWithRetry(
+                    () =>
+                      adAccount.getCampaigns(
+                        CAMPAIGN_FIELDS,
+                        {
+                          limit: 50,
+                          filtering: [
+                            { field: 'id', operator: 'IN', value: chunkIds },
+                          ],
+                        },
+                        true,
+                      ),
+                    { logger: this.logger },
+                  );
+                  allCampaigns.push(...(await fetchAll(cursor)));
+                }
+              }
+            }
+
+            // 2. Fetch AdSet thiếu
+            const fetchedAdSetIds = new Set(allAdSets.map((as) => as.id));
+            const requiredAdSetIds = [
+              ...new Set(allAds.map((ad) => ad.adset_id)),
+            ].filter((id) => id && !fetchedAdSetIds.has(id));
+
+            if (requiredAdSetIds.length > 0) {
+              const existingInDb = await this.prisma.adSet
+                .findMany({
+                  where: { id: { in: requiredAdSetIds } },
+                  select: { id: true },
+                })
+                .then((r) => new Set(r.map((x) => x.id)));
+
+              const missingAdSetIds = requiredAdSetIds.filter(
+                (id) => !existingInDb.has(id),
+              );
+
+              if (missingAdSetIds.length > 0) {
+                this.logger.log(
+                  `⚠️ [${account.id}] Fetching ${missingAdSetIds.length} missing parent adsets...`,
+                );
+                for (const chunkIds of chunk(missingAdSetIds, 50)) {
+                  const cursor = await executeMetaApiWithRetry(
+                    () =>
+                      adAccount.getAdSets(
+                        ADSET_FIELDS,
+                        {
+                          limit: 50,
+                          filtering: [
+                            { field: 'id', operator: 'IN', value: chunkIds },
+                          ],
+                        },
+                        true,
+                      ),
+                    { logger: this.logger },
+                  );
+                  allAdSets.push(...(await fetchAll(cursor)));
+                }
+              }
+            }
+
+            // 2. LƯU VÀO DATABASE
+            this.logger.log(
+              `📊 [${account.id}] Final: ${allCampaigns.length} campaigns, ${allAdSets.length} adsets, ${allAds.length} ads`,
+            );
+            await this.upsertFlatStructure(
+              allCampaigns,
+              allAdSets,
+              allAds,
+              account.id,
+            );
+
+            // Cập nhật lastFetchedAt sau khi thành công
+            await this.prisma.account.update({
+              where: { id: account.id },
+              data: { lastFetchedAt: new Date() },
+            });
+          } catch (error) {
+            this.logger.error(
+              `❌ Account ${account.id}: ${parseMetaError(error).message}`,
+            );
           }
-          // ------------------------------------------------------------------------------------------------
+        });
+      });
 
-          this.logger.log(
-            `📊 Account ${account.id} → ${campaigns.length} campaigns, ${adsets.length} adsets, ${ads.length} ads`,
-          );
-
-          await this.upsertFlatStructure(campaigns, adsets, ads, account.id);
-
-          await sleep(1000); // tránh spam API
-        } catch (error) {
-          const metaError = parseMetaError(error);
-          this.logger.error(`❌ Account ${account.id}: ${metaError.message}`);
-        }
-      }
+      await Promise.all(syncTasks);
+      this.logger.log('✅ Batch Sync Campaign Data Completed.');
     } catch (err) {
+      this.logger.error('🔥 Critical Sync Failure', err);
       throw new InternalServerErrorException(parseMetaError(err));
     }
   }
-
   private async syncMaxInsightsGeneric(
     entityName: string,
     prismaModel: 'campaign' | 'adSet' | 'ad',
@@ -609,16 +709,13 @@ export class MetaCron implements OnModuleInit {
             `[Account ${accountId}] ➡️ ${ids.length} ${entityName}s`,
           );
 
-          for (const idsChunk of chunk(ids, 50)) {
+          for (const idsChunk of chunk(ids, 300)) {
             try {
               // 1. Chuyển sang vòng lặp for...of để chạy từng Job một
               for (const job of JOBS) {
-                // Random sleep 20s - 30s trước mỗi lần gọi API
-                const sleepMs = Math.floor(Math.random() * 10000) + 20000;
                 this.logger.log(
-                  `[Account ${accountId}] ⏳ Đang xử lý Job: ${job.range} cho mẻ ${idsChunk.length} IDs... (Nghỉ ${Math.round(sleepMs / 1000)}s trước khi gọi API)`,
+                  `[Account ${accountId}] ⏳ Đang xử lý Job: ${job.range} cho mẻ ${idsChunk.length} IDs...`,
                 );
-                await sleep(sleepMs);
 
                 const cursor = await executeMetaApiWithRetry(
                   () =>
@@ -643,7 +740,7 @@ export class MetaCron implements OnModuleInit {
                   { logger: this.logger },
                 );
 
-                const insights = await fetchAll(cursor, { sleepMs });
+                const insights = await fetchAll(cursor);
 
                 // Luôn xoá dữ liệu cũ của cả mẻ để loại bỏ rác (ví dụ: data TODAY, 3DAY cũ không còn data mới)
                 await (this.prisma[insightModel] as any).deleteMany({
@@ -877,13 +974,11 @@ export class MetaCron implements OnModuleInit {
             this.logger.log(
               `[Account ${accountId}] 📅 Fetching last_3d for ${last3dIds.length} ${entityName}s`,
             );
-            for (const chunkIds of chunk(last3dIds, 50)) {
+            for (const chunkIds of chunk(last3dIds, 300)) {
               try {
-                const sleepMs = Math.floor(Math.random() * 10000) + 20000;
                 this.logger.log(
-                  `[Account ${accountId}] ⏳ Đang xử lý last_3d cho mẻ ${chunkIds.length} IDs... (Nghỉ ${Math.round(sleepMs / 1000)}s trước khi gọi API)`,
+                  `[Account ${accountId}] ⏳ Đang xử lý last_3d cho mẻ ${chunkIds.length} IDs...`,
                 );
-                await sleep(sleepMs);
 
                 const cursor = await executeMetaApiWithRetry(
                   () =>
@@ -911,7 +1006,7 @@ export class MetaCron implements OnModuleInit {
                     ),
                   { logger: this.logger },
                 );
-                const insights = await fetchAll(cursor, { sleepMs });
+                const insights = await fetchAll(cursor);
 
                 // Xoá dữ liệu TODAY cũ của cả mẻ để tránh rác nếu hôm nay không có số liệu
                 await (this.prisma[insightModel] as any).deleteMany({
@@ -961,13 +1056,11 @@ export class MetaCron implements OnModuleInit {
 
             for (const [key, ids] of groupedCustom.entries()) {
               const [since, until] = key.split('_');
-              for (const chunkIds of chunk(ids, 50)) {
+              for (const chunkIds of chunk(ids, 300)) {
                 try {
-                  const sleepMs = Math.floor(Math.random() * 10000) + 20000;
                   this.logger.log(
-                    `[Account ${accountId}] ⏳ Đang xử lý custom range cho mẻ ${chunkIds.length} IDs... (Nghỉ ${Math.round(sleepMs / 1000)}s trước khi gọi API)`,
+                    `[Account ${accountId}] ⏳ Đang xử lý custom range cho mẻ ${chunkIds.length} IDs...`,
                   );
-                  await sleep(sleepMs);
 
                   const cursor = await executeMetaApiWithRetry(
                     () =>
@@ -992,7 +1085,7 @@ export class MetaCron implements OnModuleInit {
                       ),
                     { logger: this.logger },
                   );
-                  const insights = await fetchAll(cursor, { sleepMs });
+                  const insights = await fetchAll(cursor);
 
                   // Xoá dữ liệu TODAY cũ của cả mẻ để tránh rác nếu hôm nay không có số liệu
                   await (this.prisma[insightModel] as any).deleteMany({
@@ -1171,7 +1264,7 @@ export class MetaCron implements OnModuleInit {
         `➡️ Account ${accountId} - ${ids.length} adSets Audience`,
       );
 
-      for (const idsChunk of chunk(ids, 50)) {
+      for (const idsChunk of chunk(ids, 300)) {
         try {
           // ================= FETCH =================
           const cursor = await executeMetaApiWithRetry(
