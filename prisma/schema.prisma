@@ -1746,3 +1746,15 @@ model DriveFile {
     drive_permission Boolean?
     last_seen_at     DateTime?
 }
+
+model SystemConfig {
+    id          String   @id @default(uuid())
+    key         String   @unique
+    value       Json
+    description String?
+    createdAt   DateTime @default(now())
+    updatedAt   DateTime @updatedAt
+
+    @@map("system_configs")
+}
+

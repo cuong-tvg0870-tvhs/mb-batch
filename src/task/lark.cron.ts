@@ -1,5 +1,4 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { Cron, CronExpression } from '@nestjs/schedule';
 import { AssetType, LarkRecord, Prisma } from '@prisma/client';
 import axios, { AxiosRequestConfig } from 'axios';
 import { FacebookAdsApi } from 'facebook-nodejs-business-sdk';
@@ -74,11 +73,12 @@ export class LarkCron implements OnModuleInit {
   }
 
   async onModuleInit() {
-    if (!fs.existsSync(this.BASE_DIR)) {
-      fs.mkdirSync(this.BASE_DIR, { recursive: true });
-    }
+    // if (!fs.existsSync(this.BASE_DIR)) {
+    //   fs.mkdirSync(this.BASE_DIR, { recursive: true });
+    // }
 
     this.logger.log('🚀 Lark Cron Service Initialized');
+    await this.createFolderMeta();
   }
 
   async cleanupDuplicateFolders() {
@@ -197,7 +197,7 @@ export class LarkCron implements OnModuleInit {
   /* -------------------------------------------------------------------------- */
 
   // 1. CRON SYNC LARK & DRIVE: Chạy liên tục mỗi 5 phút
-  @Cron(CronExpression.EVERY_5_MINUTES, { timeZone: 'Asia/Ho_Chi_Minh' })
+  //@Cron(CronExpression.EVERY_5_MINUTES, { timeZone: 'Asia/Ho_Chi_Minh' })
   async handleSyncWorkflow() {
     this.logger.log(
       '🔄 [Sync] Starting periodic data sync (Lark <-> Drive)...',
@@ -223,7 +223,7 @@ export class LarkCron implements OnModuleInit {
   }
 
   // 2. CRON META UPLOAD: Chạy mỗi giờ (phút thứ 0 của mỗi giờ) để xử lý đúng 30 files
-  @Cron('0 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  //@Cron('0 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async handleMetaUploadWorkflow() {
     this.logger.log(
       '🚀 [Meta] Starting hourly Meta upload (Limit: 30 items)...',
@@ -599,6 +599,9 @@ export class LarkCron implements OnModuleInit {
     });
 
     const tree = this.buildLogicalTree(records);
+
+    console.log(JSON.stringify(tree, null, 2));
+    return;
     const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
 
     // Level 1: Projects
@@ -636,7 +639,6 @@ export class LarkCron implements OnModuleInit {
         }
       });
     });
-
     await this.ensureFoldersInBatch(productReqs, api);
   }
 
@@ -680,6 +682,7 @@ export class LarkCron implements OnModuleInit {
       (r) =>
         !existedDb.some((e) => e.name === r.name && e.parentId === r.parentId),
     );
+
     if (toCreate.length === 0) return results;
 
     for (let i = 0; i < toCreate.length; i += 50) {

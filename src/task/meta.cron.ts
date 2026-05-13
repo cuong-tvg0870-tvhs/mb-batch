@@ -254,7 +254,7 @@ export class MetaCron implements OnModuleInit {
         videoMap.set(item.videoId, {
           id: item.videoId,
           accountId: item.accountId,
-          thumbnailUrl: item.thumbnailUrl,
+          thumbnailUrl: item?.thumbnailUrl,
         });
       }
 
@@ -269,7 +269,7 @@ export class MetaCron implements OnModuleInit {
             id: key,
             hash: item.imageHash,
             accountId: item.accountId,
-            url: item.thumbnailUrl,
+            url: item?.thumbnailUrl,
           });
           item.imageId = key;
         }
