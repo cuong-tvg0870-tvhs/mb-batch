@@ -9,6 +9,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { pipeline } from 'stream/promises';
 import { extractDriveId, mapRecord } from './lark-sync.utils';
 import pLimit from 'p-limit';
+import { chunk } from '../../common/utils';
 import { MetaFolderResponse, FolderRequest } from './lark-sync.constants';
 
 interface LogicalProduct {
@@ -324,7 +325,11 @@ export class LarkSyncService {
       });
 
       if (driveOps.length > 0) {
-        await this.prisma.$transaction(driveOps);
+        // Chia nhỏ transaction để tránh timeout khi xử lý quá nhiều file cùng lúc
+        const batches = chunk(driveOps, 200);
+        for (const batchOps of batches) {
+          await this.prisma.$transaction(batchOps);
+        }
       }
 
       pageToken = res.data.nextPageToken || undefined;

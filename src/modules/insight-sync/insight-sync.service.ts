@@ -58,11 +58,13 @@ export class InsightSyncService {
       const parentInsightIdField = this.getInsightIdFieldOnParent(range);
       const where: any = {
         accountId,
-        OR: [
-          { status: { in: ['ACTIVE', 'IN_PROCESS'] } },
-          { [parentInsightIdField]: null },
-        ],
+        OR: [{ status: { in: ['ACTIVE', 'IN_PROCESS'] } }],
       };
+      
+      // Nếu có field mapping tương ứng mới check NULL để "Fill the gaps"
+      if (parentInsightIdField) {
+        where.OR.push({ [parentInsightIdField]: null });
+      }
 
       const existingEntities = (await executeDbWithRetry(() =>
         (this.prisma[parentModel] as any).findMany({
@@ -323,6 +325,10 @@ export class InsightSyncService {
   ) {
     const parentModel = this.getParentModel(level);
     const parentInsightIdField = this.getInsightIdFieldOnParent(range);
+    
+    // Nếu không có field tương ứng trên model cha (ví dụ range DAILY) thì bỏ qua việc update relation
+    if (!parentInsightIdField) return;
+
     const relationFieldId = this.getRelationField(level);
 
     // After createManySafe, we need to fetch the IDs of the newly created insights
