@@ -1,5 +1,5 @@
 import { BullModule } from '@nestjs/bull';
-import { Module } from '@nestjs/common';
+import { Logger, Module, OnModuleInit } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { configLoads } from './config';
@@ -37,6 +37,15 @@ export const global_modules = [
     MediaSyncModule,
   ],
 })
-export class AppModule {
-  constructor() {}
+export class AppModule implements OnModuleInit {
+  private readonly logger = new Logger(AppModule.name);
+
+  constructor(private readonly configService: ConfigService) {}
+
+  onModuleInit() {
+    const host = this.configService.get('REDIS_HOST', 'localhost');
+    const port = this.configService.get('REDIS_PORT', 6379);
+    this.logger.log(`[Redis] Attempting to use Redis at ${host}:${port}`);
+    this.logger.log('🚀 mb-batch application initialized and modules loaded');
+  }
 }
