@@ -1,11 +1,11 @@
 import { InjectQueue } from '@nestjs/bull';
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { Queue } from 'bull';
 import { META_SYNC_JOBS, META_SYNC_QUEUE } from './meta-sync.constants';
 
 @Injectable()
-export class MetaSyncScheduler {
+export class MetaSyncScheduler implements OnModuleInit {
   private readonly logger = new Logger(MetaSyncScheduler.name);
 
   constructor(
@@ -15,7 +15,7 @@ export class MetaSyncScheduler {
   async onModuleInit() {
     this.logger.log('🚀 MetaSyncScheduler Initialized');
     // Initial sync on startup
-    // await this.scheduleFolderVideoSync();
+    await this.scheduleCampaignCoreSync();
   }
 
   /**
