@@ -309,7 +309,7 @@ export class MediaCron implements OnModuleInit {
               id: creative.id,
               name: creative.name,
               type:
-                creative.type === 'VIDEO' ? AssetType.VIDEO : AssetType.IMAGE,
+                creative.type === 'Video' ? AssetType.VIDEO : AssetType.IMAGE,
               width: creative.width,
               height: creative.height,
               thumbnail: creative.thumbnail,
