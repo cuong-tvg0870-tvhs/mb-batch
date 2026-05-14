@@ -22,16 +22,15 @@ export class InsightSyncScheduler implements OnModuleInit {
 
   async onModuleInit() {
     // Trigger immediate sync in development mode for testing
-    if (process.env.NODE_ENV !== 'production') {
-      this.logger.log('🚀 Triggering immediate sync for development...');
-      // Wait a bit for everything to be ready
-      setTimeout(() => {
-       
-        this.scheduleAudienceSync().catch((err) =>
-          this.logger.error(`Failed to trigger immediate audience sync: ${err.message}`),
-        );
-      }, 5000);
-    }
+    // if (process.env.NODE_ENV !== 'production') {
+    //   this.logger.log('🚀 Triggering immediate sync for development...');
+    //   // Wait a bit for everything to be ready
+    //   setTimeout(() => {
+    //     this.scheduleAudienceSync().catch((err) =>
+    //       this.logger.error(`Failed to trigger immediate audience sync: ${err.message}`),
+    //     );
+    //   }, 5000);
+    // }
   }
 
   /**

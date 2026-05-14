@@ -3,6 +3,9 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { configLoads } from './config';
+import { InsightSyncModule } from './modules/insight-sync/insight-sync.module';
+import { LarkSyncModule } from './modules/lark-sync/lark-sync.module';
+import { MediaSyncModule } from './modules/media-sync/media-sync.module';
 import { MetaSyncModule } from './modules/meta-sync/meta-sync.module';
 
 export const global_modules = [
@@ -18,6 +21,7 @@ export const global_modules = [
       redis: {
         host: configService.get<string>('REDIS_HOST', 'localhost'),
         port: Number(configService.get<number>('REDIS_PORT', 6379)),
+        maxRetriesPerRequest: null,
       },
     }),
     inject: [ConfigService],
@@ -27,10 +31,10 @@ export const global_modules = [
 @Module({
   imports: [
     ...global_modules,
-    // InsightSyncModule,
+    InsightSyncModule,
     MetaSyncModule,
-    // LarkSyncModule,
-    // MediaSyncModule,
+    LarkSyncModule,
+    MediaSyncModule,
   ],
 })
 export class AppModule {
