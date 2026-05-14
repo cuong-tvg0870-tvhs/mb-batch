@@ -37,13 +37,18 @@ export function metaError(e: any) {
   return e?.response || e;
 }
 
-export function isRateLimit(e: any) {
+export function isRetryableError(e: any) {
   const err = metaError(e);
-  console.log(err.code);
+  // Rate limit codes: 4, 17, 32, 613, 80004
+  // Transient/Server codes: 1 (API Unknown), 2 (API Service)
+  const retryableCodes = [1, 2, 4, 17, 32, 613, 80004];
+  
   return (
-    [4, 17, 32, 613, 80004].includes(err?.code) ||
+    retryableCodes.includes(err?.code) ||
+    err?.is_transient === true ||
     err?.error_subcode === 2446079 ||
-    err?.message?.includes('reduce the amount of data')
+    err?.message?.includes('reduce the amount of data') ||
+    err?.message?.includes('unexpected error')
   );
 }
 
@@ -159,11 +164,49 @@ export async function executeMetaApiWithRetry<T>(
     try {
       return await action();
     } catch (error: any) {
-      if (isRateLimit(error) && retry < maxRetries) {
+      if (isRetryableError(error) && retry < maxRetries) {
         retry++;
         const sleepTime = initialSleepMs * retry;
         options?.logger?.warn?.(
-          `[Meta API Limit] Rate limit hit on initial request! Retrying ${retry}/${maxRetries} after ${Math.round(sleepTime / 1000)}s...`,
+          `[Meta API Error] Error hit (Code: ${error?.response?.code}). Retrying ${retry}/${maxRetries} after ${Math.round(sleepTime / 1000)}s...`,
+        );
+        await sleep(sleepTime);
+      } else {
+        throw error;
+      }
+    }
+  }
+}
+
+/**
+ * Retry for Database operations (Prisma)
+ */
+export async function executeDbWithRetry<T>(
+  action: () => Promise<T> | T,
+  options?: {
+    maxRetries?: number;
+    initialSleepMs?: number;
+    logger?: any;
+  },
+): Promise<T> {
+  const maxRetries = options?.maxRetries ?? 3;
+  const initialSleepMs = options?.initialSleepMs ?? 5000;
+  let retry = 0;
+
+  while (true) {
+    try {
+      return await action();
+    } catch (error: any) {
+      const isDbStarting =
+        error?.message?.includes('not yet accepting connections') ||
+        error?.cause?.message?.includes('not yet accepting connections') ||
+        error?.code === '57P03';
+
+      if (isDbStarting && retry < maxRetries) {
+        retry++;
+        const sleepTime = initialSleepMs * retry;
+        options?.logger?.warn?.(
+          `[DB Connection] Database is starting up or busy (57P03). Retrying ${retry}/${maxRetries} after ${Math.round(sleepTime / 1000)}s...`,
         );
         await sleep(sleepTime);
       } else {
@@ -499,8 +542,11 @@ export function extractCampaignMetrics(insight: any) {
       insight?.action_values,
       'offsite_conversion.complete_registration',
     );
-  const results = Number(purchases) + Number(registrationComplete);
-  const costPerResult = results > 0 ? spend / results : 0;
+  const resultsFinal = Math.round(Number(purchases) + Number(registrationComplete));
+  const aov =
+    resultsFinal > 0 ? Math.round(Number(purchaseValue) / resultsFinal) : null;
+
+  const costPerResultFinal = resultsFinal > 0 ? spend / resultsFinal : 0;
 
   const messagingStarted = getActionValue(
     insight?.actions,
@@ -523,12 +569,12 @@ export function extractCampaignMetrics(insight: any) {
   );
 
   return {
-    impressions,
-    reach,
+    impressions: Math.round(impressions),
+    reach: Math.round(reach),
     frequency: toNumber(insight?.frequency),
 
-    clicks,
-    uniqueClicks: toNumber(insight?.unique_clicks),
+    clicks: Math.round(clicks),
+    uniqueClicks: Math.round(toNumber(insight?.unique_clicks)),
 
     ctr: toNumber(insight?.ctr),
     uniqueCtr: toNumber(insight?.unique_ctr),
@@ -538,35 +584,29 @@ export function extractCampaignMetrics(insight: any) {
 
     spend,
 
-    // ===== RESULT =====
-    results: Number(purchases) + Number(registrationComplete),
-    aov:
-      Number(purchases) + Number(registrationComplete) > 0
-        ? Number(purchaseValue) /
-          (Number(purchases) + Number(registrationComplete))
-        : null,
+    results: resultsFinal,
+    aov,
+    costPerResult: costPerResultFinal,
 
-    costPerResult,
-
-    purchases,
+    purchases: Math.round(purchases),
     purchaseValue,
     roas,
 
     cvr,
     adsCostRatio,
 
-    registrationComplete,
+    registrationComplete: Math.round(registrationComplete),
     registrationCompleteValue,
 
-    messagingStarted,
+    messagingStarted: Math.round(messagingStarted),
     messagingStartedValue,
-    outboundClicks,
+    outboundClicks: Math.round(outboundClicks),
     outboundClicksValue,
 
     // ===== VIDEO =====
     videoPlay,
     video3s,
-    videoThruplay,
+    videoThruplay: Math.round(videoThruplay),
     video100,
     videoAvgWatchTime,
 
@@ -578,8 +618,10 @@ export function extractCampaignMetrics(insight: any) {
     conversionRateRanking: insight?.conversion_rate_ranking ?? null,
 
     // DEBUG / RAW
-    actions: insight?.actions ?? null,
-    actionValues: insight?.action_values ?? null,
+    actions: insight?.actions ? toPrismaJson(insight.actions) : null,
+    actionValues: insight?.action_values
+      ? toPrismaJson(insight.action_values)
+      : null,
   };
 }
 

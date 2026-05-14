@@ -1,14 +1,13 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { Cron } from '@nestjs/schedule';
+import { Injectable, Logger } from '@nestjs/common';
 import { AssetType } from '@prisma/client';
-import { toPrismaJson } from 'src/common/utils';
-import { PrismaService } from 'src/modules/prisma/prisma.service';
+import { toPrismaJson } from '../../common/utils';
+import { PrismaService } from '../prisma/prisma.service';
+import { META_MEDIA_SYNC_CONFIG_KEY } from './media-sync.constants';
 
 @Injectable()
-export class MediaCron implements OnModuleInit {
-  private readonly logger = new Logger(MediaCron.name);
+export class MediaSyncService {
+  private readonly logger = new Logger(MediaSyncService.name);
 
-  // Biến lưu cấu hình tạm thời cho mỗi phiên chạy
   private currentConfig: {
     token: string;
     cookie: string;
@@ -18,20 +17,16 @@ export class MediaCron implements OnModuleInit {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  /**
-   * Lấy cấu hình từ Database
-   */
   private async loadConfig() {
     try {
       const configRecord = await (this.prisma as any).systemConfig.findUnique({
-        where: { key: 'META_MEDIA_SYNC_CONFIG' },
+        where: { key: META_MEDIA_SYNC_CONFIG_KEY },
       });
 
       if (!configRecord || !configRecord.value) {
         return null;
       }
 
-      // Đảm bảo value là object (nếu user chèn nhầm string vào DB kiểu Json)
       let value = configRecord.value;
       if (typeof value === 'string') {
         try {
@@ -66,7 +61,7 @@ export class MediaCron implements OnModuleInit {
       'sec-fetch-mode': 'cors',
       'sec-fetch-site': 'same-site',
       'user-agent':
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
       Cookie: cookie,
     };
   }
@@ -74,109 +69,110 @@ export class MediaCron implements OnModuleInit {
   async fetchAllPages(initialUrl: string) {
     let results: any[] = [];
     let nextUrl = initialUrl;
+    let retryCount = 0;
+    const MAX_RETRIES = 3;
 
     while (nextUrl) {
       this.logger.log(`📡 API Request: ${nextUrl.substring(0, 150)}...`);
-      const rawResponse = await fetch(nextUrl, {
-        headers: this.getHeaders(),
-        method: 'GET',
-        redirect: 'follow',
-      }).then((res) => res.text());
 
-      if (!rawResponse || rawResponse === 'undefined') {
-        this.logger.error('❌ Meta API returned empty or undefined response');
-        break;
-      }
-
-      let response: any;
       try {
-        response = JSON.parse(rawResponse);
-      } catch (e) {
-        this.logger.error('❌ Failed to parse JSON response');
+        const rawResponse = await fetch(nextUrl, {
+          headers: this.getHeaders(),
+          method: 'GET',
+          redirect: 'follow',
+        }).then((res) => res.text());
+
+        if (!rawResponse || rawResponse === 'undefined') {
+          this.logger.error('❌ Meta API returned empty or undefined response');
+          break;
+        }
+
+        let response: any;
+        try {
+          response = JSON.parse(rawResponse);
+        } catch (e) {
+          this.logger.error('❌ Failed to parse JSON response');
+          break;
+        }
+
+        if (response.error) {
+          const errorMsg = response.error.message || '';
+          this.logger.error(`❌ Meta API Error: ${errorMsg}`);
+
+          // Nếu bị block "too fast", thực hiện retry với thời gian chờ lâu hơn
+          if (
+            errorMsg.includes('too fast') ||
+            errorMsg.includes('temporarily blocked') ||
+            response.error.code === 4 ||
+            response.error.code === 17
+          ) {
+            if (retryCount < MAX_RETRIES) {
+              retryCount++;
+              const waitTime = Math.pow(2, retryCount) * 10000; // 20s, 40s, 80s
+              this.logger.warn(
+                `⚠️ Rate limited. Retrying in ${waitTime / 1000}s... (Attempt ${retryCount}/${MAX_RETRIES})`,
+              );
+              await new Promise((resolve) => setTimeout(resolve, waitTime));
+              continue; // Thử lại URL hiện tại
+            }
+          }
+          break;
+        }
+
+        const data = response.data || [];
+        results = results.concat(data);
+        retryCount = 0; // Reset retry count on success
+
+        if (data.length > 0) {
+          this.logger.log(
+            `📥 Received ${data.length} items (Current batch total: ${results.length})`,
+          );
+        }
+
+        nextUrl = response.paging?.next;
+
+        if (nextUrl) {
+          // Tăng delay ngẫu nhiên từ 2-4 giây để giống người dùng thật
+          const delay = Math.floor(Math.random() * 2000) + 2000;
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+      } catch (err: any) {
+        this.logger.error(`🔥 Fetch Error: ${err.message}`);
         break;
-      }
-
-      if (response.error) {
-        this.logger.error(`❌ Meta API Error: ${response.error.message}`);
-        this.logger.log(`Full URL causing error: ${nextUrl}`);
-        break;
-      }
-
-      const data = response.data || [];
-      results = results.concat(data);
-
-      if (data.length > 0) {
-        this.logger.log(
-          `📥 Received ${data.length} items (Current batch total: ${results.length})`,
-        );
-      }
-
-      nextUrl = response.paging?.next;
-
-      if (nextUrl) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
       }
     }
     return results;
   }
 
-  /**
-   * Cron Job: Chạy mỗi 30 phút
-   */
-  @Cron('*/30 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  async handleMediaSyncJob() {
-    this.logger.log('⏰ Starting scheduled Media Sync...');
+  async handleMediaSync() {
+    this.logger.log('⏰ Starting Media Sync...');
 
-    // 1. Tải cấu hình từ DB
     const config = await this.loadConfig();
     if (!config || !config.token || !config.cookie) {
       this.logger.error(
-        '❌ Missing or Invalid META_MEDIA_SYNC_CONFIG (token/cookie) in SystemConfig table. Skipping sync.',
+        '❌ Missing or Invalid META_MEDIA_SYNC_CONFIG (token/cookie) in SystemConfig table.',
       );
-      this.logger.log(`Current config in DB: ${JSON.stringify(config)}`);
       return;
     }
 
-    // 2. Lưu vào biến tạm để dùng cho các hàm fetch bên dưới
     this.currentConfig = config;
-
     const { rootFolderId, businessId } = config;
 
     try {
       if (rootFolderId) {
         await this.syncFolders(rootFolderId);
-      } else {
-        this.logger.warn(
-          '⚠️ No rootFolderId found in config, skipping folders sync',
-        );
       }
-
       if (businessId) {
         await this.syncCreatives(businessId);
-      } else {
-        this.logger.warn(
-          '⚠️ No businessId found in config, skipping creatives sync',
-        );
       }
-
-      this.logger.log('✅ Scheduled Media Sync completed');
+      this.logger.log('✅ Media Sync completed');
     } catch (error: any) {
-      this.logger.error(`❌ Scheduled Sync failed: ${error.message}`);
+      this.logger.error(`❌ Sync failed: ${error.message}`);
     } finally {
-      // 3. Xóa biến tạm sau khi chạy xong
       this.currentConfig = null;
     }
   }
 
-  async onModuleInit() {
-    this.logger.log('🚀 MediaCron initialized');
-    // Chạy lần đầu ngay khi khởi động server
-    this.handleMediaSyncJob();
-  }
-
-  /**
-   * Đồng bộ Folder vào Database
-   */
   async syncFolders(folderId: string) {
     this.logger.log(`📁 Processing Folders sync starting from: ${folderId}`);
 
@@ -232,9 +228,6 @@ export class MediaCron implements OnModuleInit {
         });
 
         totalUpserted++;
-        this.logger.log(
-          `   └─ ✅ Saved Folder: ${folder.name} (ID: ${folder.id})`,
-        );
 
         if (folder.subfolders?.data && folder.subfolders.data.length > 0) {
           for (const sub of folder.subfolders.data) {
@@ -255,9 +248,6 @@ export class MediaCron implements OnModuleInit {
     }
   }
 
-  /**
-   * Đồng bộ Creatives vào Database
-   */
   async syncCreatives(businessId: string) {
     this.logger.log(`🎨 Processing Creatives sync for business: ${businessId}`);
 
@@ -271,7 +261,7 @@ export class MediaCron implements OnModuleInit {
       `&_reqName=object%3Abusiness%2Fcreatives` +
       `&_reqSrc=AssetLibraryBizCreativeRecentViewDataLoader` +
       `&fields=${rawFields}` +
-      `&limit=25` + // Trả về limit=25 cho ổn định theo snippet gốc
+      `&limit=25` +
       `&locale=en_US` +
       `&method=get` +
       `&pretty=0` +
@@ -284,10 +274,7 @@ export class MediaCron implements OnModuleInit {
 
       for (const creative of allCreatives) {
         const folderId = creative.parent_folder_id;
-
-        if (!folderId) {
-          continue;
-        }
+        if (!folderId) continue;
 
         const exists = await this.prisma.creativeAsset.findUnique({
           where: { id: creative.id },
@@ -326,9 +313,6 @@ export class MediaCron implements OnModuleInit {
             },
           });
           creativeCount++;
-          this.logger.log(
-            `   └─ ✨ Created: ${creative.name} (ID: ${creative.id})`,
-          );
         }
       }
 

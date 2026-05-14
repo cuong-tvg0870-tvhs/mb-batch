@@ -1,22 +1,23 @@
 import { LarkRecord } from '@prisma/client';
-import { toPrismaJson } from 'src/common/utils';
+import { toPrismaJson } from '../../common/utils';
 
 // helpers
-export function getText(field?: TextField) {
+export function getText(field?: any) {
   return field?.value?.[0]?.text || null;
 }
 
-export function getArrayText(field?: ArrayTextField) {
+export function getArrayText(field?: any) {
   return field?.[0]?.text || null;
 }
 
-export function getSelect(field?: SelectField) {
+export function getSelect(field?: any) {
   return field?.value?.[0] || null;
 }
 
-export function getLink(field?: LinkField) {
+export function getLink(field?: any) {
   return field?.[0]?.link || field?.[0]?.text || null;
 }
+
 export function extractDriveId(url?: string | null): string | null {
   if (!url) return null;
   const match =
@@ -25,7 +26,7 @@ export function extractDriveId(url?: string | null): string | null {
 }
 
 // mapper
-export function mapRecord(item: RecordItem) {
+export function mapRecord(item: any) {
   const f = item.fields || {};
   return {
     id: item?.record_id,
