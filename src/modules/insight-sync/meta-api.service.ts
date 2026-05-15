@@ -33,7 +33,9 @@ export class MetaApiService implements OnModuleInit {
     accountId: string,
     params: {
       level: 'campaign' | 'adset' | 'ad';
-      date_preset: string;
+      date_preset?: string;
+      time_range?: { since: string; until: string };
+      time_increment?: number | 'all_days';
       ids?: string[];
       limit?: number;
       breakdowns?: string[];

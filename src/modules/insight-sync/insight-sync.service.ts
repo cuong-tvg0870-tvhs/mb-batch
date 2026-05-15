@@ -60,7 +60,7 @@ export class InsightSyncService {
         accountId,
         OR: [{ status: { in: ['ACTIVE', 'IN_PROCESS'] } }],
       };
-      
+
       // Nếu có field mapping tương ứng mới check NULL để "Fill the gaps"
       if (parentInsightIdField) {
         where.OR.push({ [parentInsightIdField]: null });
@@ -75,15 +75,19 @@ export class InsightSyncService {
 
       const allIds = existingEntities.map((e) => e.id);
       if (allIds.length === 0) {
-        this.logger.log(`[${accountId}] ⏭️ No ${level} found in DB for this range. Skipping.`);
+        this.logger.log(
+          `[${accountId}] ⏭️ No ${level} found in DB for this range. Skipping.`,
+        );
         return;
       }
 
-      this.logger.log(`[${accountId}] 🔍 Found ${allIds.length} ${level} entities to sync for ${range}.`);
+      this.logger.log(
+        `[${accountId}] 🔍 Found ${allIds.length} ${level} entities to sync for ${range}.`,
+      );
 
       // 2. Fetch from Meta in chunks to avoid filter limits
       const allInsights: any[] = [];
-      
+
       // Dynamic chunk size to avoid "Too many rows" error from Meta
       let chunkSize = 300;
       if (range === InsightSyncRange.MAX) {
@@ -105,8 +109,10 @@ export class InsightSyncService {
 
       for (let i = 0; i < idChunks.length; i++) {
         const idChunk = idChunks[i];
-        this.logger.log(`[${accountId}] ⏳ Fetching ${level} insights: Chunk ${i + 1}/${idChunks.length}...`);
-        
+        this.logger.log(
+          `[${accountId}] ⏳ Fetching ${level} insights: Chunk ${i + 1}/${idChunks.length}...`,
+        );
+
         const insights = await this.metaApi.getAccountInsights(accountId, {
           level: level as any,
           date_preset: range as string,
@@ -114,7 +120,9 @@ export class InsightSyncService {
           limit: 50,
         });
         if (insights) {
-          this.logger.log(`[${accountId}] 📥 Received ${insights.length} insights from Chunk ${i + 1}.`);
+          this.logger.log(
+            `[${accountId}] 📥 Received ${insights.length} insights from Chunk ${i + 1}.`,
+          );
           allInsights.push(...insights);
         }
       }
@@ -136,7 +144,9 @@ export class InsightSyncService {
       const entityIdField = this.getEntityIdField(level);
       const prismaModel = this.getPrismaModel(level);
 
-      this.logger.log(`[${accountId}] 🛠️ Mapping ${insights.length} insights for ${level} ${range}...`);
+      this.logger.log(
+        `[${accountId}] 🛠️ Mapping ${insights.length} insights for ${level} ${range}...`,
+      );
 
       const mappedData = insights
         .filter((i: any) => i[entityIdField])
@@ -167,7 +177,9 @@ export class InsightSyncService {
       const entityIds = mappedData.map((d) => d[relationFieldId]);
       const dateStarts = [...new Set(mappedData.map((d) => d.dateStart))];
 
-      this.logger.log(`[${accountId}] 💾 Saving ${mappedData.length} records to DB (${prismaModel})...`);
+      this.logger.log(
+        `[${accountId}] 💾 Saving ${mappedData.length} records to DB (${prismaModel})...`,
+      );
 
       await executeDbWithRetry(async () => {
         // Delete existing records for this range
@@ -325,7 +337,7 @@ export class InsightSyncService {
   ) {
     const parentModel = this.getParentModel(level);
     const parentInsightIdField = this.getInsightIdFieldOnParent(range);
-    
+
     // Nếu không có field tương ứng trên model cha (ví dụ range DAILY) thì bỏ qua việc update relation
     if (!parentInsightIdField) return;
 
@@ -362,7 +374,9 @@ export class InsightSyncService {
    * Ported from meta.cron.ts and optimized for account-level processing.
    */
   async aggregateCreativeInsights(accountId: string) {
-    this.logger.log(`[${accountId}] 🚀 Starting CreativeInsight aggregation...`);
+    this.logger.log(
+      `[${accountId}] 🚀 Starting CreativeInsight aggregation...`,
+    );
     const start = Date.now();
 
     const prismaHelper = new PrismaBatchHelper(this.prisma);
@@ -394,7 +408,14 @@ export class InsightSyncService {
       const insights = await this.prisma.adInsight.findMany({
         where: {
           adId: { in: adIds },
-          range: { in: [InsightRange.MAX, InsightRange.DAY_7, InsightRange.DAY_3, InsightRange.TODAY] },
+          range: {
+            in: [
+              InsightRange.MAX,
+              InsightRange.DAY_7,
+              InsightRange.DAY_3,
+              InsightRange.TODAY,
+            ],
+          },
         },
       });
 
@@ -430,17 +451,31 @@ export class InsightSyncService {
           const adInsights = insightMap.get(adId) || [];
           for (const ins of adInsights) {
             if (ins.range === InsightRange.MAX) sumMetrics(bucket.max, ins);
-            if (ins.range === InsightRange.DAY_7) sumMetrics(bucket.last7d, ins);
-            if (ins.range === InsightRange.DAY_3) sumMetrics(bucket.last3d, ins);
+            if (ins.range === InsightRange.DAY_7)
+              sumMetrics(bucket.last7d, ins);
+            if (ins.range === InsightRange.DAY_3)
+              sumMetrics(bucket.last3d, ins);
             if (ins.range === InsightRange.TODAY) sumMetrics(bucket.today, ins);
           }
         }
 
         // Add to upsert list
         const ranges = [
-          { range: InsightRange.MAX, dateStart: '1975-01-01', data: bucket.max },
-          { range: InsightRange.DAY_7, dateStart: sevenDaysAgo, data: bucket.last7d },
-          { range: InsightRange.DAY_3, dateStart: threeDaysAgo, data: bucket.last3d },
+          {
+            range: InsightRange.MAX,
+            dateStart: '1975-01-01',
+            data: bucket.max,
+          },
+          {
+            range: InsightRange.DAY_7,
+            dateStart: sevenDaysAgo,
+            data: bucket.last7d,
+          },
+          {
+            range: InsightRange.DAY_3,
+            dateStart: threeDaysAgo,
+            data: bucket.last3d,
+          },
           { range: InsightRange.TODAY, dateStart: today, data: bucket.today },
         ];
 
@@ -462,19 +497,40 @@ export class InsightSyncService {
 
         const roasMax = maxSpend > 0 ? maxRevenue / maxSpend : 0;
         const ctrMax = maxImpressions > 0 ? maxClicks / maxImpressions : 0;
-        const roas7d = (bucket.last7d.spend ?? 0) > 0 ? (bucket.last7d.purchaseValue ?? 0) / bucket.last7d.spend : 0;
-        const roas3d = (bucket.last3d.spend ?? 0) > 0 ? (bucket.last3d.purchaseValue ?? 0) / bucket.last3d.spend : 0;
+        const roas7d =
+          (bucket.last7d.spend ?? 0) > 0
+            ? (bucket.last7d.purchaseValue ?? 0) / bucket.last7d.spend
+            : 0;
+        const roas3d =
+          (bucket.last3d.spend ?? 0) > 0
+            ? (bucket.last3d.purchaseValue ?? 0) / bucket.last3d.spend
+            : 0;
 
         let status: CreativeStatus = CreativeStatus.OTHER;
         if (maxSpend === 0) status = CreativeStatus.OTHER;
         else if (maxSpend <= 100000) status = CreativeStatus.NEED_SPEND;
-        else if (((maxSpend <= 500000 && roasMax >= 2) || (maxSpend > 500000 && roasMax >= 2.2)) && roas7d >= 2.5) {
+        else if (
+          ((maxSpend <= 500000 && roasMax >= 2) ||
+            (maxSpend > 500000 && roasMax >= 2.2)) &&
+          roas7d >= 2.5
+        ) {
           status = CreativeStatus.SCALE_P1;
-        } else if (((maxSpend <= 500000 && roasMax >= 1.5) || (maxSpend > 500000 && roasMax >= 1.8 && ctrMax > 0.03)) && roas7d >= 2.2 && roas3d >= 2.2) {
+        } else if (
+          ((maxSpend <= 500000 && roasMax >= 1.5) ||
+            (maxSpend > 500000 && roasMax >= 1.8 && ctrMax > 0.03)) &&
+          roas7d >= 2.2 &&
+          roas3d >= 2.2
+        ) {
           status = CreativeStatus.SCALE_P2;
-        } else if ((maxSpend <= 500000 && maxPurchases < 1 && ctrMax > 0.03) || (maxSpend > 500000 && roasMax < 1.8 && ctrMax > 0.03)) {
+        } else if (
+          (maxSpend <= 500000 && maxPurchases < 1 && ctrMax > 0.03) ||
+          (maxSpend > 500000 && roasMax < 1.8 && ctrMax > 0.03)
+        ) {
           status = CreativeStatus.REVIEW;
-        } else if ((maxSpend <= 500000 && maxPurchases < 1 && ctrMax < 0.03) || (maxSpend > 500000 && roasMax < 1.8 && ctrMax < 0.03)) {
+        } else if (
+          (maxSpend <= 500000 && maxPurchases < 1 && ctrMax < 0.03) ||
+          (maxSpend > 500000 && roasMax < 1.8 && ctrMax < 0.03)
+        ) {
           status = CreativeStatus.OFF;
         }
 
@@ -508,14 +564,22 @@ export class InsightSyncService {
       const insightRecords = await this.prisma.creativeInsight.findMany({
         where: {
           creativeId: { in: batch.map((c) => c.id) },
-          range: { in: [InsightRange.MAX, InsightRange.DAY_7, InsightRange.DAY_3, InsightRange.TODAY] },
+          range: {
+            in: [
+              InsightRange.MAX,
+              InsightRange.DAY_7,
+              InsightRange.DAY_3,
+              InsightRange.TODAY,
+            ],
+          },
         },
         select: { id: true, creativeId: true, range: true },
       });
 
       const insightMapByCreative = new Map<string, any>();
       for (const r of insightRecords) {
-        if (!insightMapByCreative.has(r.creativeId)) insightMapByCreative.set(r.creativeId, {});
+        if (!insightMapByCreative.has(r.creativeId))
+          insightMapByCreative.set(r.creativeId, {});
         const obj = insightMapByCreative.get(r.creativeId);
         if (r.range === InsightRange.MAX) obj.max = r.id;
         if (r.range === InsightRange.DAY_7) obj.d7 = r.id;
@@ -540,14 +604,18 @@ export class InsightSyncService {
     }
 
     const duration = ((Date.now() - start) / 1000).toFixed(2);
-    this.logger.log(`[${accountId}] ✨ CreativeInsight aggregation done in ${duration}s.`);
+    this.logger.log(
+      `[${accountId}] ✨ CreativeInsight aggregation done in ${duration}s.`,
+    );
   }
 
   /**
    * Syncs Audience Insights (Age/Gender breakdowns) for AdSets.
    */
   async syncAccountAudienceInsights(accountId: string) {
-    this.logger.log(`[${accountId}] 👥 Starting Audience Insight sync (Age/Gender)...`);
+    this.logger.log(
+      `[${accountId}] 👥 Starting Audience Insight sync (Age/Gender)...`,
+    );
     const start = Date.now();
 
     try {
@@ -567,18 +635,24 @@ export class InsightSyncService {
 
       const adSetIds = adSets.map((a) => a.id);
       if (adSetIds.length === 0) {
-        this.logger.log(`[${accountId}] No active AdSets found for Audience sync.`);
+        this.logger.log(
+          `[${accountId}] No active AdSets found for Audience sync.`,
+        );
         return;
       }
 
-      this.logger.log(`[${accountId}] 🔍 Found ${adSetIds.length} AdSets for Audience sync.`);
+      this.logger.log(
+        `[${accountId}] 🔍 Found ${adSetIds.length} AdSets for Audience sync.`,
+      );
 
       const allInsights: any[] = [];
       const idChunks = chunk(adSetIds, 50) as string[][]; // Small chunks for breakdowns
 
       for (let i = 0; i < idChunks.length; i++) {
         const idChunk = idChunks[i];
-        this.logger.log(`[${accountId}] ⏳ Fetching Audience: Chunk ${i + 1}/${idChunks.length}...`);
+        this.logger.log(
+          `[${accountId}] ⏳ Fetching Audience: Chunk ${i + 1}/${idChunks.length}...`,
+        );
 
         const insights = await this.metaApi.getAccountInsights(accountId, {
           level: 'adset' as any,
@@ -589,13 +663,17 @@ export class InsightSyncService {
         });
 
         if (insights) {
-          this.logger.log(`[${accountId}] 📥 Received ${insights.length} breakdown records from Chunk ${i + 1}.`);
+          this.logger.log(
+            `[${accountId}] 📥 Received ${insights.length} breakdown records from Chunk ${i + 1}.`,
+          );
           allInsights.push(...insights);
         }
       }
 
       if (allInsights.length === 0) {
-        this.logger.log(`[${accountId}] ℹ️ No Audience insights returned from Meta.`);
+        this.logger.log(
+          `[${accountId}] ℹ️ No Audience insights returned from Meta.`,
+        );
         return;
       }
 
@@ -617,7 +695,9 @@ export class InsightSyncService {
           };
         });
 
-      this.logger.log(`[${accountId}] 💾 Saving ${mappedData.length} Audience records to DB...`);
+      this.logger.log(
+        `[${accountId}] 💾 Saving ${mappedData.length} Audience records to DB...`,
+      );
 
       await executeDbWithRetry(async () => {
         // We delete all existing AdsetAudienceInsight for these adsets before inserting new ones
@@ -637,10 +717,183 @@ export class InsightSyncService {
       });
 
       const duration = ((Date.now() - start) / 1000).toFixed(2);
-      this.logger.log(`[${accountId}] ✅ Finished Audience Insight sync in ${duration}s.`);
+      this.logger.log(
+        `[${accountId}] ✅ Finished Audience Insight sync in ${duration}s.`,
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(`[${accountId}] ❌ Error syncing Audience insights: ${message}`);
+      this.logger.error(
+        `[${accountId}] ❌ Error syncing Audience insights: ${message}`,
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Identifies and syncs missing daily insights for all entities in an account.
+   * Useful for backfilling data or fixing gaps.
+   * Uses the range defined by the MAX insight of each entity.
+   */
+  async syncAccountMissingDailyInsights(accountId: string) {
+    this.logger.log(
+      `[${accountId}] 🔍 Starting Missing Daily Insights sync based on MAX range...`,
+    );
+    const start = Date.now();
+
+    const levels = [
+      InsightSyncLevel.CAMPAIGN,
+      InsightSyncLevel.ADSET,
+      InsightSyncLevel.AD,
+    ];
+
+    try {
+      for (const level of levels) {
+        const parentModel = this.getParentModel(level);
+        const relationFieldId = this.getRelationField(level);
+        const entityIdField = this.getEntityIdField(level);
+        const prismaModel = this.getPrismaModel(level);
+
+        // 1. Fetch all relevant entities that have a MAX insight
+        const entities = await (this.prisma[parentModel] as any).findMany({
+          where: {
+            accountId,
+            status: { in: ['ACTIVE', 'PAUSED'] },
+            insightMaxId: { not: null },
+          },
+          select: { id: true, name: true, insightMaxId: true },
+        });
+
+        if (entities.length === 0) continue;
+
+        // 2. Fetch the MAX insights to get their date ranges
+        const maxInsightIds = entities
+          .map((e) => e.insightMaxId)
+          .filter(Boolean);
+        const maxInsights = await (this.prisma[prismaModel] as any).findMany({
+          where: { id: { in: maxInsightIds } },
+          select: { id: true, dateStart: true, dateStop: true },
+        });
+        const maxInsightMap = new Map<string, any>(
+          maxInsights.map((i: any) => [i.id, i]),
+        );
+
+        this.logger.log(
+          `[${accountId}] Checking ${entities.length} ${level}s for missing days based on their MAX records...`,
+        );
+
+        // 3. For each entity, find gaps in DAILY insights
+        for (const entity of entities) {
+          const maxInsight = maxInsightMap.get(entity.insightMaxId);
+          if (!maxInsight) continue;
+
+          const startDate = maxInsight.dateStart;
+          const endDate = maxInsight.dateStop;
+
+          const existingInsights = await (
+            this.prisma[prismaModel] as any
+          ).findMany({
+            where: {
+              [relationFieldId]: entity.id,
+              range: 'DAILY',
+              dateStart: { gte: startDate, lte: endDate },
+            },
+            select: { dateStart: true },
+          });
+
+          const existingDates = new Set(
+            existingInsights.map((i: any) => i.dateStart),
+          );
+          const missingDates: string[] = [];
+
+          let current = dayjs(startDate);
+          const end = dayjs(endDate);
+
+          while (current.isBefore(end) || current.isSame(end)) {
+            const dateStr = current.format('YYYY-MM-DD');
+            if (!existingDates.has(dateStr)) {
+              missingDates.push(dateStr);
+            }
+            current = current.add(1, 'day');
+          }
+
+          if (missingDates.length > 0) {
+            this.logger.log(
+              `[${accountId}] ${level} ${entity.id} is missing ${missingDates.length} days. Syncing...`,
+            );
+
+            // Fetch from Meta for this specific entity and date range
+            // Optimization: instead of fetching day-by-day, fetch the whole range from min missing to max missing with time_increment=1
+            // then filter for only missing ones in code.
+            const minDate = missingDates[0];
+            const maxDate = missingDates[missingDates.length - 1];
+
+            const metaInsights = await this.metaApi.getAccountInsights(
+              accountId,
+              {
+                level: level as any,
+                date_preset: 'maximum',
+                time_increment: 1,
+                ids: [entity.id],
+              },
+            );
+            if (metaInsights && metaInsights.length > 0) {
+              const mappedData = metaInsights.map((i: any) => {
+                const {
+                  extractCampaignMetrics,
+                  toPrismaJson,
+                } = require('../../common/utils');
+                const metrics = extractCampaignMetrics(i);
+
+                return {
+                  [relationFieldId]: i[entityIdField],
+                  level: this.mapLevelToEnum(level),
+                  range: 'DAILY',
+                  dateStart: i.date_start,
+                  dateStop: i.date_stop,
+                  ...metrics,
+                  rawPayload: toPrismaJson(i),
+                };
+              });
+
+              if (mappedData.length > 0) {
+                const prismaHelper = new PrismaBatchHelper(this.prisma);
+                await prismaHelper.upsertMany(mappedData, (item: any) => {
+                  const {
+                    [relationFieldId]: rId,
+                    dateStart,
+                    range,
+                    ...data
+                  } = item;
+                  return (this.prisma[prismaModel] as any).upsert({
+                    where: {
+                      [`${relationFieldId}_dateStart_range`]: {
+                        [relationFieldId]: rId,
+                        dateStart,
+                        range,
+                      },
+                    },
+                    update: data,
+                    create: item,
+                  });
+                });
+
+                this.logger.log(
+                  `[${accountId}] ✅ Saved ${mappedData.length} missing daily records for ${level} ${entity.id}.`,
+                );
+              }
+            }
+          }
+        }
+      }
+
+      const duration = ((Date.now() - start) / 1000).toFixed(2);
+      this.logger.log(
+        `[${accountId}] ✨ Missing Daily Insights sync finished in ${duration}s.`,
+      );
+    } catch (error) {
+      this.logger.error(
+        `[${accountId}] ❌ Error syncing missing daily insights: ${error instanceof Error ? error.message : String(error)}`,
+      );
       throw error;
     }
   }

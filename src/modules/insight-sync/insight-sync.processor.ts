@@ -63,4 +63,28 @@ export class InsightSyncProcessor {
       throw error;
     }
   }
+
+  @Process({
+    name: INSIGHT_SYNC_JOBS.SYNC_MISSING_DAILY,
+    concurrency: 2, // Low concurrency because daily sync is heavy
+  })
+  async handleSyncMissingDaily(job: Job<{ accountId: string }>) {
+    const { accountId } = job.data;
+    const start = Date.now();
+
+    this.logger.log(`🚀 [JOB START] Missing Daily sync for Account: ${accountId}`);
+
+    try {
+      await this.syncService.syncAccountMissingDailyInsights(accountId);
+      const duration = ((Date.now() - start) / 1000).toFixed(2);
+      this.logger.log(
+        `✨ [JOB FINISHED] Missing Daily sync for Account: ${accountId} | Duration: ${duration}s`,
+      );
+    } catch (error) {
+      this.logger.error(
+        `❌ [JOB FAILED] Missing Daily sync for Account: ${accountId} | Error: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      throw error;
+    }
+  }
 }

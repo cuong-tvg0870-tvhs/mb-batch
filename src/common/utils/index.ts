@@ -42,7 +42,7 @@ export function isRetryableError(e: any) {
   // Rate limit codes: 4, 17, 32, 613, 80004
   // Transient/Server codes: 1 (API Unknown), 2 (API Service)
   const retryableCodes = [1, 2, 4, 17, 32, 613, 80004];
-  
+
   return (
     retryableCodes.includes(err?.code) ||
     err?.is_transient === true ||
@@ -542,7 +542,9 @@ export function extractCampaignMetrics(insight: any) {
       insight?.action_values,
       'offsite_conversion.complete_registration',
     );
-  const resultsFinal = Math.round(Number(purchases) + Number(registrationComplete));
+  const resultsFinal = Math.round(
+    Number(purchases) + Number(registrationComplete),
+  );
   const aov =
     resultsFinal > 0 ? Math.round(Number(purchaseValue) / resultsFinal) : null;
 

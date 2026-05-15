@@ -26,8 +26,10 @@ export class InsightSyncScheduler implements OnModuleInit {
     //   this.logger.log('🚀 Triggering immediate sync for development...');
     //   // Wait a bit for everything to be ready
     //   setTimeout(() => {
-    //     this.scheduleAudienceSync().catch((err) =>
-    //       this.logger.error(`Failed to trigger immediate audience sync: ${err.message}`),
+    //     this.scheduleMissingDailySync().catch((err) =>
+    //       this.logger.error(
+    //         `Failed to trigger immediate missing daily sync: ${err.message}`,
+    //       ),
     //     );
     //   }, 5000);
     // }
@@ -86,6 +88,18 @@ export class InsightSyncScheduler implements OnModuleInit {
   }
 
   /**
+   * 🟠 MISSING DAILY SYNC
+   * Runs once a day at 03:00 AM
+   */
+  @Cron('0 3 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async scheduleMissingDailySync() {
+    this.logger.log(
+      '📅 Scheduling Missing Daily Insights Sync (Daily 03:00 AM)...',
+    );
+    await this.queueMissingDailySyncForAllAccounts();
+  }
+
+  /**
    * 👥 AUDIENCE SYNC
    * Runs once a day at 04:35 AM
    */
@@ -126,6 +140,32 @@ export class InsightSyncScheduler implements OnModuleInit {
 
     this.logger.log(
       `✅ Successfully queued insight jobs for ${accounts.length} accounts.`,
+    );
+  }
+
+  private async queueMissingDailySyncForAllAccounts() {
+    const accounts = await this.prisma.account.findMany({
+      where: { needsReauth: false },
+      select: { id: true },
+    });
+
+    this.logger.log(`Found ${accounts.length} accounts to sync missing daily.`);
+
+    for (const account of accounts) {
+      await this.syncQueue.add(
+        INSIGHT_SYNC_JOBS.SYNC_MISSING_DAILY,
+        { accountId: account.id },
+        {
+          attempts: 2,
+          backoff: { type: 'exponential', delay: 0 }, // 5 mins
+          removeOnComplete: true,
+          removeOnFail: false,
+        },
+      );
+    }
+
+    this.logger.log(
+      `✅ Successfully queued missing daily jobs for ${accounts.length} accounts.`,
     );
   }
 
