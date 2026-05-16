@@ -1,16 +1,14 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { AssetType, LarkRecord, Prisma } from '@prisma/client';
+import { LarkRecord, Prisma } from '@prisma/client';
 import axios, { AxiosRequestConfig } from 'axios';
 import { FacebookAdsApi } from 'facebook-nodejs-business-sdk';
 import * as fs from 'fs';
 import { drive_v3, google } from 'googleapis';
 import path from 'path';
-import { PrismaService } from '../prisma/prisma.service';
-import { pipeline } from 'stream/promises';
-import { extractDriveId, mapRecord } from './lark-sync.utils';
-import pLimit from 'p-limit';
 import { chunk } from '../../common/utils';
-import { MetaFolderResponse, FolderRequest } from './lark-sync.constants';
+import { PrismaService } from '../prisma/prisma.service';
+import { FolderRequest, MetaFolderResponse } from './lark-sync.constants';
+import { extractDriveId, mapRecord } from './lark-sync.utils';
 
 interface LogicalProduct {
   product_code: string;
@@ -32,7 +30,9 @@ export class LarkSyncService {
   private readonly logger = new Logger(LarkSyncService.name);
   private driveSA: drive_v3.Drive;
   private readonly baseURL = 'https://open.larksuite.com/open-apis/bitable/v1';
-  private readonly BASE_DIR = '/app/files';
+  private readonly BASE_DIR = fs.existsSync('/app')
+    ? '/app/files'
+    : path.join(process.cwd(), 'files');
   private readonly BUSINESS_ID = '1916878948527753';
   private readonly ROOT_META_FOLDER = '4303729193176038';
 
@@ -155,10 +155,14 @@ export class LarkSyncService {
         });
       }
 
-      await this.searchRecords('VsGGbP5wkaY7uTsTpZ2l9G9HgWc', 'tblzTv9D1LoUcgcq', {
-        conjunction: 'and',
-        conditions,
-      });
+      await this.searchRecords(
+        'VsGGbP5wkaY7uTsTpZ2l9G9HgWc',
+        'tblzTv9D1LoUcgcq',
+        {
+          conjunction: 'and',
+          conditions,
+        },
+      );
 
       // 2. Sync metadata từ Drive
       await this.syncDriveFiles();
@@ -233,7 +237,12 @@ export class LarkSyncService {
 
       // 3. Tự động map nếu đã tồn tại trên Meta (theo path và tên file)
       let creative_asset_id = record.creative_asset_id;
-      if (!creative_asset_id && record.project_name && record.brand_name && record.product_code) {
+      if (
+        !creative_asset_id &&
+        record.project_name &&
+        record.brand_name &&
+        record.product_code
+      ) {
         const driveFileName = record.drive_url?.split('/').pop() || ''; // Đây là fallback nếu không lấy được từ DriveFile
         const fileNameInDb = await this.prisma.driveFile
           .findUnique({ where: { id: driveId || '' } })
@@ -297,179 +306,186 @@ export class LarkSyncService {
     return headers;
   }
 
-  async uploadDriveToMeta(takeLimit: number = 30) {
-    this.logger.log(`🚀 Starting Meta upload (Limit: ${takeLimit} items)...`);
-    const authConfig = await this.getMetaAuthConfig();
-    const token = authConfig?.accessToken;
-    const businessId = authConfig?.businessId || this.BUSINESS_ID;
+  // async uploadDriveToMeta(takeLimit: number = 30) {
+  //   this.logger.log(`🚀 Starting Meta upload (Limit: ${takeLimit} items)...`);
+  //   const authConfig = await this.getMetaAuthConfig();
+  //   const token = authConfig?.accessToken;
+  //   const businessId = authConfig?.businessId || this.BUSINESS_ID;
 
-    if (!token) {
-      this.logger.error('❌ Meta Access Token not found in SystemConfig');
-      return;
-    }
+  //   if (!token) {
+  //     this.logger.error('❌ Meta Access Token not found in SystemConfig');
+  //     return;
+  //   }
 
-    const limit = pLimit(2); // Giới hạn song song thấp để tránh rate limit
+  //   const limit = pLimit(2); // Giới hạn song song thấp để tránh rate limit
 
-    const [folders, cidContents] = await Promise.all([
-      this.prisma.creativeFolder.findFirst({
-        where: { parentId: null },
-        include: {
-          children: { include: { children: { include: { children: true } } } },
-        },
-      }),
-      this.prisma.larkRecord.findMany({
-        where: {
-          drive: { drive_permission: true },
-          creative_asset_id: null,
-          drive_id: { not: null },
-        },
-        take: takeLimit,
-        include: { drive: true },
-        orderBy: { id: 'asc' },
-      }),
-    ]);
+  //   const [folders, cidContents] = await Promise.all([
+  //     this.prisma.creativeFolder.findFirst({
+  //       where: { parentId: null },
+  //       include: {
+  //         children: { include: { children: { include: { children: true } } } },
+  //       },
+  //     }),
+  //     this.prisma.larkRecord.findMany({
+  //       where: {
+  //         drive: { drive_permission: true },
+  //         creative_asset_id: null,
+  //         drive_id: { not: null },
+  //       },
+  //       take: takeLimit,
+  //       include: { drive: true },
+  //       orderBy: { id: 'asc' },
+  //     }),
+  //   ]);
 
-    if (!folders || cidContents.length === 0) {
-      this.logger.log('ℹ️ No new assets to upload.');
-      return;
-    }
+  //   if (!folders || cidContents.length === 0) {
+  //     this.logger.log('ℹ️ No new assets to upload.');
+  //     return;
+  //   }
 
-    const tasks = cidContents.map((item) =>
-      limit(async () => {
-        if (!item.drive || !item.drive_id) return;
+  //   const tasks = cidContents.map((item) =>
+  //     limit(async () => {
+  //       if (!item.drive || !item.drive_id) return;
 
-        // 1. Kiểm tra lần cuối xem đã có trong DB chưa (tránh trùng lặp do race condition)
-        const existingAsset = await this.prisma.creativeAsset.findFirst({
-          where: {
-            OR: [{ id: item.creative_asset_id || undefined }, { drive_id: item.drive_id }],
-          },
-        });
+  //       // 1. Kiểm tra lần cuối xem đã có trong DB chưa (tránh trùng lặp do race condition)
+  //       const existingAsset = await this.prisma.creativeAsset.findFirst({
+  //         where: {
+  //           OR: [{ id: item.creative_asset_id || undefined }, { drive_id: item.drive_id }],
+  //         },
+  //       });
 
-        if (existingAsset) {
-          await this.prisma.larkRecord.update({
-            where: { id: item.id },
-            data: { creative_asset_id: existingAsset.id },
-          });
-          return;
-        }
+  //       if (existingAsset) {
+  //         await this.prisma.larkRecord.update({
+  //           where: { id: item.id },
+  //           data: { creative_asset_id: existingAsset.id },
+  //         });
+  //         return;
+  //       }
 
-        // 2. Tìm thư mục đích (Product folder)
-        const project = folders.children.find((f) => f.name === item.project_name);
-        const brand = project?.children?.find((b) => b.name === item.brand_name);
-        const product = brand?.children?.find((p) => p.name === item.product_code);
+  //       // 2. Tìm thư mục đích (Product folder)
+  //       const project = folders.children.find((f) => f.name === item.project_name);
+  //       const brand = project?.children?.find((b) => b.name === item.brand_name);
+  //       const product = brand?.children?.find((p) => p.name === item.product_code);
 
-        if (!product) {
-          this.logger.warn(`Folder path not found for record: ${item.id} (${item.product_code})`);
-          return;
-        }
+  //       if (!product) {
+  //         this.logger.warn(`Folder path not found for record: ${item.id} (${item.product_code})`);
+  //         return;
+  //       }
 
-        const fileType = item.drive.mimeType?.startsWith('image') ? AssetType.IMAGE : AssetType.VIDEO;
-        let creativeAsset: any;
-        let filePath: string | null = null;
+  //       const fileType = item.drive.mimeType?.startsWith('image') ? AssetType.IMAGE : AssetType.VIDEO;
+  //       let creativeAsset: any;
+  //       let filePath: string | null = null;
 
-        try {
-          if (fileType === AssetType.IMAGE) {
-            // --- IMAGE UPLOAD ---
-            const driveRes = await this.driveSA.files.get(
-              { fileId: item.drive_id, alt: 'media', supportsAllDrives: true },
-              { responseType: 'arraybuffer' },
-            );
-            const buffer = Buffer.from(driveRes.data as ArrayBuffer);
+  //       try {
+  //         if (fileType === AssetType.IMAGE) {
+  //           // --- IMAGE UPLOAD ---
+  //           const driveRes = await this.driveSA.files.get(
+  //             { fileId: item.drive_id, alt: 'media', supportsAllDrives: true },
+  //             { responseType: 'arraybuffer' },
+  //           );
+  //           const buffer = Buffer.from(driveRes.data as ArrayBuffer);
 
-            const url = `https://graph.facebook.com/v24.0/${businessId}/images`;
-            const params: any = {
-              name: item.drive.name,
-              bytes: buffer.toString('base64'),
-              creative_folder_id: product.id,
-              access_token: token,
-              method: 'post',
-              pretty: '0',
-              suppress_http_code: '1',
-              xref: 'fe47908523b96c1c2',
-            };
-            if (authConfig?.fb_dtsg) params.fb_dtsg = authConfig.fb_dtsg;
+  //           const url = `https://graph.facebook.com/v24.0/${businessId}/images`;
+  //           const params: any = {
+  //             name: item.drive.name,
+  //             bytes: buffer.toString('base64'),
+  //             creative_folder_id: product.id,
+  //             access_token: token,
+  //             method: 'post',
+  //             pretty: '0',
+  //             suppress_http_code: '1',
+  //             xref: 'fe47908523b96c1c2',
+  //           };
+  //           if (authConfig?.fb_dtsg) params.fb_dtsg = authConfig.fb_dtsg;
 
-            const res = await axios.post(url, new URLSearchParams(params).toString(), {
-              headers: this.getHeaders(authConfig),
-            });
-            creativeAsset = res.data;
-          } else {
-            // --- VIDEO UPLOAD ---
-            filePath = path.join(this.BASE_DIR, `${item.drive_id}.mp4`);
-            if (!fs.existsSync(this.BASE_DIR)) fs.mkdirSync(this.BASE_DIR, { recursive: true });
+  //           const res = await axios.post(url, new URLSearchParams(params).toString(), {
+  //             headers: this.getHeaders(authConfig),
+  //           });
+  //           creativeAsset = res.data;
+  //         } else {
+  //           // --- VIDEO UPLOAD ---
+  //           filePath = path.join(this.BASE_DIR, `${item.drive_id}.mp4`);
+  //           if (!fs.existsSync(this.BASE_DIR)) fs.mkdirSync(this.BASE_DIR, { recursive: true });
 
-            const driveRes = await this.driveSA.files.get(
-              { fileId: item.drive_id, alt: 'media', supportsAllDrives: true },
-              { responseType: 'stream' },
-            );
-            await pipeline(driveRes.data as any, fs.createWriteStream(filePath));
+  //           const driveRes = await this.driveSA.files.get(
+  //             { fileId: item.drive_id, alt: 'media', supportsAllDrives: true },
+  //             { responseType: 'stream' },
+  //           );
+  //           await pipeline(driveRes.data as any, fs.createWriteStream(filePath));
 
-            const cdnUrl = `https://mb-ads.tvhs.asia/cdn/${item.drive_id}.mp4`;
+  //           const cdnUrl = `https://mb-ads.tvhs.asia/cdn/${item.drive_id}.mp4`;
 
-            const url = `https://graph.facebook.com/v24.0/${businessId}/videos`;
-            const params: any = {
-              title: item.drive.name,
-              file_url: cdnUrl,
-              creative_folder_id: product.id,
-              access_token: token,
-              method: 'post',
-              pretty: '0',
-              suppress_http_code: '1',
-              xref: 'fe47908523b96c1c2',
-            };
-            if (authConfig?.fb_dtsg) params.fb_dtsg = authConfig.fb_dtsg;
+  //           const url = `https://graph.facebook.com/v24.0/${businessId}/videos`;
+  //           const params: any = {
+  //             title: item.drive.name,
+  //             file_url: cdnUrl,
+  //             creative_folder_id: product.id,
+  //             access_token: token,
+  //             method: 'post',
+  //             pretty: '0',
+  //             suppress_http_code: '1',
+  //             xref: 'fe47908523b96c1c2',
+  //           };
+  //           if (authConfig?.fb_dtsg) params.fb_dtsg = authConfig.fb_dtsg;
 
-            const res = await axios.post(url, new URLSearchParams(params).toString(), {
-              headers: this.getHeaders(authConfig),
-            });
-            creativeAsset = res.data;
-          }
+  //           const res = await axios.post(url, new URLSearchParams(params).toString(), {
+  //             headers: this.getHeaders(authConfig),
+  //           });
+  //           creativeAsset = res.data;
+  //         }
 
-          if (creativeAsset?.error) throw new Error(creativeAsset.error.message);
+  //         if (creativeAsset?.error) throw new Error(creativeAsset.error.message);
 
-          const assetId =
-            fileType === AssetType.VIDEO
-              ? creativeAsset?.business_video_id
-              : (Object.values(creativeAsset.images || {})[0] as any)?.id;
+  //         const assetId =
+  //           fileType === AssetType.VIDEO
+  //             ? creativeAsset?.business_video_id
+  //             : (Object.values(creativeAsset.images || {})[0] as any)?.id;
 
-          if (assetId) {
-            // Chờ một chút để Meta index asset
-            await new Promise((r) => setTimeout(r, 2000));
-            
-            const dbData = {
-              id: assetId,
-              name: item.drive.name || 'Untitled',
-              drive_url: item.drive.webViewLink || null,
-              drive_id: item.drive_id,
-              folderId: product.id,
-              type: fileType,
-            };
+  //         if (assetId) {
+  //           // Chờ một chút để Meta index asset
+  //           await new Promise((r) => setTimeout(r, 2000));
 
-            await this.prisma.$transaction([
-              this.prisma.creativeAsset.upsert({
-                where: { id: assetId },
-                update: dbData,
-                create: dbData,
-              }),
-              this.prisma.larkRecord.update({
-                where: { id: item.id },
-                data: { creative_asset_id: assetId },
-              }),
-            ]);
-            this.logger.log(`✅ Uploaded ${fileType}: ${item.drive.name}`);
-          }
-        } catch (err: any) {
-          this.logger.error(`❌ Upload failed for ${item.drive_id}: ${err.message}`);
-        } finally {
-          if (filePath && fs.existsSync(filePath)) {
-            await fs.promises.unlink(filePath).catch(() => {});
-          }
-        }
-      }),
-    );
+  //           const dbData = {
+  //             id: assetId,
+  //             name: item.drive.name || 'Untitled',
+  //             drive_url: item.drive.webViewLink || null,
+  //             drive_id: item.drive_id,
+  //             folderId: product.id,
+  //             type: fileType,
+  //           };
 
-    await Promise.allSettled(tasks);
-  }
+  //           await this.prisma.$transaction([
+  //             this.prisma.creativeAsset.upsert({
+  //               where: { id: assetId },
+  //               update: dbData,
+  //               create: dbData,
+  //             }),
+  //             this.prisma.larkRecord.update({
+  //               where: { id: item.id },
+  //               data: { creative_asset_id: assetId },
+  //             }),
+  //           ]);
+  //           this.logger.log(`✅ Uploaded ${fileType}: ${item.drive.name}`);
+  //         }
+  //       } catch (err: any) {
+  //         this.logger.error(`❌ Upload failed for ${item.drive_id}: ${err.message}`);
+  //         const errorData = err.response?.data || { error: { message: err.message } };
+  //         await this.handleMetaError(errorData);
+  //       } finally {
+  //         if (filePath && fs.existsSync(filePath)) {
+  //           const pathToDelete = filePath;
+  //           setTimeout(() => {
+  //             try {
+  //               if (fs.existsSync(pathToDelete)) fs.unlinkSync(pathToDelete);
+  //             } catch (e) {}
+  //           }, 120000); // Chờ 2 phút cho Meta fetch xong
+  //         }
+  //       }
+  //     }),
+  //   );
+
+  //   await Promise.allSettled(tasks);
+  // }
 
   async syncDriveFiles() {
     const now = new Date();
@@ -479,7 +495,8 @@ export class LarkSyncService {
 
     do {
       const res = await this.driveSA.files.list({
-        fields: 'nextPageToken, files(id,name,mimeType,parents,webViewLink,webContentLink,size)',
+        fields:
+          'nextPageToken, files(id,name,mimeType,parents,webViewLink,webContentLink,size)',
         pageSize: 1000,
         supportsAllDrives: true,
         includeItemsFromAllDrives: true,
@@ -525,13 +542,37 @@ export class LarkSyncService {
       where: { last_seen_at: { lt: now } },
     });
     if (deletedFiles.count > 0) {
-      this.logger.log(`🗑️ Cleaned up ${deletedFiles.count} files removed from Drive.`);
+      this.logger.log(
+        `🗑️ Cleaned up ${deletedFiles.count} files removed from Drive.`,
+      );
     }
   }
 
+  // private async handleMetaError(errorResponse: any) {
+  //   if (!errorResponse) return;
+  //   const error = errorResponse.error || errorResponse;
+  //   if (!error || !error.code) return;
+
+  //   const code = error.code;
+  //   const type = error.type;
+
+  //   // OAuthException (190, 102) or Rate Limits (17, 4, 32, 613)
+  //   const isAuthError = type === 'OAuthException' || code === 190 || code === 102;
+  //   const isLimitError = code === 17 || code === 4 || code === 32 || code === 613;
+
+  //   if (isAuthError || isLimitError) {
+  //     this.logger.warn(`⚠️ Meta API Error [${code}]: ${error.message}. Clearing META_AUTH_CONFIG.`);
+  //     await this.prisma.systemConfig.deleteMany({
+  //       where: { key: 'META_AUTH_CONFIG' },
+  //     });
+  //     // Lưu ý: mb-batch chưa cấu hình MailerService nên chỉ thực hiện xóa config và log lỗi.
+  //   }
+  // }
+
   private async getAccessToken(): Promise<string> {
     const now = Date.now();
-    if (this.accessToken && now < this.expireAt - 60000) return this.accessToken;
+    if (this.accessToken && now < this.expireAt - 60000)
+      return this.accessToken;
 
     const res = await axios.post(
       'https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal',
@@ -557,7 +598,11 @@ export class LarkSyncService {
     return res.data;
   }
 
-  async searchRecords(appToken: string, tableId: string, filter: Record<string, any>) {
+  async searchRecords(
+    appToken: string,
+    tableId: string,
+    filter: Record<string, any>,
+  ) {
     let hasMore = true;
     let pageToken: string | undefined;
 
@@ -587,9 +632,7 @@ export class LarkSyncService {
 
     const uniqueDriveIds = Array.from(
       new Set(
-        validRecords
-          .map((r) => extractDriveId(r.drive_url))
-          .filter(Boolean),
+        validRecords.map((r) => extractDriveId(r.drive_url)).filter(Boolean),
       ),
     ) as string[];
 
@@ -689,7 +732,8 @@ export class LarkSyncService {
 
     const uniqueReqs = requests.filter(
       (v, i, a) =>
-        a.findIndex((t) => t.name === v.name && t.parentId === v.parentId) === i,
+        a.findIndex((t) => t.name === v.name && t.parentId === v.parentId) ===
+        i,
     );
 
     const existedDb = await this.prisma.creativeFolder.findMany({
@@ -697,14 +741,20 @@ export class LarkSyncService {
         OR: uniqueReqs.flatMap((r) => {
           const conditions = [
             {
-              name: { equals: r.name.trim(), mode: "insensitive" as Prisma.QueryMode },
+              name: {
+                equals: r.name.trim(),
+                mode: 'insensitive' as Prisma.QueryMode,
+              },
               parentId: r.parentId || null,
             },
           ];
           // If parent is the root meta folder, also check for null parent in DB
           if (r.parentId === this.ROOT_META_FOLDER) {
             conditions.push({
-              name: { equals: r.name.trim(), mode: "insensitive" as Prisma.QueryMode },
+              name: {
+                equals: r.name.trim(),
+                mode: 'insensitive' as Prisma.QueryMode,
+              },
               parentId: null,
             });
           }
@@ -725,8 +775,10 @@ export class LarkSyncService {
       const rName = r.name.toLowerCase().trim();
       return !existedDb.some((e) => {
         const eName = e.name.toLowerCase().trim();
-        const eParentId = e.parentId === null ? this.ROOT_META_FOLDER : e.parentId;
-        const rParentId = r.parentId === null ? this.ROOT_META_FOLDER : r.parentId;
+        const eParentId =
+          e.parentId === null ? this.ROOT_META_FOLDER : e.parentId;
+        const rParentId =
+          r.parentId === null ? this.ROOT_META_FOLDER : r.parentId;
         return eName === rName && eParentId === rParentId;
       });
     });
@@ -755,7 +807,9 @@ export class LarkSyncService {
                 name: folder.name,
                 description: folder.description,
                 parentId: batch[idx].parentId,
-                creation_time: folder.creation_time ? new Date(folder.creation_time) : new Date(),
+                creation_time: folder.creation_time
+                  ? new Date(folder.creation_time)
+                  : new Date(),
               });
 
               return this.prisma.creativeFolder.create({
@@ -804,7 +858,9 @@ export class LarkSyncService {
         }
 
         if (r.product_code && r.product_name) {
-          const productExists = brand.products.some((p) => p.product_code === r.product_code);
+          const productExists = brand.products.some(
+            (p) => p.product_code === r.product_code,
+          );
           if (!productExists) {
             brand.products.push({
               product_code: r.product_code,
