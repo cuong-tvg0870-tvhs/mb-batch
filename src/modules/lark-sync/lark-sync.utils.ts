@@ -20,9 +20,14 @@ export function getLink(field?: any) {
 
 export function extractDriveId(url?: string | null): string | null {
   if (!url) return null;
-  const match =
-    url.match(/\/d\/([a-zA-Z0-9_-]+)/) || url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
-  return match ? match[1] : null;
+
+  const match1 = url.match(/\/d\/([a-zA-Z0-9_-]+)/);
+  if (match1) return match1[1];
+
+  const match2 = url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  if (match2) return match2[1];
+
+  return null;
 }
 
 // mapper

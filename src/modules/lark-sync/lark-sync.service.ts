@@ -129,29 +129,186 @@ export class LarkSyncService {
   async syncLarkToDrive() {
     this.logger.log('🔄 Starting periodic data sync (Lark <-> Drive)...');
     try {
-      await this.searchRecords(
-        'VsGGbP5wkaY7uTsTpZ2l9G9HgWc',
-        'tblzTv9D1LoUcgcq',
-        {
-          conjunction: 'and',
-          conditions: [
-            { field_name: 'Ngày sản xuất', operator: 'is', value: ['Today'] },
-          ],
-        },
-      );
+      // 1. Lấy ngày sản xuất gần nhất từ DB để fetch incremental
+      const lastRecord = await this.prisma.larkRecord.findFirst({
+        where: { production_date: { not: null } },
+        orderBy: { production_date: 'desc' },
+        select: { production_date: true },
+      });
 
+      const conditions: any[] = [];
+      if (lastRecord?.production_date) {
+        // Lùi lại 1 ngày để đảm bảo không sót record nào trong cùng ngày
+        const since = new Date(lastRecord.production_date);
+        since.setDate(since.getDate() - 1);
+        conditions.push({
+          field_name: 'Ngày sản xuất',
+          operator: 'isGreaterEqual',
+          value: [since.getTime()],
+        });
+      } else {
+        // Nếu DB trống, lấy của ngày hôm nay
+        conditions.push({
+          field_name: 'Ngày sản xuất',
+          operator: 'is',
+          value: ['Today'],
+        });
+      }
+
+      await this.searchRecords('VsGGbP5wkaY7uTsTpZ2l9G9HgWc', 'tblzTv9D1LoUcgcq', {
+        conjunction: 'and',
+        conditions,
+      });
+
+      // 2. Sync metadata từ Drive
       await this.syncDriveFiles();
+
+      // 3. Check permissions & auto-map cho TẤT CẢ các record chưa có creative_asset_id
+      this.logger.log('🔍 Starting full audit for unmapped records...');
+      let totalChecked = 0;
+      while (true) {
+        const pendingRecords = await this.prisma.larkRecord.findMany({
+          where: { creative_asset_id: null },
+          select: { id: true },
+          take: 100,
+          orderBy: { id: 'asc' },
+        });
+
+        if (pendingRecords.length === 0) break;
+
+        await this.checkPermissions(pendingRecords.map((r) => r.id));
+        totalChecked += pendingRecords.length;
+        this.logger.log(`... audited ${totalChecked} records`);
+
+        // Nếu số lượng trả về ít hơn take, chắc chắn là hết rồi
+        if (pendingRecords.length < 100) break;
+      }
+
       this.logger.log('✅ Data sync completed successfully');
     } catch (error: unknown) {
-      this.logger.error(`❌ Sync failure: ${error instanceof Error ? error.message : String(error)}`);
+      this.logger.error(
+        `❌ Sync failure: ${error instanceof Error ? error.message : String(error)}`,
+      );
       throw error;
     }
   }
 
+  async checkPermissions(larkRecordIds: string[]) {
+    const records = await this.prisma.larkRecord.findMany({
+      where: { id: { in: larkRecordIds } },
+    });
+
+    const results = [];
+    for (const record of records) {
+      let drive_permission = false;
+      const driveId = extractDriveId(record.drive_url);
+
+      // 1. Kiểm tra quyền Drive
+      if (driveId) {
+        try {
+          await this.driveSA.files.get({
+            fileId: driveId,
+            fields: 'id',
+            supportsAllDrives: true,
+          });
+          drive_permission = true;
+        } catch (e) {
+          drive_permission = false;
+        }
+      }
+
+      // 2. Cập nhật trạng thái Drive trong DB
+      if (driveId) {
+        await this.prisma.driveFile.upsert({
+          where: { id: driveId },
+          update: { drive_permission },
+          create: {
+            id: driveId,
+            name: record.drive_url || 'Unknown',
+            drive_permission,
+            raw: '{}',
+          },
+        });
+      }
+
+      // 3. Tự động map nếu đã tồn tại trên Meta (theo path và tên file)
+      let creative_asset_id = record.creative_asset_id;
+      if (!creative_asset_id && record.project_name && record.brand_name && record.product_code) {
+        const driveFileName = record.drive_url?.split('/').pop() || ''; // Đây là fallback nếu không lấy được từ DriveFile
+        const fileNameInDb = await this.prisma.driveFile
+          .findUnique({ where: { id: driveId || '' } })
+          .then((f) => f?.name);
+
+        const targetName = fileNameInDb || record.project_name; // Cần logic lấy tên file chính xác hơn nếu có
+
+        const asset = await this.prisma.creativeAsset.findFirst({
+          where: {
+            name: targetName,
+            folder: {
+              name: record.product_code,
+              parent: {
+                name: record.brand_name,
+                parent: {
+                  name: record.project_name,
+                },
+              },
+            },
+          },
+        });
+
+        if (asset) {
+          creative_asset_id = asset.id;
+          await this.prisma.larkRecord.update({
+            where: { id: record.id },
+            data: { creative_asset_id },
+          });
+        }
+      }
+
+      results.push({
+        id: record.id,
+        drive_permission,
+        creative_asset_id,
+      });
+    }
+
+    return results;
+  }
+
+  private async getMetaAuthConfig() {
+    const config = await this.prisma.systemConfig.findUnique({
+      where: { key: 'META_AUTH_CONFIG' },
+    });
+    return config?.value as {
+      accessToken?: string;
+      cookie?: string;
+      fb_dtsg?: string;
+      businessId?: string;
+    };
+  }
+
+  private getHeaders(authConfig: any) {
+    const headers: any = {
+      'user-agent':
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      accept: '*/*',
+    };
+    if (authConfig?.cookie) headers.cookie = authConfig.cookie;
+    return headers;
+  }
+
   async uploadDriveToMeta(takeLimit: number = 30) {
     this.logger.log(`🚀 Starting Meta upload (Limit: ${takeLimit} items)...`);
-    const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
-    const limit = pLimit(3);
+    const authConfig = await this.getMetaAuthConfig();
+    const token = authConfig?.accessToken;
+    const businessId = authConfig?.businessId || this.BUSINESS_ID;
+
+    if (!token) {
+      this.logger.error('❌ Meta Access Token not found in SystemConfig');
+      return;
+    }
+
+    const limit = pLimit(2); // Giới hạn song song thấp để tránh rate limit
 
     const [folders, cidContents] = await Promise.all([
       this.prisma.creativeFolder.findFirst({
@@ -179,14 +336,16 @@ export class LarkSyncService {
 
     const tasks = cidContents.map((item) =>
       limit(async () => {
-        if (!item.drive || !item.drive.webViewLink || !item.drive_id) return;
+        if (!item.drive || !item.drive_id) return;
 
+        // 1. Kiểm tra lần cuối xem đã có trong DB chưa (tránh trùng lặp do race condition)
         const existingAsset = await this.prisma.creativeAsset.findFirst({
-          where: { drive_id: item.drive_id },
+          where: {
+            OR: [{ id: item.creative_asset_id || undefined }, { drive_id: item.drive_id }],
+          },
         });
 
         if (existingAsset) {
-          this.logger.log(`♻️ [Skip] File ${item.drive.name} already in Meta.`);
           await this.prisma.larkRecord.update({
             where: { id: item.id },
             data: { creative_asset_id: existingAsset.id },
@@ -194,37 +353,48 @@ export class LarkSyncService {
           return;
         }
 
+        // 2. Tìm thư mục đích (Product folder)
         const project = folders.children.find((f) => f.name === item.project_name);
         const brand = project?.children?.find((b) => b.name === item.brand_name);
         const product = brand?.children?.find((p) => p.name === item.product_code);
 
         if (!product) {
-          this.logger.warn(`Folder path not found for record: ${item.id}`);
+          this.logger.warn(`Folder path not found for record: ${item.id} (${item.product_code})`);
           return;
         }
 
-        const fileType = item.drive.mimeType?.startsWith('image')
-          ? AssetType.IMAGE
-          : AssetType.VIDEO;
-        let assetId: string | null = null;
+        const fileType = item.drive.mimeType?.startsWith('image') ? AssetType.IMAGE : AssetType.VIDEO;
+        let creativeAsset: any;
         let filePath: string | null = null;
 
         try {
           if (fileType === AssetType.IMAGE) {
+            // --- IMAGE UPLOAD ---
             const driveRes = await this.driveSA.files.get(
               { fileId: item.drive_id, alt: 'media', supportsAllDrives: true },
               { responseType: 'arraybuffer' },
             );
             const buffer = Buffer.from(driveRes.data as ArrayBuffer);
 
-            const res = (await api.call('POST', [this.BUSINESS_ID, 'images'], {
+            const url = `https://graph.facebook.com/v24.0/${businessId}/images`;
+            const params: any = {
               name: item.drive.name,
               bytes: buffer.toString('base64'),
               creative_folder_id: product.id,
-            })) as any;
+              access_token: token,
+              method: 'post',
+              pretty: '0',
+              suppress_http_code: '1',
+              xref: 'fe47908523b96c1c2',
+            };
+            if (authConfig?.fb_dtsg) params.fb_dtsg = authConfig.fb_dtsg;
 
-            assetId = (Object.values(res.images || {})?.[0] as any)?.id || null;
+            const res = await axios.post(url, new URLSearchParams(params).toString(), {
+              headers: this.getHeaders(authConfig),
+            });
+            creativeAsset = res.data;
           } else {
+            // --- VIDEO UPLOAD ---
             filePath = path.join(this.BASE_DIR, `${item.drive_id}.mp4`);
             if (!fs.existsSync(this.BASE_DIR)) fs.mkdirSync(this.BASE_DIR, { recursive: true });
 
@@ -232,38 +402,54 @@ export class LarkSyncService {
               { fileId: item.drive_id, alt: 'media', supportsAllDrives: true },
               { responseType: 'stream' },
             );
-
             await pipeline(driveRes.data as any, fs.createWriteStream(filePath));
 
-            const cdnUrl = `${process.env.FRONT_END_DOMAIN}/cdn/${item.drive_id}.mp4`;
-            const res = (await api.call('POST', [this.BUSINESS_ID, 'videos'], {
+            const cdnUrl = `https://mb-ads.tvhs.asia/cdn/${item.drive_id}.mp4`;
+
+            const url = `https://graph.facebook.com/v24.0/${businessId}/videos`;
+            const params: any = {
               title: item.drive.name,
               file_url: cdnUrl,
               creative_folder_id: product.id,
-            })) as any;
+              access_token: token,
+              method: 'post',
+              pretty: '0',
+              suppress_http_code: '1',
+              xref: 'fe47908523b96c1c2',
+            };
+            if (authConfig?.fb_dtsg) params.fb_dtsg = authConfig.fb_dtsg;
 
-            assetId = res?.business_video_id || null;
+            const res = await axios.post(url, new URLSearchParams(params).toString(), {
+              headers: this.getHeaders(authConfig),
+            });
+            creativeAsset = res.data;
           }
 
+          if (creativeAsset?.error) throw new Error(creativeAsset.error.message);
+
+          const assetId =
+            fileType === AssetType.VIDEO
+              ? creativeAsset?.business_video_id
+              : (Object.values(creativeAsset.images || {})[0] as any)?.id;
+
           if (assetId) {
+            // Chờ một chút để Meta index asset
+            await new Promise((r) => setTimeout(r, 2000));
+            
+            const dbData = {
+              id: assetId,
+              name: item.drive.name || 'Untitled',
+              drive_url: item.drive.webViewLink || null,
+              drive_id: item.drive_id,
+              folderId: product.id,
+              type: fileType,
+            };
+
             await this.prisma.$transaction([
               this.prisma.creativeAsset.upsert({
                 where: { id: assetId },
-                update: {
-                  name: item.drive.name,
-                  drive_url: item.drive.webViewLink,
-                  folderId: product.id,
-                  type: fileType,
-                  drive_id: item.drive_id,
-                },
-                create: {
-                  id: assetId,
-                  name: item.drive.name,
-                  drive_url: item.drive.webViewLink,
-                  folderId: product.id,
-                  type: fileType,
-                  drive_id: item.drive_id,
-                },
+                update: dbData,
+                create: dbData,
               }),
               this.prisma.larkRecord.update({
                 where: { id: item.id },
@@ -508,10 +694,22 @@ export class LarkSyncService {
 
     const existedDb = await this.prisma.creativeFolder.findMany({
       where: {
-        OR: uniqueReqs.map((r) => ({
-          name: r.name,
-          parentId: r.parentId || null,
-        })),
+        OR: uniqueReqs.flatMap((r) => {
+          const conditions = [
+            {
+              name: { equals: r.name.trim(), mode: "insensitive" as Prisma.QueryMode },
+              parentId: r.parentId || null,
+            },
+          ];
+          // If parent is the root meta folder, also check for null parent in DB
+          if (r.parentId === this.ROOT_META_FOLDER) {
+            conditions.push({
+              name: { equals: r.name.trim(), mode: "insensitive" as Prisma.QueryMode },
+              parentId: null,
+            });
+          }
+          return conditions;
+        }),
       },
     });
 
@@ -523,9 +721,15 @@ export class LarkSyncService {
       creation_time: f.creation_time ? new Date(f.creation_time) : null,
     }));
 
-    const toCreate = uniqueReqs.filter(
-      (r) => !existedDb.some((e) => e.name === r.name && e.parentId === r.parentId),
-    );
+    const toCreate = uniqueReqs.filter((r) => {
+      const rName = r.name.toLowerCase().trim();
+      return !existedDb.some((e) => {
+        const eName = e.name.toLowerCase().trim();
+        const eParentId = e.parentId === null ? this.ROOT_META_FOLDER : e.parentId;
+        const rParentId = r.parentId === null ? this.ROOT_META_FOLDER : r.parentId;
+        return eName === rName && eParentId === rParentId;
+      });
+    });
 
     if (toCreate.length === 0) return results;
 
