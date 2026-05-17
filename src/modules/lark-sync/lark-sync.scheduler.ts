@@ -14,14 +14,14 @@ export class LarkSyncScheduler implements OnModuleInit {
 
   async onModuleInit() {
     this.logger.log('🚀 LarkSyncScheduler Initialized');
-    await this.scheduleSyncWorkflow();
+    // await this.scheduleSyncWorkflow();
   }
 
   /**
    * 🔄 SYNC WORKFLOW (Lark <-> Drive)
    * Runs every 5 minutes
    */
-  @Cron(CronExpression.EVERY_5_MINUTES, { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron(CronExpression.EVERY_30_MINUTES, { timeZone: 'Asia/Ho_Chi_Minh' })
   async scheduleSyncWorkflow() {
     this.logger.log('📅 Scheduling Lark <-> Drive Sync Workflow...');
     await this.larkSyncQueue.add(
