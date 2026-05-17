@@ -161,6 +161,22 @@ export class LarkSyncService {
       where: { id: { in: larkRecordIds } },
     });
 
+    // 1. Cập nhật trạng thái CHECKING cho toàn bộ records trước
+    await Promise.all(
+      records.map((record) =>
+        this.prisma.larkRecord.update({
+          where: { id: record.id },
+          data: {
+            raw: {
+              ...(record.raw as any),
+              permission_status: 'CHECKING',
+              permission_error: null,
+            },
+          },
+        }),
+      ),
+    );
+
     const now = new Date();
     const results = await Promise.all(
       records.map(async (record) => {
@@ -177,9 +193,31 @@ export class LarkSyncService {
               supportsAllDrives: true,
             });
             drive_permission = true;
-          } catch (e) {
+          } catch (e: any) {
             drive_permission = false;
+            // Cập nhật lỗi cụ thể vào DB
+            await this.prisma.larkRecord.update({
+              where: { id: record.id },
+              data: {
+                raw: {
+                  ...(record.raw as any),
+                  permission_status: 'FAILED',
+                  permission_error: e.message || String(e),
+                },
+              },
+            });
           }
+        } else {
+          await this.prisma.larkRecord.update({
+            where: { id: record.id },
+            data: {
+              raw: {
+                ...(record.raw as any),
+                permission_status: 'FAILED',
+                permission_error: 'Không tìm thấy Google Drive ID từ đường dẫn',
+              },
+            },
+          });
         }
 
         // 2. Cập nhật trạng thái Drive trong DB & liên kết drive_id vào larkRecord
@@ -210,13 +248,19 @@ export class LarkSyncService {
             },
           });
 
-          // Cập nhật drive_id cho LarkRecord nếu chưa có hoặc khác
-          if (record.drive_id !== driveId) {
-            await this.prisma.larkRecord.update({
-              where: { id: record.id },
-              data: { drive_id: driveId },
-            });
-          }
+          // Cập nhật drive_id & permission_status cho LarkRecord
+          const isSuccess = drive_permission;
+          await this.prisma.larkRecord.update({
+            where: { id: record.id },
+            data: {
+              drive_id: driveId,
+              raw: {
+                ...(record.raw as any),
+                permission_status: isSuccess ? 'SUCCESS' : 'FAILED',
+                permission_error: isSuccess ? null : 'Lỗi quyền truy cập Drive hoặc file không tồn tại',
+              },
+            },
+          });
         }
 
         // 3. Tự động map nếu đã tồn tại trên Meta (theo path và tên file)
