@@ -689,3 +689,17 @@ export function flattenFolders(
   }
   return result;
 }
+
+export function parseMetaUrlExpireTime(url?: string): Date | null {
+  if (!url) return null;
+
+  const match = url.match(/[?&]oe=([0-9A-Fa-f]+)/);
+  if (!match) return new Date('2099-12-31');
+
+  try {
+    const timestamp = parseInt(match[1], 16);
+    return new Date(timestamp * 1000);
+  } catch (err) {
+    return new Date('2099-12-31');
+  }
+}

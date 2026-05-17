@@ -677,6 +677,7 @@ model Creative {
     remoteUpdatedAt DateTime?
     lastFetchedAt   DateTime?
     rawPayload      Json?
+    urlExpiredAt    DateTime?
     createdAt       DateTime  @default(now())
     updatedAt       DateTime  @default(now())
 
@@ -877,6 +878,7 @@ model AdImage {
     permalink_url String?
     width         Int?
     height        Int?
+    urlExpiredAt  DateTime?
 
     status      String?
     createdTime DateTime?
@@ -897,11 +899,12 @@ model AdVideo {
     accountId String
     account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
-    title       String?
-    source      String?
-    description String?
-    status      String? // READY, PROCESSING, ERROR
-    length      Int? // seconds
+    title        String?
+    source       String?
+    description  String?
+    status       String? // READY, PROCESSING, ERROR
+    length       Int? // seconds
+    urlExpiredAt DateTime?
 
     thumbnailUrl String?
 
@@ -1673,10 +1676,11 @@ model CreativeAsset {
     drive_id  String?    @unique
     drive     DriveFile? @relation(fields: [drive_id], references: [id])
 
-    video_id         String? @unique // 🔥 video id thường unique
+    video_id         String?   @unique // 🔥 video id thường unique
     video_source     String?
     video_thumbnails Json?
     duration         Int?
+    urlExpiredAt     DateTime?
 
     creation_time String?
 

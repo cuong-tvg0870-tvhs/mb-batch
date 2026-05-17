@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { AssetType } from '@prisma/client';
-import { toPrismaJson } from '../../common/utils';
+import { parseMetaUrlExpireTime, toPrismaJson } from '../../common/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { META_MEDIA_SYNC_CONFIG_KEY } from './media-sync.constants';
 
@@ -310,6 +310,9 @@ export class MediaSyncService {
               status: creative.fragment_status
                 ? toPrismaJson(creative.fragment_status)
                 : null,
+              urlExpiredAt: parseMetaUrlExpireTime(
+                creative.url || creative?.source || creative.thumbnail,
+              ),
             },
           });
           creativeCount++;

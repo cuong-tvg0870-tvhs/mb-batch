@@ -3,6 +3,7 @@ import {
   InternalServerErrorException,
   Logger,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import dayjs from 'dayjs';
 import { AdAccount, FacebookAdsApi } from 'facebook-nodejs-business-sdk';
 import pLimit from 'p-limit';
@@ -13,6 +14,7 @@ import {
   executeMetaApiWithRetry,
   fetchAll,
   parseMetaError,
+  parseMetaUrlExpireTime,
   sleep,
   toPrismaJson,
 } from '../../common/utils';
@@ -413,102 +415,107 @@ export class MetaSyncService {
       20,
     );
   }
-
   async syncVideo(limit: number = 50) {
-    this.logger.log('🔄 Sync Ad Video (optimized)');
+    this.logger.log('🔄 Sync Ad Video (fully optimized)');
     this.init();
-    const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
 
     try {
-      const [existingVideos, totalResult] = await Promise.all([
-        this.prisma.$queryRawUnsafe<any[]>(`
-        SELECT v.id, v."accountId", v."thumbnailUrl",to_timestamp(('x' || substring(v."thumbnailUrl" from 'oe=([0-9A-Fa-f]+)'))::bit(32)::bigint) AS expires_at
-        FROM "AdVideo" v
-        JOIN "Account" a ON v."accountId" = a.id
-        WHERE a."needsReauth" = false
-          AND v.status IS DISTINCT FROM 'ERROR'
-          AND (
-            v."thumbnailUrl" IS NULL 
-            OR (
-              v."thumbnailUrl" ~ 'oe='
-              AND to_timestamp(('x' || substring(v."thumbnailUrl" from 'oe=([0-9A-Fa-f]+)'))::bit(32)::bigint)
-                  <= NOW() + interval '1 day'
-            )
-          )
-        ORDER BY expires_at ASC
-        LIMIT ${limit}
-        FOR UPDATE SKIP LOCKED;
-      `),
-        this.prisma.$queryRawUnsafe<any[]>(`
-        SELECT COUNT(*) as total
-        FROM "AdVideo" v
-        JOIN "Account" a ON v."accountId" = a.id
-        WHERE a."needsReauth" = false
-          AND v.status IS DISTINCT FROM 'ERROR'
-          AND (
-            v."thumbnailUrl" IS NULL 
-            OR (
-              v."thumbnailUrl" ~ 'oe='
-              AND to_timestamp(('x' || substring(v."thumbnailUrl" from 'oe=([0-9A-Fa-f]+)'))::bit(32)::bigint)
-                  <= NOW() + interval '1 day'
-            )
-          )
-      `),
+      const where: Prisma.AdVideoWhereInput = {
+        account: { needsReauth: false },
+        status: { not: 'ERROR' },
+        OR: [{ source: null }],
+      };
+
+      const [existingVideos, totalCount] = await Promise.all([
+        this.prisma.adVideo.findMany({
+          where,
+          orderBy: { urlExpiredAt: 'asc' },
+          take: limit,
+          select: { id: true, accountId: true, thumbnailUrl: true },
+        }),
+        this.prisma.adVideo.count({ where }),
       ]);
+
+      this.logger.log(
+        `[syncVideo] Found ${existingVideos.length} videos to sync (Total pending: ${totalCount})`,
+      );
       if (!existingVideos.length) return;
 
-      const batchRequests = existingVideos.map((video) => ({
-        method: 'GET',
-        relative_url: `${video.id}?fields=source,thumbnails`,
-      }));
-
-      let batchResponses: any[];
-      try {
-        batchResponses = await api.call('POST', [''], {
-          batch: JSON.stringify(batchRequests),
-        });
-      } catch (err: any) {
-        this.logger.error('[FB BATCH CRITICAL ERROR]', err?.message);
-        return false;
+      // Gom nhóm theo accountId
+      const byAccount: Record<string, string[]> = {};
+      for (const v of existingVideos) {
+        if (!byAccount[v.accountId]) byAccount[v.accountId] = [];
+        byAccount[v.accountId].push(v.id);
       }
 
-      for (let i = 0; i < existingVideos.length; i++) {
-        const asset = existingVideos[i];
-        const res = batchResponses[i];
-        const statusCode = res.code;
-        const body = JSON.parse(res.body);
-
+      for (const [accountId, videoIds] of Object.entries(byAccount)) {
         try {
-          if (statusCode === 200) {
-            const thumbnail = body.thumbnails?.data?.find(
-              (th: any) => !!th?.is_preferred,
-            )?.uri;
+          const adAccount = new AdAccount(accountId);
+          const cursor = await executeMetaApiWithRetry(
+            () =>
+              adAccount.getAdVideos(['source', 'thumbnails'], {
+                filtering: [{ field: 'id', operator: 'IN', value: videoIds }],
+                limit: 50,
+              }),
+            { logger: this.logger },
+          );
 
-            await this.prisma.adVideo.update({
-              where: { id: asset.id },
-              data: {
-                thumbnailUrl: thumbnail || asset.thumbnailUrl,
-                source: body.source ?? asset.source ?? null,
-                status: 'READY',
-                updatedAt: new Date(),
-              },
-            });
-          } else {
+          const videos = await fetchAll(cursor);
+          console.log(videos);
+          const returnedIds = new Set(videos.map((v) => v.id));
+          const missingIds = videoIds.filter((id) => !returnedIds.has(id));
+
+          // Đánh dấu ERROR cho các ID không tìm thấy
+          if (missingIds.length > 0) {
             this.logger.warn(
-              `[ID ERROR] ${asset.id} - Status: ${statusCode} - Msg: ${body?.error?.message}`,
+              `[syncVideo] Account ${accountId}: ${missingIds.length} videos not found on Meta. Marking as ERROR.`,
             );
-            await this.prisma.adVideo.update({
-              where: { id: asset.id },
-              data: {
-                status: 'ERROR',
-                updatedAt: new Date(),
-              },
+            await this.prisma.adVideo.updateMany({
+              where: { id: { in: missingIds } },
+              data: { status: 'ERROR', updatedAt: new Date() },
             });
           }
-        } catch (dbErr: any) {
-          this.logger.error(`[DB UPDATE ERROR] ID: ${asset.id}`, dbErr.message);
+
+          if (!videos.length) continue;
+
+          // Cập nhật các video thành công
+          const updatePromises = videos.map(async (videoData) => {
+            try {
+              const thumbnail = videoData.thumbnails?.data?.find(
+                (th: any) => !!th?.is_preferred,
+              )?.uri;
+
+              await this.prisma.adVideo.update({
+                where: { id: videoData.id },
+                data: {
+                  thumbnailUrl: thumbnail,
+                  source: videoData.source || null,
+                  urlExpiredAt: parseMetaUrlExpireTime(
+                    videoData.source || thumbnail,
+                  ),
+                  status: 'READY',
+                  updatedAt: new Date(),
+                },
+              });
+              this.logger.debug(
+                `[syncVideo] Updated video ${videoData.id} successfully`,
+              );
+            } catch (err: any) {
+              this.logger.error(
+                `[syncVideo] DB Error updating ${videoData.id}: ${err.message}`,
+              );
+            }
+          });
+
+          await Promise.all(updatePromises);
+          await sleep(500);
+        } catch (err: any) {
+          this.logger.error(
+            `[syncVideo] Error processing Account ${accountId}: ${err.message}`,
+          );
         }
       }
+
       return true;
     } catch (err: any) {
       this.logger.error('[CRON ERROR]', err?.message);
@@ -522,39 +529,29 @@ export class MetaSyncService {
     const prismaHelper = new PrismaBatchHelper(this.prisma);
 
     try {
-      const [existingImages, totalResult] = await Promise.all([
-        this.prisma.$queryRawUnsafe<any[]>(`
-        SELECT i.hash, i.url,i."accountId", to_timestamp(('x' || substring(i.url from 'oe=([0-9A-Fa-f]+)'))::bit(32)::bigint) AS expires_at 
-        FROM "AdImage" i
-        JOIN "Account" a ON i."accountId" = a.id
-        WHERE a."needsReauth" = false
-          AND (
-            i.url IS NULL 
-            OR (
-              i.url ~ 'oe='
-              AND to_timestamp(('x' || substring(i.url from 'oe=([0-9A-Fa-f]+)'))::bit(32)::bigint)
-                  <= NOW() + interval '1 day'
-            )
-          )
-        ORDER BY expires_at ASC
-        LIMIT ${limit}
-        FOR UPDATE SKIP LOCKED;
-      `),
-        this.prisma.$queryRawUnsafe<any[]>(`
-        SELECT COUNT(*) as total
-        FROM "AdImage" i
-        JOIN "Account" a ON i."accountId" = a.id
-        WHERE a."needsReauth" = false
-          AND (
-            i.url IS NULL 
-            OR (
-              i.url ~ 'oe='
-              AND to_timestamp(('x' || substring(i.url from 'oe=([0-9A-Fa-f]+)'))::bit(32)::bigint)
-                  <= NOW() + interval '1 day'
-            )
-          )
-      `),
+      const where: Prisma.AdImageWhereInput = {
+        account: { needsReauth: false },
+        OR: [
+          { urlExpiredAt: null },
+          { urlExpiredAt: { lte: new Date(Date.now() + 24 * 60 * 60 * 1000) } },
+        ],
+      };
+
+      const [existingImages, total] = await Promise.all([
+        this.prisma.adImage.findMany({
+          where,
+          orderBy: { urlExpiredAt: 'asc' },
+          take: limit,
+          select: { hash: true, url: true, accountId: true },
+        }),
+        this.prisma.adImage.count({ where }),
       ]);
+      const totalCount = total;
+
+      this.logger.log(
+        `[syncImage] Found ${existingImages.length} images to sync (Total pending: ${totalCount})`,
+      );
+
       if (!existingImages.length) return;
 
       const byAccount: Record<string, string[]> = {};
@@ -578,6 +575,26 @@ export class MetaSyncService {
             );
 
             const images = await fetchAll(cursor);
+
+            // Tìm các hash không được Meta trả về để đánh dấu ERROR
+            const returnedHashes = new Set(images.map((img) => img.hash));
+            const missingHashes = hashChunk.filter(
+              (h) => !returnedHashes.has(h),
+            );
+
+            if (missingHashes.length > 0) {
+              this.logger.warn(
+                `[syncImage] Account ${accountId}: ${missingHashes.length} images not found on Meta. Marking as ERROR.`,
+              );
+              await this.prisma.adImage.updateMany({
+                where: {
+                  hash: { in: missingHashes },
+                  accountId,
+                },
+                data: { status: 'ERROR', updatedAt: new Date() },
+              });
+            }
+
             if (!images.length) continue;
 
             const updateData = images.map((img) => ({
@@ -590,13 +607,16 @@ export class MetaSyncService {
                 height: img?.height,
                 width: img?.width,
                 rawPayload: toPrismaJson(img),
-                status: img?.status,
+                status: img?.status || 'READY',
                 createdTime: img?.created_time
                   ? new Date(img.created_time)
                   : undefined,
                 createdAt: img?.created_time
                   ? new Date(img.created_time)
                   : undefined,
+                urlExpiredAt: parseMetaUrlExpireTime(
+                  img?.permalink_url || img?.url,
+                ),
                 updatedAt: new Date(),
               },
             }));
@@ -609,6 +629,9 @@ export class MetaSyncService {
                 },
                 data: item.data,
               }),
+            );
+            this.logger.log(
+              `[syncImage] Account ${accountId}: Synced ${updateData.length} images`,
             );
 
             await sleep(800);
@@ -629,27 +652,26 @@ export class MetaSyncService {
     try {
       const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
 
-      const [assets, totalResult] = await Promise.all([
-        this.prisma.$queryRawUnsafe<any[]>(`
-          SELECT ca.*,
-                to_timestamp(('x' || substring(ca.video_source from 'oe=([0-9A-Fa-f]+)'))::bit(32)::bigint) AS expires_at
-          FROM "CreativeAsset" ca
-          WHERE ca.video_source ~ 'oe='
-            AND to_timestamp(('x' || substring(ca.video_source from 'oe=([0-9A-Fa-f]+)'))::bit(32)::bigint)
-                <= NOW() + interval '1 day'
-          ORDER BY expires_at ASC
-          LIMIT ${limit}
-          FOR UPDATE SKIP LOCKED;
-        `),
+      const where: Prisma.CreativeAssetWhereInput = {
+        type: 'VIDEO',
+        OR: [
+          { urlExpiredAt: null },
+          { urlExpiredAt: { lte: new Date(Date.now() + 24 * 60 * 60 * 1000) } },
+          { video_source: null },
+        ],
+      };
 
-        this.prisma.$queryRawUnsafe<any[]>(`
-          SELECT COUNT(*) as total
-          FROM "CreativeAsset" ca
-          WHERE ca.video_source ~ 'oe='
-            AND to_timestamp(('x' || substring(ca.video_source from 'oe=([0-9A-Fa-f]+)'))::bit(32)::bigint)
-                <= NOW() + interval '1 day';
-        `),
+      const [assets] = await Promise.all([
+        this.prisma.creativeAsset.findMany({
+          where,
+          orderBy: { urlExpiredAt: 'asc' },
+          take: limit,
+        }),
       ]);
+
+      this.logger.log(
+        `[syncFolderVideo] Found ${assets.length} folder videos to sync`,
+      );
 
       if (!assets.length) return true;
       const videoIds = assets.map((v) => v.video_id).filter(Boolean);
@@ -671,27 +693,39 @@ export class MetaSyncService {
       for (const asset of assets) {
         try {
           const vid = videosMap[asset.video_id];
-          if (!vid) continue;
+          if (!vid) {
+            this.logger.warn(
+              `[syncFolderVideo] Video ID ${asset.video_id} not found in Meta response for Asset ${asset.id}`,
+            );
+            continue;
+          }
 
+          const thumbnail = vid?.thumbnails?.data?.find(
+            (th) => !!th?.is_preferred,
+          )?.uri;
           await this.prisma.creativeAsset.update({
             where: { id: asset.id },
             data: {
-              thumbnail: vid?.thumbnails?.data?.find((th) => !!th?.is_preferred)
-                ?.uri,
+              thumbnail: thumbnail,
               video_thumbnails: vid?.thumbnails ?? null,
               video_source: vid?.source ?? null,
+              urlExpiredAt: parseMetaUrlExpireTime(vid?.source || thumbnail),
             },
           });
+          this.logger.debug(
+            `[syncFolderVideo] Updated Asset ${asset.id} (Video ${asset.video_id}) successfully`,
+          );
         } catch (err: any) {
-          this.logger.error('[UPDATE ERROR]', {
-            assetId: asset.id,
-            error: err?.message,
-          });
+          this.logger.error(
+            `[syncFolderVideo] UPDATE ERROR Asset ${asset.id}`,
+            {
+              error: err?.message,
+            },
+          );
         }
       }
-      const total = Number(totalResult[0]?.total || 0);
       this.logger.log(
-        `[SYNC DONE] processed=${assets.length} - total ${total}`,
+        `[SYNC DONE] processed=${assets.length} - total ${assets?.length}`,
       );
       return true;
     } catch (err: any) {
@@ -705,27 +739,25 @@ export class MetaSyncService {
     try {
       const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
 
-      const [assets, totalResult] = await Promise.all([
-        this.prisma.$queryRawUnsafe<any[]>(`
-          SELECT ca.*,
-                to_timestamp(('x' || substring(ca."imageUrl" from 'oe=([0-9A-Fa-f]+)'))::bit(32)::bigint) AS expires_at
-          FROM "CreativeAsset" ca
-          WHERE ca."imageUrl" ~ 'oe='
-                      AND to_timestamp(('x' || substring(ca."imageUrl" from 'oe=([0-9A-Fa-f]+)'))::bit(32)::bigint)
-                          <= NOW() + interval '1 day'
-          ORDER BY expires_at ASC
-          LIMIT ${limit}
-          FOR UPDATE SKIP LOCKED;
-        `),
+      const where: Prisma.CreativeAssetWhereInput = {
+        type: 'IMAGE',
+        OR: [
+          { urlExpiredAt: null },
+          { urlExpiredAt: { lte: new Date(Date.now() + 24 * 60 * 60 * 1000) } },
+        ],
+      };
 
-        this.prisma.$queryRawUnsafe<any[]>(`
-          SELECT COUNT(*) as total
-          FROM "CreativeAsset" ca
-          WHERE ca."imageUrl" ~ 'oe='
-            AND to_timestamp(('x' || substring(ca."imageUrl" from 'oe=([0-9A-Fa-f]+)'))::bit(32)::bigint)
-                <= NOW() + interval '1 day';
-        `),
+      const [assets] = await Promise.all([
+        this.prisma.creativeAsset.findMany({
+          where,
+          orderBy: { urlExpiredAt: 'asc' },
+          take: limit,
+        }),
       ]);
+
+      this.logger.log(
+        `[syncFolderImage] Found ${assets.length} folder images to sync`,
+      );
 
       if (!assets.length) return true;
 
@@ -738,7 +770,7 @@ export class MetaSyncService {
           fields: ['hash', 'url', 'name', 'creation_time', 'id'],
         });
       } catch (err: any) {
-        this.logger.error('[FB API ERROR]', err?.message);
+        this.logger.error('[FB API ERROR]', err?.message, err);
         return false;
       }
       const imagesMap = response || {};
@@ -746,23 +778,36 @@ export class MetaSyncService {
       for (const asset of assets) {
         try {
           const img = imagesMap[asset.id];
-          if (!img) continue;
+          if (!img) {
+            this.logger.warn(
+              `[syncFolderImage] Asset ID ${asset.id} not found in Meta response`,
+            );
+            continue;
+          }
 
           await this.prisma.creativeAsset.update({
             where: { id: asset.id },
-            data: { imageUrl: img.url, thumbnail: img.url },
+            data: {
+              imageUrl: img.url,
+              thumbnail: img.url,
+              urlExpiredAt: parseMetaUrlExpireTime(img.url),
+            },
           });
+          this.logger.debug(
+            `[syncFolderImage] Updated Asset ${asset.id} successfully`,
+          );
         } catch (err: any) {
-          this.logger.error('[UPDATE ERROR]', {
-            assetId: asset.id,
-            error: err?.message,
-          });
+          this.logger.error(
+            `[syncFolderImage] UPDATE ERROR Asset ${asset.id}`,
+            {
+              error: err?.message,
+            },
+          );
         }
       }
 
-      const total = Number(totalResult[0]?.total || 0);
       this.logger.log(
-        `[SYNC DONE] processed=${assets.length} - total ${total}`,
+        `[SYNC DONE] processed=${assets.length} - total ${assets?.length}`,
       );
       return true;
     } catch (err: any) {
