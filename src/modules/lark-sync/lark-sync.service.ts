@@ -332,6 +332,7 @@ export class LarkSyncService {
 
     this.logger.log('Scanning files on Google Drive...');
 
+    // 1. Quét hàng loạt các tệp trong Shared Drive / Chia sẻ trực tiếp
     do {
       const res = await this.driveSA.files.list({
         fields:
@@ -372,7 +373,6 @@ export class LarkSyncService {
       });
 
       if (driveOps.length > 0) {
-        // Chia nhỏ transaction để tránh timeout khi xử lý quá nhiều file cùng lúc
         const batches = chunk(driveOps, 200);
         for (const batchOps of batches) {
           await this.prisma.$transaction(batchOps);
@@ -382,6 +382,124 @@ export class LarkSyncService {
       pageToken = res.data.nextPageToken || undefined;
     } while (pageToken);
 
+    // 2. Lấy danh sách tất cả drive_id từ LarkRecord để kiểm tra ngoại lệ (file Public)
+    const records = await this.prisma.larkRecord.findMany({
+      where: {
+        drive_url: { not: null },
+      },
+      select: {
+        id: true,
+        drive_url: true,
+      },
+    });
+
+    const mapping = records.map((r) => ({
+      id: r.id,
+      driveId: extractDriveId(r.drive_url),
+    })).filter((m) => m.driveId);
+
+    const driveIdsToCheck = Array.from(new Set(mapping.map((m) => m.driveId) as string[]));
+
+    // Lọc ra các driveId đã được quét thành công ở bước 1
+    const scannedDriveFiles = await this.prisma.driveFile.findMany({
+      where: {
+        id: { in: driveIdsToCheck },
+        last_seen_at: now,
+      },
+      select: { id: true },
+    });
+
+    const scannedIdsSet = new Set(scannedDriveFiles.map((d) => d.id));
+    const exceptionalIds = driveIdsToCheck.filter((id) => !scannedIdsSet.has(id));
+
+    // Kiểm tra trực tiếp các tệp ngoại lệ (hỗ trợ file Public)
+    // Để tối ưu tốc độ và tránh Rate Limit của Google Drive API:
+    // Bỏ qua và giữ nguyên drive_permission = true đối với các tệp đã được xác thực thành công trong vòng 6 giờ qua.
+    const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000);
+    const recentlyVerifiedFiles = await this.prisma.driveFile.findMany({
+      where: {
+        id: { in: exceptionalIds },
+        drive_permission: true,
+        last_seen_at: { gte: sixHoursAgo },
+      },
+      select: { id: true },
+    });
+
+    const recentlyVerifiedIds = new Set(recentlyVerifiedFiles.map((d) => d.id));
+
+    // Gia hạn trực tiếp trong DB cho các tệp đã xác thực gần đây (Mất 0ms, 0 API calls)
+    if (recentlyVerifiedFiles.length > 0) {
+      await this.prisma.driveFile.updateMany({
+        where: {
+          id: { in: Array.from(recentlyVerifiedIds) },
+        },
+        data: {
+          last_seen_at: now,
+        },
+      });
+    }
+
+    const finalIdsToQuery = exceptionalIds.filter((id) => !recentlyVerifiedIds.has(id));
+
+    if (finalIdsToQuery.length > 0) {
+      this.logger.log(`Checking ${finalIdsToQuery.length} exceptional/public drive files directly...`);
+      const chunks = chunk(finalIdsToQuery, 20);
+      for (const exceptionalChunk of chunks) {
+        await Promise.all(
+          exceptionalChunk.map(async (driveId) => {
+            try {
+              const res = await this.driveSA.files.get({
+                fileId: driveId,
+                fields: 'id,name,mimeType,parents,webViewLink,webContentLink,size',
+                supportsAllDrives: true,
+              });
+              const file = res.data;
+              await this.prisma.driveFile.upsert({
+                where: { id: driveId },
+                update: {
+                  name: file.name || 'Untitled',
+                  last_seen_at: now,
+                  webViewLink: file.webViewLink || null,
+                  webContentLink: file.webContentLink || null,
+                  mimeType: file.mimeType || null,
+                  size: file.size || null,
+                  drive_permission: true,
+                },
+                create: {
+                  id: driveId,
+                  raw: JSON.stringify(file),
+                  name: file.name || 'Untitled',
+                  mimeType: file.mimeType || null,
+                  last_seen_at: now,
+                  webViewLink: file.webViewLink || null,
+                  webContentLink: file.webContentLink || null,
+                  size: file.size || null,
+                  drive_permission: true,
+                },
+              });
+            } catch (err) {
+              // Ghi nhận tệp thực sự không có quyền hoặc bị xóa
+              await this.prisma.driveFile.upsert({
+                where: { id: driveId },
+                update: {
+                  drive_permission: false,
+                  last_seen_at: now,
+                },
+                create: {
+                  id: driveId,
+                  name: 'Unknown File',
+                  drive_permission: false,
+                  last_seen_at: now,
+                  raw: '{}',
+                },
+              });
+            }
+          })
+        );
+      }
+    }
+
+    // 3. Đánh dấu các tệp không còn thấy (và không phải file ngoại lệ thành công) là false
     const disabledFiles = await this.prisma.driveFile.updateMany({
       where: { last_seen_at: { lt: now } },
       data: { drive_permission: false },
