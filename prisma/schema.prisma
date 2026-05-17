@@ -29,6 +29,12 @@ enum MemberRole {
     VIEWER
 }
 
+enum FanpagePermission {
+    VIEW
+    EDIT
+    ADMIN
+}
+
 /// ===============================
 /// ENUMS
 /// ===============================
@@ -129,14 +135,16 @@ model User {
     // relations
     changeLogs     ChangeLog[]     @relation("change_actor")
     accountMembers AccountMember[] @relation("UserAccountMembers")
+    userFanpages   UserFanpage[]
+    projectMembers ProjectMember[]
+    folderMembers  FolderMember[]
 
-    createdAt    DateTime      @default(now())
-    createdById  String?
-    updatedAt    DateTime      @updatedAt
-    updatedById  String?
-    deletedAt    DateTime?
-    deletedById  String?
-    userFanpages UserFanpage[]
+    createdAt   DateTime  @default(now())
+    createdById String?
+    updatedAt   DateTime  @updatedAt
+    updatedById String?
+    deletedAt   DateTime?
+    deletedById String?
 
     activities UserActivity[]
 }
@@ -167,19 +175,21 @@ model UserFanpage {
     pageId String // ID của Fanpage (ví dụ từ Meta)
     page   Fanpage @relation(fields: [pageId], references: [id])
 
-    name      String? // Tên hiển thị trong dropdown
-    isActive  Boolean  @default(true)
-    createdAt DateTime @default(now())
+    name       String? // Tên hiển thị trong dropdown
+    permission FanpagePermission @default(VIEW)
+    isActive   Boolean           @default(true)
+    createdAt  DateTime          @default(now())
 
     @@index([userId, pageId])
 }
 
 // [{"id": "249650921563125", "name": "Seyoul Beauty - Malaysia"}, {"id": "111534788320800", "name": "Seyoul Smooth Skin - ผิวเรียบเนียนไร้กาลเวลา"}]
 model Fanpage {
-    id           String        @id
-    name         String?
-    userFanpages UserFanpage[]
-    creatives    Creative[]
+    id              String           @id
+    name            String?
+    userFanpages    UserFanpage[]
+    projectFanpages ProjectFanpage[]
+    creatives       Creative[]
 }
 
 model Account {
@@ -200,6 +210,7 @@ model Account {
 
     // relations
     members         AccountMember[]  @relation("AccountAccountMembers")
+    projectAccounts ProjectAccount[]
     campaigns       Campaign[]
     adSets          AdSet[]
     ads             Ad[]
@@ -1761,4 +1772,124 @@ model SystemConfig {
     updatedAt   DateTime @updatedAt
 
     @@map("system_configs")
+}
+
+model Permission {
+    id       String           @id @default(uuid())
+    action   String // e.g. "read", "write", "assign"
+    resource String // e.g. "ad_account", "fanpage", "campaign"
+    roles    RolePermission[]
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@unique([action, resource])
+}
+
+model RolePermission {
+    id           String     @id @default(uuid())
+    role         Role
+    permissionId String
+    permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+    createdAt DateTime @default(now())
+
+    @@unique([role, permissionId])
+    @@index([permissionId])
+}
+
+enum ProjectRole {
+    MANAGER
+    MEMBER
+}
+
+enum FolderPermission {
+    VIEW
+    EDIT
+}
+
+model Project {
+    id          String   @id @default(uuid())
+    name        String
+    description String?
+    status      String   @default("ACTIVE")
+    createdAt   DateTime @default(now())
+    updatedAt   DateTime @updatedAt
+
+    members  ProjectMember[]
+    accounts ProjectAccount[]
+    fanpages ProjectFanpage[]
+    folders  ProjectFolder[]
+}
+
+model ProjectMember {
+    id        String      @id @default(uuid())
+    projectId String
+    project   Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+    userId    String
+    user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+    role      ProjectRole
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@unique([projectId, userId])
+    @@index([projectId])
+    @@index([userId])
+}
+
+model ProjectAccount {
+    id        String  @id @default(uuid())
+    projectId String
+    project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+    accountId String
+    account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+    createdAt DateTime @default(now())
+
+    @@unique([projectId, accountId])
+    @@index([projectId])
+    @@index([accountId])
+}
+
+model ProjectFanpage {
+    id        String  @id @default(uuid())
+    projectId String
+    project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+    pageId    String
+    page      Fanpage @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+    createdAt DateTime @default(now())
+
+    @@unique([projectId, pageId])
+    @@index([projectId])
+    @@index([pageId])
+}
+
+model ProjectFolder {
+    id        String  @id @default(uuid())
+    projectId String
+    project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+    folderId  String
+
+    createdAt DateTime @default(now())
+
+    @@unique([projectId, folderId])
+    @@index([projectId])
+    @@index([folderId])
+}
+
+model FolderMember {
+    id         String           @id @default(uuid())
+    userId     String
+    user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+    folderId   String
+    permission FolderPermission
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@unique([userId, folderId])
+    @@index([userId])
+    @@index([folderId])
 }
