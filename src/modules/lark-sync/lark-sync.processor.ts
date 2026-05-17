@@ -16,19 +16,4 @@ export class LarkSyncProcessor {
     await this.larkSyncService.syncLarkToDrive();
     this.logger.log('✨ [JOB FINISHED] Lark <-> Drive Sync Workflow');
   }
-
-  @Process({ name: LARK_SYNC_JOBS.META_UPLOAD_WORKFLOW, concurrency: 1 })
-  async handleMetaUploadWorkflow(job: Job) {
-    this.logger.log('🚀 [JOB START] Meta Upload Workflow');
-    await this.larkSyncService.ensureFolderMeta();
-    // await this.larkSyncService.uploadDriveToMeta(10);
-    // this.logger.log('✨ [JOB FINISHED] Meta Upload Workflow');
-  }
-
-  // @Process({ name: LARK_SYNC_JOBS.CLEANUP_DUPLICATE_FOLDERS, concurrency: 1 })
-  // async handleCleanupDuplicateFolders(job: Job) {
-  //   this.logger.log('🚀 [JOB START] Cleanup Duplicate Folders');
-  //   await this.larkSyncService.cleanupDuplicateFolders();
-  //   this.logger.log('✨ [JOB FINISHED] Cleanup Duplicate Folders');
-  // }
 }
