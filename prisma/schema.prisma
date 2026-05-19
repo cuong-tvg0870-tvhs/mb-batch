@@ -199,6 +199,8 @@ model Account {
     name          String?
     currency      String?
     timezone      String?
+    businessId    String?
+    businessName  String?
     needsReauth   Boolean     @default(false)
     lastFetchedAt DateTime?
     rawPayload    Json?
@@ -1800,6 +1802,7 @@ model RolePermission {
 
 enum ProjectRole {
     MANAGER
+    LEADER
     MEMBER
 }
 
@@ -1892,4 +1895,34 @@ model FolderMember {
     @@unique([userId, folderId])
     @@index([userId])
     @@index([folderId])
+}
+
+model ProductCatalog {
+    id               String  @id // Meta Catalog ID
+    name             String
+    fallbackImageUrl String?
+    businessId       String? // Business Manager ID (plain string)
+    accountId        String? // Ad Account ID (plain string)
+
+    productSets ProductSet[]
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@index([businessId])
+    @@index([accountId])
+}
+
+model ProductSet {
+    id           String         @id // Meta Product Set ID
+    catalogId    String
+    catalog      ProductCatalog @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+    name         String
+    filter       Json?
+    productCount Int            @default(0)
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@index([catalogId])
 }

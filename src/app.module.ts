@@ -5,6 +5,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { configLoads } from './config';
 import { InsightSyncModule } from './modules/insight-sync/insight-sync.module';
 import { LarkSyncModule } from './modules/lark-sync/lark-sync.module';
+import { MediaSyncModule } from './modules/media-sync/media-sync.module';
 import { MetaSyncModule } from './modules/meta-sync/meta-sync.module';
 
 export const global_modules = [
@@ -33,7 +34,7 @@ export const global_modules = [
     InsightSyncModule,
     MetaSyncModule,
     LarkSyncModule,
-    // MediaSyncModule,
+    MediaSyncModule,
   ],
 })
 export class AppModule implements OnModuleInit {

@@ -1,57 +1,47 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { AssetType } from '@prisma/client';
-import { parseMetaUrlExpireTime, toPrismaJson } from '../../common/utils';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { AssetType, FolderStatus } from '@prisma/client';
+import axios from 'axios';
+import { parseMetaUrlExpireTime, sleep } from '../../common/utils';
 import { PrismaService } from '../prisma/prisma.service';
-import { META_MEDIA_SYNC_CONFIG_KEY } from './media-sync.constants';
 
 @Injectable()
-export class MediaSyncService {
+export class MediaSyncService implements OnModuleInit {
   private readonly logger = new Logger(MediaSyncService.name);
-
-  private currentConfig: {
-    token: string;
-    cookie: string;
-    businessId: string;
-    rootFolderId: string;
-  } | null = null;
+  private businessId = process.env.SDK_FACEBOOK_BUSINESS;
 
   constructor(private readonly prisma: PrismaService) {}
 
-  private async loadConfig() {
-    try {
-      const configRecord = await (this.prisma as any).systemConfig.findUnique({
-        where: { key: META_MEDIA_SYNC_CONFIG_KEY },
-      });
-
-      if (!configRecord || !configRecord.value) {
-        return null;
+  async onModuleInit() {
+    this.logger.log('Module initialized. Starting automatic sync...');
+    // Chạy ngầm để không block quá trình khởi động của NestJS
+    setTimeout(async () => {
+      try {
+        await this.syncMetaFolders();
+        await this.syncMetaAssets();
+        await this.syncVideoSources();
+        this.logger.log('✅ Automatic sync on module init completed.');
+      } catch (err) {
+        this.logger.error(
+          '❌ Error during automatic sync on module init:',
+          err,
+        );
       }
-
-      let value = configRecord.value;
-      if (typeof value === 'string') {
-        try {
-          value = JSON.parse(value);
-        } catch (e) {
-          this.logger.error('❌ Config value in DB is not a valid JSON object');
-          return null;
-        }
-      }
-
-      return value as any;
-    } catch (error) {
-      this.logger.error(`❌ Failed to load config from DB`);
-      return null;
-    }
+    }, 3000); // Delay 3s để đảm bảo DB và các module khác đã sẵn sàng
   }
 
-  private getHeaders() {
-    const cookie = this.currentConfig?.cookie || '';
+  async getMetaAuthConfig() {
+    const config = await this.prisma.systemConfig.findUnique({
+      where: { key: 'META_AUTH_CONFIG' },
+    });
+    return (config?.value as any) || {};
+  }
+
+  private getHeaders(authConfig: any) {
     return {
       accept: '*/*',
       'accept-language': 'en,vi;q=0.9,en-US;q=0.8,vi-VN;q=0.7',
       'content-type': 'application/x-www-form-urlencoded',
       origin: 'https://business.facebook.com',
-      priority: 'u=1, i',
       referer: 'https://business.facebook.com/',
       'sec-ch-ua':
         '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
@@ -62,119 +52,92 @@ export class MediaSyncService {
       'sec-fetch-site': 'same-site',
       'user-agent':
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      Cookie: cookie,
+      Cookie: authConfig?.cookie || '',
     };
   }
 
-  async fetchAllPages(initialUrl: string) {
+  private async handleMetaError(errorResponse: any) {
+    console.log(errorResponse);
+    if (!errorResponse) return;
+    const error = errorResponse.error || errorResponse;
+    if (!error || !error.code) return;
+
+    const code = error.code;
+    const type = error.type;
+
+    // OAuthException (190, 102) or Rate Limits (17, 4, 32, 613)
+    const isAuthError =
+      type === 'OAuthException' || code === 190 || code === 102;
+    const isLimitError =
+      code === 17 || code === 4 || code === 32 || code === 613;
+
+    if (isAuthError || isLimitError) {
+      this.logger.warn(
+        `Meta API Error [${code}]: ${error.message}. Clearing META_AUTH_CONFIG.`,
+      );
+      await this.prisma.systemConfig.deleteMany({
+        where: { key: 'META_AUTH_CONFIG' },
+      });
+    }
+  }
+
+  private async fetchAllPages(initialUrl: string, authConfig: any) {
+    this.logger.debug(`fetchAllPages: Starting fetch from initialUrl`);
     let results: any[] = [];
     let nextUrl = initialUrl;
-    let retryCount = 0;
-    const MAX_RETRIES = 3;
+    let pageCount = 0;
 
     while (nextUrl) {
-      this.logger.log(`📡 API Request: ${nextUrl.substring(0, 150)}...`);
-
+      pageCount++;
+      this.logger.debug(`fetchAllPages: Fetching page ${pageCount}...`);
       try {
-        const rawResponse = await fetch(nextUrl, {
-          headers: this.getHeaders(),
-          method: 'GET',
-          redirect: 'follow',
-        }).then((res) => res.text());
-
-        if (!rawResponse || rawResponse === 'undefined') {
-          this.logger.error('❌ Meta API returned empty or undefined response');
-          break;
-        }
-
-        let response: any;
-        try {
-          response = JSON.parse(rawResponse);
-        } catch (e) {
-          this.logger.error('❌ Failed to parse JSON response');
-          break;
-        }
-
-        if (response.error) {
-          const errorMsg = response.error.message || '';
-          this.logger.error(`❌ Meta API Error: ${errorMsg}`);
-
-          // Nếu bị block "too fast", thực hiện retry với thời gian chờ lâu hơn
-          if (
-            errorMsg.includes('too fast') ||
-            errorMsg.includes('temporarily blocked') ||
-            response.error.code === 4 ||
-            response.error.code === 17
-          ) {
-            if (retryCount < MAX_RETRIES) {
-              retryCount++;
-              const waitTime = Math.pow(2, retryCount) * 10000; // 20s, 40s, 80s
-              this.logger.warn(
-                `⚠️ Rate limited. Retrying in ${waitTime / 1000}s... (Attempt ${retryCount}/${MAX_RETRIES})`,
-              );
-              await new Promise((resolve) => setTimeout(resolve, waitTime));
-              continue; // Thử lại URL hiện tại
-            }
-          }
-          break;
-        }
-
-        const data = response.data || [];
-        results = results.concat(data);
-        retryCount = 0; // Reset retry count on success
-
-        if (data.length > 0) {
-          this.logger.log(
-            `📥 Received ${data.length} items (Current batch total: ${results.length})`,
+        const response = await axios.get(nextUrl, {
+          headers: this.getHeaders(authConfig),
+        });
+        if (response.data.error) {
+          this.logger.debug(
+            `fetchAllPages: Meta error received on page ${pageCount}`,
           );
+          await this.handleMetaError(response.data);
+          break;
         }
-
-        nextUrl = response.paging?.next;
-
-        if (nextUrl) {
-          // Tăng delay ngẫu nhiên từ 2-4 giây để giống người dùng thật
-          const delay = Math.floor(Math.random() * 2000) + 2000;
-          await new Promise((resolve) => setTimeout(resolve, delay));
-        }
+        const data = response.data.data || [];
+        this.logger.debug(
+          `fetchAllPages: Fetched ${data.length} items on page ${pageCount}`,
+        );
+        results = results.concat(data);
+        nextUrl = response.data.paging?.next;
       } catch (err: any) {
-        this.logger.error(`🔥 Fetch Error: ${err.message}`);
+        await this.handleMetaError(err.response?.data);
+        this.logger.error(
+          `Fetch All Pages Error: ${err.response?.data || err.message}`,
+        );
         break;
       }
     }
+    this.logger.debug(
+      `fetchAllPages: Finished. Total items: ${results.length}`,
+    );
     return results;
   }
 
-  async handleMediaSync() {
-    this.logger.log('⏰ Starting Media Sync...');
-
-    const config = await this.loadConfig();
-    if (!config || !config.token || !config.cookie) {
-      this.logger.error(
-        '❌ Missing or Invalid META_MEDIA_SYNC_CONFIG (token/cookie) in SystemConfig table.',
-      );
-      return;
+  async syncMetaFolders() {
+    this.logger.log('📁 Starting Folders Sync...');
+    const authConfig = await this.getMetaAuthConfig();
+    const token = authConfig.accessToken;
+    if (!token) {
+      this.logger.error('Chưa cấu hình Meta Auth');
+      return { success: false, error: 'Chưa cấu hình Meta Auth' };
     }
 
-    this.currentConfig = config;
-    const { rootFolderId, businessId } = config;
-
-    try {
-      if (rootFolderId) {
-        await this.syncFolders(rootFolderId);
-      }
-      if (businessId) {
-        await this.syncCreatives(businessId);
-      }
-      this.logger.log('✅ Media Sync completed');
-    } catch (error: any) {
-      this.logger.error(`❌ Sync failed: ${error.message}`);
-    } finally {
-      this.currentConfig = null;
+    const rootId = '4303729193176038';
+    if (!rootId) {
+      this.logger.error('Thiếu Root Folder ID hoặc Business ID để sync');
+      return {
+        success: false,
+        error: 'Thiếu Root Folder ID hoặc Business ID để sync',
+      };
     }
-  }
-
-  async syncFolders(folderId: string) {
-    this.logger.log(`📁 Processing Folders sync starting from: ${folderId}`);
 
     const fields = [
       'id',
@@ -182,11 +145,46 @@ export class MediaSyncService {
       'description',
       'creation_time',
       'parent_folder',
-      'subfolders{id,name,description,creation_time,parent_folder,subfolders{id,name,description,creation_time,parent_folder,subfolders{id,name,description,creation_time,parent_folder,subfolders{id,name,description,creation_time,parent_folder}}}}',
+      `
+      subfolders.limit(200){
+        id,
+        name,
+        description,
+        creation_time,
+        parent_folder,
+        subfolders.limit(200){
+          id,
+          name,
+          description,
+          creation_time,
+          parent_folder,
+          subfolders.limit(200){
+            id,
+            name,
+            description,
+            creation_time,
+            parent_folder,
+            subfolders.limit(200){
+              id,
+              name,
+              description,
+              creation_time,
+              parent_folder,
+              subfolders.limit(200){
+                id,
+                name,
+                description,
+                creation_time,
+                parent_folder
+              }
+            }
+          }
+        }
+      }`.replace(/\s+/g, ''),
     ];
 
     const params = new URLSearchParams({
-      access_token: this.currentConfig!.token,
+      access_token: token,
       _reqName: 'object:creative_folder/subfolders',
       _reqSrc: 'AssetLibraryBizCreativeDataLoader.brands',
       fields: fields.join(','),
@@ -199,131 +197,294 @@ export class MediaSyncService {
       metadata: '1',
     });
 
-    try {
-      const url = `https://graph.facebook.com/v17.0/${folderId}/subfolders?${params.toString()}`;
-      const allFolders = await this.fetchAllPages(url);
+    const url = `https://graph.facebook.com/v24.0/${rootId}/subfolders?${params.toString()}`;
+    const allFolders = await this.fetchAllPages(url, authConfig);
 
-      let totalUpserted = 0;
+    // Identify top-level folders in DB under this root that are MISSING from Meta
+    const topLevelMetaIds = allFolders.map((f) => f.id);
+    await this.prisma.creativeFolder.updateMany({
+      where: {
+        parentId: rootId === authConfig.businessId ? null : rootId,
+        id: { notIn: topLevelMetaIds },
+      },
+      data: { status: FolderStatus.DEACTIVE },
+    });
 
-      const processFolder = async (
-        folder: any,
-        parentId: string | null = null,
-      ) => {
-        await this.prisma.creativeFolder.upsert({
-          where: { id: folder.id },
-          update: {
-            name: folder.name,
-            description: folder.description || null,
-            creation_time: folder.creation_time || null,
-            parentId: folder.parent_folder?.id || parentId || null,
-            updatedAt: new Date(),
+    const processFolder = async (
+      folder: any,
+      parentId: string | null = null,
+    ) => {
+      this.logger.debug(
+        `processFolder: Upserting folder ${folder.id} (${folder.name})`,
+      );
+      await this.prisma.creativeFolder.upsert({
+        where: { id: folder.id },
+        update: {
+          name: folder.name,
+          description: folder.description || null,
+          creation_time: folder.creation_time || null,
+          parentId: folder.parent_folder?.id || parentId || null,
+          status: FolderStatus.ACTIVE,
+          updatedAt: new Date(),
+        },
+        create: {
+          id: folder.id,
+          name: folder.name,
+          description: folder.description || null,
+          creation_time: folder.creation_time || null,
+          parentId: folder.parent_folder?.id || parentId || null,
+          status: FolderStatus.ACTIVE,
+        },
+      });
+
+      if (folder.subfolders?.data) {
+        const subMetaIds = folder.subfolders.data.map((f: any) => f.id);
+        await this.prisma.creativeFolder.updateMany({
+          where: {
+            parentId: folder.id,
+            id: { notIn: subMetaIds },
           },
-          create: {
-            id: folder.id,
-            name: folder.name,
-            description: folder.description || null,
-            creation_time: folder.creation_time || null,
-            parentId: folder.parent_folder?.id || parentId || null,
-          },
+          data: { status: FolderStatus.DEACTIVE },
         });
 
-        totalUpserted++;
-
-        if (folder.subfolders?.data && folder.subfolders.data.length > 0) {
-          for (const sub of folder.subfolders.data) {
-            await processFolder(sub, folder.id);
-          }
+        for (const sub of folder.subfolders.data) {
+          await processFolder(sub, folder.id);
         }
-      };
-
-      for (const folder of allFolders) {
-        await processFolder(folder, folderId);
       }
+    };
 
-      this.logger.log(
-        `✅ Folders sync DONE. Total processed: ${totalUpserted}`,
+    for (const folder of allFolders) {
+      await processFolder(
+        folder,
+        rootId === authConfig.businessId ? null : rootId,
       );
-    } catch (error: any) {
-      this.logger.error(`❌ syncFolders failed: ${error.message}`);
     }
+
+    this.logger.log(
+      `✅ Folders sync DONE. Total processed: ${allFolders.length}`,
+    );
+    return { success: true, count: allFolders.length, allFolders };
   }
 
-  async syncCreatives(businessId: string) {
-    this.logger.log(`🎨 Processing Creatives sync for business: ${businessId}`);
+  async syncMetaAssets(folderId?: string) {
+    this.logger.log('🎨 Starting Creatives Sync...');
+    const authConfig = await this.getMetaAuthConfig();
+    const token = authConfig.accessToken;
+    const businessId = this.businessId || '1916878948527753';
 
-    const rawFields =
-      '%5B%22id%22%2C%22name%22%2C%22creation_time%22%2C%22last_updated_time%22%2C%22creative_folders%7Bid%2Cname%7D%22%2C%22width%22%2C%22height%22%2C%22duration%22%2C%22type%22%2C%22thumbnail%22%2C%22video_id%22%2C%22hash%22%2C%22url%22%2C%22fragment_id%22%2C%22content%22%2C%22text_type%22%2C%22label%22%2C%22fragment_status%22%2C%22can_create_mockup_ad%22%2C%22ad_account_id%22%2C%22ad_id%22%2C%22parent_folder_id%22%5D';
+    if (!token || !businessId) {
+      this.logger.error('Chưa cấu hình Meta Auth');
+      return { success: false, error: 'Chưa cấu hình Meta Auth' };
+    }
 
-    const url =
-      `https://graph.facebook.com/v17.0/${businessId}/creatives` +
-      `?access_token=${this.currentConfig!.token}` +
-      `&__business_id=${businessId}` +
-      `&_reqName=object%3Abusiness%2Fcreatives` +
-      `&_reqSrc=AssetLibraryBizCreativeRecentViewDataLoader` +
-      `&fields=${rawFields}` +
-      `&limit=25` +
-      `&locale=en_US` +
-      `&method=get` +
-      `&pretty=0` +
-      `&suppress_http_code=1` +
-      `&xref=fe47908523b96c1c2`;
+    const fields = [
+      'id',
+      'name',
+      'creation_time',
+      'duration',
+      'hash',
+      'height',
+      'width',
+      'thumbnail',
+      'type',
+      'url',
+      'video_id',
+      'video{source, thumbnails}',
+      'parent_folder_id',
+    ];
 
-    try {
-      const allCreatives = await this.fetchAllPages(url);
-      let creativeCount = 0;
+    let nextUrl: string | null =
+      `https://graph.facebook.com/v24.0/${businessId}/creatives?access_token=${token}&fields=${fields.join(',')}&limit=50&method=get&pretty=0&suppress_http_code=1&xref=fe47908523b96c1c2`;
 
-      for (const creative of allCreatives) {
-        const folderId = creative.parent_folder_id;
-        if (!folderId) continue;
+    let totalSynced = 0;
+    let shouldStop = false;
+    let pageCount = 0;
 
-        const exists = await this.prisma.creativeAsset.findUnique({
-          where: { id: creative.id },
+    while (nextUrl && !shouldStop) {
+      pageCount++;
+      this.logger.debug(`syncMetaAssets: Fetching page ${pageCount}...`);
+      try {
+        const response = await axios.get(nextUrl, {
+          headers: this.getHeaders(authConfig),
         });
+        if (response.data.error) {
+          this.logger.debug(
+            `syncMetaAssets: Meta error received on page ${pageCount}`,
+          );
+          await this.handleMetaError(response.data);
+          break;
+        }
+        const data = response.data.data || [];
+        this.logger.debug(
+          `syncMetaAssets: Fetched ${data.length} assets on page ${pageCount}`,
+        );
+        if (data.length === 0) break;
 
-        if (!exists) {
-          await this.prisma.creativeFolder.upsert({
-            where: { id: folderId },
-            update: {},
-            create: {
-              id: folderId,
-              name:
-                creative.creative_folders?.data?.[0]?.name || 'Unknown Folder',
-            },
+        for (const asset of data) {
+          const exists = await this.prisma.creativeAsset.findUnique({
+            where: { id: asset.id },
           });
+
+          if (exists) {
+            shouldStop = true;
+            break;
+          }
+
+          if (asset.parent_folder_id) {
+            await this.prisma.creativeFolder.upsert({
+              where: { id: asset.parent_folder_id },
+              update: {},
+              create: {
+                id: asset.parent_folder_id,
+                name: 'Unknown Folder (Synced)',
+                status: FolderStatus.ACTIVE,
+              },
+            });
+          }
 
           await this.prisma.creativeAsset.create({
             data: {
-              id: creative.id,
-              name: creative.name,
-              type:
-                creative.type === 'Video' ? AssetType.VIDEO : AssetType.IMAGE,
-              width: creative.width,
-              height: creative.height,
-              thumbnail: creative.thumbnail,
-              imageUrl: creative.url,
-              imageHash: creative.hash,
-              video_id: creative.video_id,
-              video_source: creative.source,
-              duration: creative.duration,
-              creation_time: creative.creation_time,
-              folderId: folderId,
-              status: creative.fragment_status
-                ? toPrismaJson(creative.fragment_status)
-                : null,
-              urlExpiredAt: parseMetaUrlExpireTime(
-                creative.url || creative?.source || creative.thumbnail,
-              ),
+              id: asset.id,
+              name: asset.name,
+              type: asset.video_id ? AssetType.VIDEO : AssetType.IMAGE,
+              width: asset.width,
+              height: asset.height,
+              thumbnail: asset.thumbnail,
+              imageUrl: asset.url,
+              imageHash: asset.hash,
+              video_id: asset.video_id,
+              duration: asset.duration,
+              creation_time: asset.creation_time,
+              folderId: asset.parent_folder_id,
+              urlExpiredAt: parseMetaUrlExpireTime(asset.thumbnail),
             },
           });
-          creativeCount++;
+          totalSynced++;
+          this.logger.debug(
+            `syncMetaAssets: Saved new asset ${asset.id} (${asset.name})`,
+          );
         }
+
+        nextUrl = response.data.paging?.next;
+        if (data.length < 50) nextUrl = null;
+
+        if (nextUrl && !shouldStop) {
+          await sleep(3 * 60 * 1000);
+        }
+      } catch (err: any) {
+        await this.handleMetaError(err.response?.data || err);
+        this.logger.error(
+          `Asset Sync Error: ${err.response?.data || err.message}`,
+        );
+        break;
       }
+    }
+
+    this.logger.log(`✅ Creatives sync DONE. Total new assets: ${totalSynced}`);
+    return { success: true, count: totalSynced };
+  }
+
+  async syncVideoSources() {
+    this.logger.log('🎥 Starting Video Sources Sync...');
+    const authConfig = await this.getMetaAuthConfig();
+    const token = authConfig.accessToken;
+    if (!token) {
+      this.logger.error('Chưa cấu hình Meta Auth');
+      return { success: false, error: 'Chưa cấu hình Meta Auth' };
+    }
+
+    // Find videos that missing source
+    const videos = await this.prisma.creativeAsset.findMany({
+      where: {
+        type: AssetType.VIDEO,
+        video_source: null,
+      },
+      take: 20,
+    });
+
+    this.logger.log(`Starting to sync sources for ${videos.length} videos...`);
+
+    const chunkSize = 20;
+    let totalUpdated = 0;
+
+    const fields = [
+      'id',
+      'name',
+      'last_updated_time',
+      'parent_folder_id',
+      'video{id,source,length,thumbnails}',
+    ];
+
+    for (let i = 0; i < videos.length; i += chunkSize) {
+      const chunk = videos.slice(i, i + chunkSize);
+      this.logger.debug(
+        `syncVideoSources: Processing chunk ${i / chunkSize + 1} (${chunk.length} videos)`,
+      );
+
+      await Promise.all(
+        chunk.map(async (v) => {
+          const videoUrl = `https://graph.facebook.com/v24.0/${v.id}`;
+          const videoParams = new URLSearchParams({
+            access_token: token,
+            fields: fields.join(','),
+            method: 'get',
+            pretty: '0',
+            suppress_http_code: '1',
+            xref: 'fe47908523b96c1c2',
+          });
+
+          try {
+            this.logger.debug(
+              `syncVideoSources: Fetching source for video ID: ${v.id}`,
+            );
+            const res = await axios
+              .get(`${videoUrl}?${videoParams.toString()}`, {
+                headers: this.getHeaders(authConfig),
+              })
+              .then((r) => r.data);
+            if (res.id) {
+              const thumbnail = res.video?.thumbnails?.data?.find(
+                (d: any) => d?.is_preferred,
+              );
+              await this.prisma.creativeAsset.update({
+                where: { id: v.id },
+                data: {
+                  name: res.name,
+                  creation_time: res.last_updated_time,
+                  folderId: res.parent_folder_id,
+                  video_id: res.video.id,
+                  thumbnail: thumbnail?.uri,
+                  height: thumbnail?.height,
+                  width: thumbnail?.width,
+                  duration: res?.video?.length,
+                  video_source: res?.video?.source,
+                  video_thumbnails: res?.video?.thumbnails,
+                  urlExpiredAt: parseMetaUrlExpireTime(res?.video?.source),
+                },
+              });
+              totalUpdated++;
+            }
+          } catch (err: any) {
+            this.logger.error(
+              `Failed to sync source for video ${v.video_id || v.id}: ${err.message}`,
+            );
+          }
+        }),
+      );
 
       this.logger.log(
-        `✅ Creatives sync DONE. Total new assets: ${creativeCount}`,
+        `Synced ${Math.min(i + chunkSize, videos.length)}/${videos.length} videos...`,
       );
-    } catch (error: any) {
-      this.logger.error(`❌ syncCreatives failed: ${error.message}`);
+
+      if (i + chunkSize < videos.length) {
+        // Sleep 30 seconds between batches of 20 to avoid rate limits
+        await sleep(30000);
+      }
     }
+
+    this.logger.log(
+      `✅ Video sources sync DONE. Total updated: ${totalUpdated}`,
+    );
+    return { success: true, count: totalUpdated };
   }
 }

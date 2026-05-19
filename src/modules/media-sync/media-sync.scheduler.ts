@@ -18,13 +18,47 @@ export class MediaSyncScheduler implements OnModuleInit {
   }
 
   /**
-   * ⏰ MEDIA SYNC (Every 30 minutes)
+   * ⏰ SYNC FOLDERS (Every hour at minute 0)
    */
-  @Cron('*/30 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  async scheduleMediaSync() {
-    this.logger.log('📅 Scheduling Media Sync Workflow...');
+  @Cron('0 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async scheduleSyncFolders() {
+    this.logger.log('📅 Scheduling Folders Sync...');
     await this.mediaSyncQueue.add(
-      MEDIA_SYNC_JOBS.SYNC_WORKFLOW,
+      MEDIA_SYNC_JOBS.SYNC_FOLDERS,
+      {},
+      {
+        removeOnComplete: true,
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 60000 },
+      },
+    );
+  }
+
+  /**
+   * ⏰ SYNC CREATIVES (Every hour at minute 3)
+   */
+  @Cron('3 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async scheduleSyncCreatives() {
+    this.logger.log('📅 Scheduling Creatives Sync...');
+    await this.mediaSyncQueue.add(
+      MEDIA_SYNC_JOBS.SYNC_CREATIVES,
+      {},
+      {
+        removeOnComplete: true,
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 60000 },
+      },
+    );
+  }
+
+  /**
+   * ⏰ SYNC VIDEO SOURCES (Every hour at minute 6)
+   */
+  @Cron('6 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async scheduleSyncVideoSources() {
+    this.logger.log('📅 Scheduling Video Sources Sync...');
+    await this.mediaSyncQueue.add(
+      MEDIA_SYNC_JOBS.SYNC_VIDEO_SOURCES,
       {},
       {
         removeOnComplete: true,

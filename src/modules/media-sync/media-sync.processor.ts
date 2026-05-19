@@ -10,10 +10,24 @@ export class MediaSyncProcessor {
 
   constructor(private readonly mediaSyncService: MediaSyncService) {}
 
-  @Process({ name: MEDIA_SYNC_JOBS.SYNC_WORKFLOW, concurrency: 1 })
-  async handleMediaSync(job: Job) {
-    this.logger.log('🚀 [JOB START] Media Sync Workflow');
-    await this.mediaSyncService.handleMediaSync();
-    this.logger.log('✨ [JOB FINISHED] Media Sync Workflow');
+  @Process({ name: MEDIA_SYNC_JOBS.SYNC_FOLDERS, concurrency: 1 })
+  async handleSyncFolders(job: Job) {
+    this.logger.log('🚀 [JOB START] Sync Folders');
+    await this.mediaSyncService.syncMetaFolders();
+    this.logger.log('✨ [JOB FINISHED] Sync Folders');
+  }
+
+  @Process({ name: MEDIA_SYNC_JOBS.SYNC_CREATIVES, concurrency: 1 })
+  async handleSyncCreatives(job: Job) {
+    this.logger.log('🚀 [JOB START] Sync Creatives');
+    await this.mediaSyncService.syncMetaAssets();
+    this.logger.log('✨ [JOB FINISHED] Sync Creatives');
+  }
+
+  @Process({ name: MEDIA_SYNC_JOBS.SYNC_VIDEO_SOURCES, concurrency: 1 })
+  async handleSyncVideoSources(job: Job) {
+    this.logger.log('🚀 [JOB START] Sync Video Sources');
+    await this.mediaSyncService.syncVideoSources();
+    this.logger.log('✨ [JOB FINISHED] Sync Video Sources');
   }
 }
