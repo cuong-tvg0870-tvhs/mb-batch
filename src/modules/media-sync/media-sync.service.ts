@@ -300,6 +300,10 @@ export class MediaSyncService implements OnModuleInit {
     let shouldStop = false;
     let pageCount = 0;
 
+    // Định nghĩa mốc thời gian cutoff: 2 ngày cách đây
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - 2); // Lùi lại đúng 2 ngày
+
     while (nextUrl && !shouldStop) {
       pageCount++;
       this.logger.debug(`syncMetaAssets: Fetching page ${pageCount}...`);
@@ -318,16 +322,31 @@ export class MediaSyncService implements OnModuleInit {
         this.logger.debug(
           `syncMetaAssets: Fetched ${data.length} assets on page ${pageCount}`,
         );
+
         if (data.length === 0) break;
 
         for (const asset of data) {
+          // Parse thời gian tạo của asset
+          if (asset.creation_time) {
+            const assetCreationTime = new Date(asset.creation_time);
+
+            // Dừng hoàn toàn nếu gặp asset cũ hơn 2 ngày
+            if (assetCreationTime < cutoffDate) {
+              this.logger.debug(
+                `Reached asset older than cutoff date (${cutoffDate.toISOString()}). Stopping sync.`,
+              );
+              shouldStop = true;
+              break;
+            }
+          }
+
           const exists = await this.prisma.creativeAsset.findUnique({
             where: { id: asset.id },
           });
 
+          // Nếu asset đã tồn tại, BỎ QUA và check tiếp, KHÔNG DỪNG lại
           if (exists) {
-            shouldStop = true;
-            break;
+            continue;
           }
 
           if (asset.parent_folder_id) {
