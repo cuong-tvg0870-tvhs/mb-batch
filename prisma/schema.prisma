@@ -11,8 +11,7 @@ datasource db {
 // =======================
 enum Role {
     ADMIN
-    MANAGER
-    EDITOR
+    EMPLOYEE
 }
 
 enum AccountType {
@@ -30,6 +29,12 @@ enum MemberRole {
 }
 
 enum FanpagePermission {
+    VIEW
+    EDIT
+    ADMIN
+}
+
+enum ProductCatalogPermission {
     VIEW
     EDIT
     ADMIN
@@ -123,7 +128,7 @@ model User {
     employee_id   String?
     name          String
     password      String
-    role          Role    @default(EDITOR)
+    role          Role    @default(EMPLOYEE)
     facebookToken String?
 
     parentId String?
@@ -133,9 +138,10 @@ model User {
     locale String?
 
     // relations
-    changeLogs     ChangeLog[]     @relation("change_actor")
-    accountMembers AccountMember[] @relation("UserAccountMembers")
+    changeLogs     ChangeLog[]          @relation("change_actor")
+    accountMembers AccountMember[]      @relation("UserAccountMembers")
     userFanpages   UserFanpage[]
+    userCatalogs   UserProductCatalog[]
     projectMembers ProjectMember[]
     folderMembers  FolderMember[]
 
@@ -181,6 +187,20 @@ model UserFanpage {
     createdAt  DateTime          @default(now())
 
     @@index([userId, pageId])
+}
+
+model UserProductCatalog {
+    id        String         @id @default(uuid())
+    userId    String
+    user      User           @relation(fields: [userId], references: [id])
+    catalogId String
+    catalog   ProductCatalog @relation(fields: [catalogId], references: [id])
+
+    permission ProductCatalogPermission @default(VIEW)
+    isActive   Boolean                  @default(true)
+    createdAt  DateTime                 @default(now())
+
+    @@index([userId, catalogId])
 }
 
 // [{"id": "249650921563125", "name": "Seyoul Beauty - Malaysia"}, {"id": "111534788320800", "name": "Seyoul Smooth Skin - ผิวเรียบเนียนไร้กาลเวลา"}]
@@ -1558,8 +1578,9 @@ model SystemCampaign {
     campaigns            Campaign[]
     templateCampaigns    TemplateCampaign[]
 
-    errors       Json?
-    isPublishing Boolean @default(false)
+    errors           Json?
+    isPublishing     Boolean          @default(false)
+    publishHistories PublishHistory[]
 
     @@index([status])
     @@index([createdById, createdAt(sort: Desc)])
@@ -1642,6 +1663,19 @@ model SystemCreative {
 
     @@index([status])
     @@index([createdById, createdAt(sort: Desc)])
+}
+
+model PublishHistory {
+    id         String         @id @default(cuid())
+    campaignId String
+    campaign   SystemCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+    status     String // 'PUBLISHING', 'SUCCESS', 'FAILED'
+    steps      Json // Details of each step: [{ key, label, status, current, total, error, metaId }]
+    error      String? // Overall error message
+    createdAt  DateTime       @default(now())
+    updatedAt  DateTime       @updatedAt
+
+    @@index([campaignId])
 }
 
 enum FolderStatus {
@@ -1822,6 +1856,7 @@ model Project {
     members  ProjectMember[]
     accounts ProjectAccount[]
     fanpages ProjectFanpage[]
+    catalogs ProjectProductCatalog[]
     folders  ProjectFolder[]
 }
 
@@ -1869,6 +1904,20 @@ model ProjectFanpage {
     @@index([pageId])
 }
 
+model ProjectProductCatalog {
+    id        String         @id @default(uuid())
+    projectId String
+    project   Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+    catalogId String
+    catalog   ProductCatalog @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+
+    createdAt DateTime @default(now())
+
+    @@unique([projectId, catalogId])
+    @@index([projectId])
+    @@index([catalogId])
+}
+
 model ProjectFolder {
     id        String  @id @default(uuid())
     projectId String
@@ -1904,7 +1953,10 @@ model ProductCatalog {
     businessId       String? // Business Manager ID (plain string)
     accountId        String? // Ad Account ID (plain string)
 
-    productSets ProductSet[]
+    productSets     ProductSet[]
+    productFeeds    ProductFeed[]
+    userCatalogs    UserProductCatalog[]
+    projectCatalogs ProjectProductCatalog[]
 
     createdAt DateTime @default(now())
     updatedAt DateTime @updatedAt
@@ -1920,6 +1972,20 @@ model ProductSet {
     name         String
     filter       Json?
     productCount Int            @default(0)
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@index([catalogId])
+}
+
+model ProductFeed {
+    id        String         @id // Meta Product Feed ID
+    catalogId String
+    catalog   ProductCatalog @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+    name      String
+    country   String?
+    schedule  Json?
 
     createdAt DateTime @default(now())
     updatedAt DateTime @updatedAt

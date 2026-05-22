@@ -120,6 +120,7 @@ export const CREATIVE_FIELDS = [
   AdCreative.Fields.status,
   AdCreative.Fields.effective_object_story_id,
   AdCreative.Fields.object_story_spec,
+  AdCreative.Fields.url_tags,
 ];
 
 export const AD_IMAGE_FIELDS = [
