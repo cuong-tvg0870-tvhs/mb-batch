@@ -15,7 +15,7 @@ export class MetaSyncScheduler implements OnModuleInit {
   async onModuleInit() {
     this.logger.log('🚀 MetaSyncScheduler Initialized');
     // Initial sync on startup
-    await this.scheduleCampaignCoreSync();
+    // await this.scheduleCampaignCoreSync();
   }
 
   /**
