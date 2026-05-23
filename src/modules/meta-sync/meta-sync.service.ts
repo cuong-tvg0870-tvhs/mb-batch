@@ -490,9 +490,10 @@ export class MetaSyncService {
                 data: {
                   thumbnailUrl: thumbnail,
                   source: videoData.source || null,
-                  urlExpiredAt: parseMetaUrlExpireTime(
-                    videoData.source || thumbnail,
-                  ),
+                  urlExpiredAt: parseMetaUrlExpireTime([
+                    videoData.source,
+                    ...(videoData.thumbnails?.data?.map((t: any) => t.uri) || []),
+                  ]),
                   status: 'READY',
                   updatedAt: new Date(),
                 },
@@ -614,9 +615,10 @@ export class MetaSyncService {
                 createdAt: img?.created_time
                   ? new Date(img.created_time)
                   : undefined,
-                urlExpiredAt: parseMetaUrlExpireTime(
-                  img?.permalink_url || img?.url,
-                ),
+                urlExpiredAt: parseMetaUrlExpireTime([
+                  img?.permalink_url,
+                  img?.url,
+                ]),
                 updatedAt: new Date(),
               },
             }));
@@ -709,7 +711,10 @@ export class MetaSyncService {
               thumbnail: thumbnail,
               video_thumbnails: vid?.thumbnails ?? null,
               video_source: vid?.source ?? null,
-              urlExpiredAt: parseMetaUrlExpireTime(vid?.source || thumbnail),
+              urlExpiredAt: parseMetaUrlExpireTime([
+                vid?.source,
+                ...(vid?.thumbnails?.data?.map((t: any) => t.uri) || []),
+              ]),
             },
           });
           this.logger.debug(

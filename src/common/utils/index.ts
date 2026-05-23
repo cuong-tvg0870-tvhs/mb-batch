@@ -690,16 +690,31 @@ export function flattenFolders(
   return result;
 }
 
-export function parseMetaUrlExpireTime(url?: string): Date | null {
+export function parseMetaUrlExpireTime(url?: string | (string | undefined)[]): Date | null {
   if (!url) return null;
 
-  const match = url.match(/[?&]oe=([0-9A-Fa-f]+)/);
-  if (!match) return new Date('2099-12-31');
+  const urls = Array.isArray(url) ? url : [url];
+  const validUrls = urls.filter(Boolean) as string[];
 
-  try {
-    const timestamp = parseInt(match[1], 16);
-    return new Date(timestamp * 1000);
-  } catch (err) {
-    return new Date('2099-12-31');
+  if (validUrls.length === 0) return null;
+
+  let earliest: Date | null = null;
+
+  for (const u of validUrls) {
+    const match = u.match(/[?&]oe=([0-9A-Fa-f]+)/);
+    if (!match) continue;
+    try {
+      const timestamp = parseInt(match[1], 16);
+      const date = new Date(timestamp * 1000);
+      if (!earliest || date < earliest) {
+        earliest = date;
+      }
+    } catch (err) {
+      // ignore
+    }
   }
+
+  if (!earliest) return new Date('2099-12-31');
+
+  return earliest;
 }

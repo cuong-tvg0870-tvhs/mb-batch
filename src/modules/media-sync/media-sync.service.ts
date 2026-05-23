@@ -375,7 +375,7 @@ export class MediaSyncService implements OnModuleInit {
               duration: asset.duration,
               creation_time: asset.creation_time,
               folderId: asset.parent_folder_id,
-              urlExpiredAt: parseMetaUrlExpireTime(asset.thumbnail),
+              urlExpiredAt: parseMetaUrlExpireTime([asset.thumbnail, asset.url]),
             },
           });
           totalSynced++;
@@ -478,7 +478,10 @@ export class MediaSyncService implements OnModuleInit {
                   duration: res?.video?.length,
                   video_source: res?.video?.source,
                   video_thumbnails: res?.video?.thumbnails,
-                  urlExpiredAt: parseMetaUrlExpireTime(res?.video?.source),
+                  urlExpiredAt: parseMetaUrlExpireTime([
+                    res?.video?.source,
+                    ...(res?.video?.thumbnails?.data?.map((t: any) => t.uri) || []),
+                  ]),
                 },
               });
               totalUpdated++;
