@@ -30,4 +30,11 @@ export class MediaSyncProcessor {
     await this.mediaSyncService.syncVideoSources();
     this.logger.log('✨ [JOB FINISHED] Sync Video Sources');
   }
+
+  @Process({ name: MEDIA_SYNC_JOBS.SYNC_EXPIRED_URLS, concurrency: 1 })
+  async handleSyncExpiredUrls(job: Job) {
+    this.logger.log('🚀 [JOB START] Sync Expired URLs');
+    await this.mediaSyncService.syncExpiredUrls();
+    this.logger.log('✨ [JOB FINISHED] Sync Expired URLs');
+  }
 }

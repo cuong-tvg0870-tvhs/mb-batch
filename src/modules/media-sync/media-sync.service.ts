@@ -16,9 +16,10 @@ export class MediaSyncService implements OnModuleInit {
     // Chạy ngầm để không block quá trình khởi động của NestJS
     setTimeout(async () => {
       try {
-        await this.syncMetaFolders();
-        await this.syncMetaAssets();
-        await this.syncVideoSources();
+        await this.syncExpiredUrls();
+        // await this.syncMetaFolders();
+        // await this.syncMetaAssets();
+        // await this.syncVideoSources();
         this.logger.log('✅ Automatic sync on module init completed.');
       } catch (err) {
         this.logger.error(
@@ -202,12 +203,11 @@ export class MediaSyncService implements OnModuleInit {
 
     // Identify top-level folders in DB under this root that are MISSING from Meta
     const topLevelMetaIds = allFolders.map((f) => f.id);
-    await this.prisma.creativeFolder.updateMany({
+    await this.prisma.creativeFolder.deleteMany({
       where: {
         parentId: rootId === authConfig.businessId ? null : rootId,
         id: { notIn: topLevelMetaIds },
       },
-      data: { status: FolderStatus.DEACTIVE },
     });
 
     const processFolder = async (
@@ -239,12 +239,11 @@ export class MediaSyncService implements OnModuleInit {
 
       if (folder.subfolders?.data) {
         const subMetaIds = folder.subfolders.data.map((f: any) => f.id);
-        await this.prisma.creativeFolder.updateMany({
+        await this.prisma.creativeFolder.deleteMany({
           where: {
             parentId: folder.id,
             id: { notIn: subMetaIds },
           },
-          data: { status: FolderStatus.DEACTIVE },
         });
 
         for (const sub of folder.subfolders.data) {
@@ -375,7 +374,10 @@ export class MediaSyncService implements OnModuleInit {
               duration: asset.duration,
               creation_time: asset.creation_time,
               folderId: asset.parent_folder_id,
-              urlExpiredAt: parseMetaUrlExpireTime([asset.thumbnail, asset.url]),
+              urlExpiredAt: parseMetaUrlExpireTime([
+                asset.thumbnail,
+                asset.url,
+              ]),
             },
           });
           totalSynced++;
@@ -480,7 +482,8 @@ export class MediaSyncService implements OnModuleInit {
                   video_thumbnails: res?.video?.thumbnails,
                   urlExpiredAt: parseMetaUrlExpireTime([
                     res?.video?.source,
-                    ...(res?.video?.thumbnails?.data?.map((t: any) => t.uri) || []),
+                    ...(res?.video?.thumbnails?.data?.map((t: any) => t.uri) ||
+                      []),
                   ]),
                 },
               });
@@ -508,5 +511,155 @@ export class MediaSyncService implements OnModuleInit {
       `✅ Video sources sync DONE. Total updated: ${totalUpdated}`,
     );
     return { success: true, count: totalUpdated };
+  }
+
+  async syncExpiredUrls() {
+    this.logger.log('🔄 Starting Expired URLs Sync...');
+    const authConfig = await this.getMetaAuthConfig();
+    const token = authConfig.accessToken;
+    if (!token) {
+      this.logger.error('Chưa cấu hình Meta Auth');
+      return { success: false, error: 'Chưa cấu hình Meta Auth' };
+    }
+
+    const assets = await this.prisma.creativeAsset.findMany({
+      where: {
+        urlExpiredAt: {
+          lte: new Date(Date.now() + 24 * 60 * 60 * 1000), // Within 24 hours
+        },
+      },
+      take: 50,
+    });
+
+    if (assets.length === 0) {
+      this.logger.log('✅ No expired or expiring URLs found.');
+      return { success: true, count: 0 };
+    }
+
+    this.logger.log(`Refreshing URLs for ${assets.length} assets...`);
+
+    const fieldsVideo = [
+      'id',
+      'name',
+      'last_updated_time',
+      'parent_folder_id',
+      'video{id,source,length,thumbnails}',
+    ];
+    const fieldsImage = [
+      'id',
+      'name',
+      'last_updated_time',
+      'parent_folder_id',
+      'url',
+      'hash',
+      'height',
+      'width',
+    ];
+
+    let totalUpdated = 0;
+    let totalDeleted = 0;
+
+    for (const [index, asset] of assets.entries()) {
+      this.logger.log(
+        `[${index + 1}/${assets.length}] Đang xử lý asset: ${asset.id} (Type: ${asset.type})...`,
+      );
+
+      const isVideo = asset.type === AssetType.VIDEO;
+      const url = `https://graph.facebook.com/v24.0/${asset.id}`;
+      const params = new URLSearchParams({
+        access_token: token,
+        fields: (isVideo ? fieldsVideo : fieldsImage).join(','),
+        method: 'get',
+        pretty: '0',
+        suppress_http_code: '1',
+        xref: 'fe47908523b96c1c2',
+      });
+
+      try {
+        const res = await axios
+          .get(`${url}?${params.toString()}`, {
+            headers: this.getHeaders(authConfig),
+          })
+          .then((r) => r.data);
+
+        if (res.error) {
+          if (res.error.code === 100 || res.error.error_subcode === 33) {
+            this.logger.log(`Asset ${asset.id} not found on Meta. Deleting...`);
+            await this.prisma.creativeAsset.delete({ where: { id: asset.id } });
+            totalDeleted++;
+            continue;
+          } else {
+            await this.handleMetaError(res);
+            continue;
+          }
+        }
+
+        if (res.id) {
+          if (isVideo) {
+            const thumbnail = res.video?.thumbnails?.data?.find(
+              (d: any) => d?.is_preferred,
+            );
+            await this.prisma.creativeAsset.update({
+              where: { id: asset.id },
+              data: {
+                name: res.name || asset.name,
+                creation_time: res.last_updated_time || asset.creation_time,
+                folderId: res.parent_folder_id || asset.folderId,
+                video_id: res.video?.id || asset.video_id,
+                thumbnail: thumbnail?.uri || asset.thumbnail,
+                height: thumbnail?.height || asset.height,
+                width: thumbnail?.width || asset.width,
+                duration: res.video?.length || asset.duration,
+                video_source: res.video?.source || asset.video_source,
+                video_thumbnails:
+                  res.video?.thumbnails || asset.video_thumbnails,
+                urlExpiredAt: parseMetaUrlExpireTime([
+                  res.video?.source,
+                  ...(res.video?.thumbnails?.data?.map((t: any) => t.uri) ||
+                    []),
+                ]),
+              },
+            });
+          } else {
+            await this.prisma.creativeAsset.update({
+              where: { id: asset.id },
+              data: {
+                name: res.name || asset.name,
+                creation_time: res.last_updated_time || asset.creation_time,
+                folderId: res.parent_folder_id || asset.folderId,
+                imageUrl: res.url || asset.imageUrl,
+                thumbnail: res.url || asset.thumbnail,
+                imageHash: res.hash || asset.imageHash,
+                height: res.height || asset.height,
+                width: res.width || asset.width,
+                urlExpiredAt: parseMetaUrlExpireTime(res.url),
+              },
+            });
+          }
+          totalUpdated++;
+          this.logger.log(
+            `[${index + 1}/${assets.length}] ✅ Cập nhật thành công URL mới cho asset ${asset.id}`,
+          );
+        }
+      } catch (err: any) {
+        const errData = err.response?.data?.error || err.response?.data;
+        if (errData && (errData.code === 100 || errData.error_subcode === 33)) {
+          this.logger.log(`Asset ${asset.id} not found on Meta. Deleting...`);
+          await this.prisma.creativeAsset.delete({ where: { id: asset.id } });
+          totalDeleted++;
+        } else {
+          this.logger.error(
+            `Failed to refresh asset ${asset.id}: ${err.message}`,
+          );
+        }
+      }
+
+      await sleep(1000); // Tạm dừng 1s giữa mỗi request
+    }
+
+    this.logger.log(
+      `✅ Expired URLs sync DONE. Updated: ${totalUpdated}, Deleted: ${totalDeleted}`,
+    );
+    return { success: true, count: totalUpdated, deleted: totalDeleted };
   }
 }

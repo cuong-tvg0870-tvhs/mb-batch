@@ -144,6 +144,7 @@ model User {
     userCatalogs   UserProductCatalog[]
     projectMembers ProjectMember[]
     folderMembers  FolderMember[]
+    savedFilters   SavedFilter[]
 
     createdAt   DateTime  @default(now())
     createdById String?
@@ -1991,4 +1992,18 @@ model ProductFeed {
     updatedAt DateTime @updatedAt
 
     @@index([catalogId])
+}
+
+model SavedFilter {
+    id        String   @id @default(uuid())
+    userId    String
+    user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+    tableKey  String // Identifies the screen/table (e.g., "campaign-table")
+    name      String
+    filters   Json // Stores search, sortBy, sortOrder, and filters object
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@unique([userId, tableKey, name])
+    @@index([userId, tableKey])
 }

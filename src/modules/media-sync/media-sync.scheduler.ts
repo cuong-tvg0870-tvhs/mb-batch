@@ -67,4 +67,21 @@ export class MediaSyncScheduler implements OnModuleInit {
       },
     );
   }
+
+  /**
+   * ⏰ SYNC EXPIRED URLS (Every 2 hours at minute 0)
+   */
+  @Cron('0 */2 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async scheduleSyncExpiredUrls() {
+    this.logger.log('📅 Scheduling Expired URLs Sync...');
+    await this.mediaSyncQueue.add(
+      MEDIA_SYNC_JOBS.SYNC_EXPIRED_URLS,
+      {},
+      {
+        removeOnComplete: true,
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 60000 },
+      },
+    );
+  }
 }
