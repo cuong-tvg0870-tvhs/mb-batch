@@ -100,7 +100,7 @@ export class MediaSyncService implements OnModuleInit {
             `fetchAllPages: Meta error received on page ${pageCount}`,
           );
           await this.handleMetaError(response.data);
-          break;
+          throw new Error(response.data.error.message || 'Meta API Error in fetchAllPages');
         }
         const data = response.data.data || [];
         this.logger.debug(
@@ -113,7 +113,7 @@ export class MediaSyncService implements OnModuleInit {
         this.logger.error(
           `Fetch All Pages Error: ${err.response?.data || err.message}`,
         );
-        break;
+        throw err;
       }
     }
     this.logger.debug(
