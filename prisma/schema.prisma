@@ -719,6 +719,8 @@ model Creative {
     adVideo          AdVideo?          @relation(fields: [videoId], references: [id])
     creativeInsights CreativeInsight[]
 
+    assetMappings CreativeAssetMapping[]
+
     // INSIGHT DATA
     impressions Int?   @default(0)
     reach       Int?   @default(0)
@@ -1581,6 +1583,7 @@ model SystemCampaign {
 
     errors           Json?
     isPublishing     Boolean          @default(false)
+    hasMetaChanges   Boolean          @default(true)
     publishHistories PublishHistory[]
 
     @@index([status])
@@ -1744,7 +1747,25 @@ model CreativeAsset {
 
     larkRecord LarkRecord?
 
+    assetMappings CreativeAssetMapping[]
+
     @@index([folderId])
+}
+
+model CreativeAssetMapping {
+    id String @id @default(uuid())
+
+    creativeId String
+    creative   Creative @relation(fields: [creativeId], references: [id], onDelete: Cascade)
+
+    creativeAssetId String
+    creativeAsset   CreativeAsset @relation(fields: [creativeAssetId], references: [id], onDelete: Cascade)
+
+    createdAt DateTime @default(now())
+
+    @@unique([creativeId, creativeAssetId])
+    @@index([creativeAssetId])
+    @@index([creativeId])
 }
 
 model LarkRecord {
