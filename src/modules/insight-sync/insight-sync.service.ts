@@ -5,7 +5,7 @@ import { PrismaBatchHelper } from '../../common/helpers/prisma-batch.helper';
 import { chunk, extractCampaignMetrics } from '../../common/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { InsightSyncLevel, InsightSyncRange } from './insight-sync.constants';
-import { MetaApiService } from './meta-api.service';
+import { MetaApiService } from '../meta-api/meta-api.service';
 
 @Injectable()
 export class InsightSyncService {

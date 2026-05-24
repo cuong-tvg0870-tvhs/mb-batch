@@ -30,27 +30,12 @@ import { PrismaService } from '../prisma/prisma.service';
 @Injectable()
 export class MetaSyncService {
   private readonly logger = new Logger(MetaSyncService.name);
-  private initialized = false;
 
   constructor(private readonly prisma: PrismaService) {}
 
-  private init() {
-    if (!this.initialized) {
-      const token = process.env.SDK_FACEBOOK_ACCESS_TOKEN;
-      if (!token) {
-        throw new Error(
-          '❌ SDK_FACEBOOK_ACCESS_TOKEN is missing in environment variables!',
-        );
-      }
-      FacebookAdsApi.init(token);
-      this.initialized = true;
-      this.logger.log('✅ Meta SDK Initialized successfully');
-    }
-  }
-
   async syncCampaignData() {
     this.logger.log('⏰ Starting Batch Sync Campaign Data...');
-    this.init();
+
 
     try {
       const accounts = await this.prisma.account.findMany({
@@ -417,7 +402,7 @@ export class MetaSyncService {
   }
   async syncVideo(limit: number = 50) {
     this.logger.log('🔄 Sync Ad Video (fully optimized)');
-    this.init();
+
 
     try {
       const where: Prisma.AdVideoWhereInput = {
@@ -526,7 +511,7 @@ export class MetaSyncService {
 
   async syncImage(limit: number = 50) {
     this.logger.log('🔄 Sync AdImage (optimized)');
-    this.init();
+
     const prismaHelper = new PrismaBatchHelper(this.prisma);
 
     try {
@@ -650,7 +635,7 @@ export class MetaSyncService {
   }
 
   async syncFolderVideo(limit: number = 50) {
-    this.init();
+
     try {
       const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
 
@@ -740,7 +725,7 @@ export class MetaSyncService {
   }
 
   async syncFolderImage(limit: number = 50) {
-    this.init();
+
     try {
       const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
 

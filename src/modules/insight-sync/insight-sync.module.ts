@@ -5,7 +5,6 @@ import { INSIGHT_SYNC_QUEUE } from './insight-sync.constants';
 import { InsightSyncProcessor } from './insight-sync.processor';
 import { InsightSyncScheduler } from './insight-sync.scheduler';
 import { InsightSyncService } from './insight-sync.service';
-import { MetaApiService } from './meta-api.service';
 
 @Module({
   imports: [
@@ -15,7 +14,6 @@ import { MetaApiService } from './meta-api.service';
     }),
   ],
   providers: [
-    MetaApiService,
     InsightSyncService,
     InsightSyncProcessor,
     InsightSyncScheduler,

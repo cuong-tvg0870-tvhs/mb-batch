@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { AssetType, FolderStatus } from '@prisma/client';
-import axios from 'axios';
 import { parseMetaUrlExpireTime, sleep } from '../../common/utils';
+import { MetaApiService } from '../meta-api/meta-api.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
@@ -9,14 +9,17 @@ export class MediaSyncService implements OnModuleInit {
   private readonly logger = new Logger(MediaSyncService.name);
   private businessId = process.env.SDK_FACEBOOK_BUSINESS;
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly metaApi: MetaApiService,
+  ) {}
 
   async onModuleInit() {
     this.logger.log('Module initialized. Starting automatic sync...');
     // Chạy ngầm để không block quá trình khởi động của NestJS
     setTimeout(async () => {
       try {
-        await this.syncExpiredUrls();
+        // await this.syncVideoSources();
         // await this.syncMetaFolders();
         // await this.syncMetaAssets();
         // await this.syncVideoSources();
@@ -30,101 +33,10 @@ export class MediaSyncService implements OnModuleInit {
     }, 3000); // Delay 3s để đảm bảo DB và các module khác đã sẵn sàng
   }
 
-  async getMetaAuthConfig() {
-    const config = await this.prisma.systemConfig.findUnique({
-      where: { key: 'META_AUTH_CONFIG' },
-    });
-    return (config?.value as any) || {};
-  }
-
-  private getHeaders(authConfig: any) {
-    return {
-      accept: '*/*',
-      'accept-language': 'en,vi;q=0.9,en-US;q=0.8,vi-VN;q=0.7',
-      'content-type': 'application/x-www-form-urlencoded',
-      origin: 'https://business.facebook.com',
-      referer: 'https://business.facebook.com/',
-      'sec-ch-ua':
-        '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
-      'sec-ch-ua-mobile': '?0',
-      'sec-ch-ua-platform': '"macOS"',
-      'sec-fetch-dest': 'empty',
-      'sec-fetch-mode': 'cors',
-      'sec-fetch-site': 'same-site',
-      'user-agent':
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      Cookie: authConfig?.cookie || '',
-    };
-  }
-
-  private async handleMetaError(errorResponse: any) {
-    console.log(errorResponse);
-    if (!errorResponse) return;
-    const error = errorResponse.error || errorResponse;
-    if (!error || !error.code) return;
-
-    const code = error.code;
-    const type = error.type;
-
-    // OAuthException (190, 102) or Rate Limits (17, 4, 32, 613)
-    const isAuthError =
-      type === 'OAuthException' || code === 190 || code === 102;
-    const isLimitError =
-      code === 17 || code === 4 || code === 32 || code === 613;
-
-    if (isAuthError || isLimitError) {
-      this.logger.warn(
-        `Meta API Error [${code}]: ${error.message}. Clearing META_AUTH_CONFIG.`,
-      );
-      await this.prisma.systemConfig.deleteMany({
-        where: { key: 'META_AUTH_CONFIG' },
-      });
-    }
-  }
-
-  private async fetchAllPages(initialUrl: string, authConfig: any) {
-    this.logger.debug(`fetchAllPages: Starting fetch from initialUrl`);
-    let results: any[] = [];
-    let nextUrl = initialUrl;
-    let pageCount = 0;
-
-    while (nextUrl) {
-      pageCount++;
-      this.logger.debug(`fetchAllPages: Fetching page ${pageCount}...`);
-      try {
-        const response = await axios.get(nextUrl, {
-          headers: this.getHeaders(authConfig),
-        });
-        if (response.data.error) {
-          this.logger.debug(
-            `fetchAllPages: Meta error received on page ${pageCount}`,
-          );
-          await this.handleMetaError(response.data);
-          throw new Error(response.data.error.message || 'Meta API Error in fetchAllPages');
-        }
-        const data = response.data.data || [];
-        this.logger.debug(
-          `fetchAllPages: Fetched ${data.length} items on page ${pageCount}`,
-        );
-        results = results.concat(data);
-        nextUrl = response.data.paging?.next;
-      } catch (err: any) {
-        await this.handleMetaError(err.response?.data);
-        this.logger.error(
-          `Fetch All Pages Error: ${err.response?.data || err.message}`,
-        );
-        throw err;
-      }
-    }
-    this.logger.debug(
-      `fetchAllPages: Finished. Total items: ${results.length}`,
-    );
-    return results;
-  }
-
+  // Removed helper methods (getMetaAuthConfig, getHeaders, handleMetaError, fetchAllPages)
   async syncMetaFolders() {
     this.logger.log('📁 Starting Folders Sync...');
-    const authConfig = await this.getMetaAuthConfig();
+    const authConfig = await this.metaApi.getMetaAuthConfig();
     const token = authConfig.accessToken;
     if (!token) {
       this.logger.error('Chưa cấu hình Meta Auth');
@@ -185,7 +97,6 @@ export class MediaSyncService implements OnModuleInit {
     ];
 
     const params = new URLSearchParams({
-      access_token: token,
       _reqName: 'object:creative_folder/subfolders',
       _reqSrc: 'AssetLibraryBizCreativeDataLoader.brands',
       fields: fields.join(','),
@@ -199,7 +110,7 @@ export class MediaSyncService implements OnModuleInit {
     });
 
     const url = `https://graph.facebook.com/v24.0/${rootId}/subfolders?${params.toString()}`;
-    const allFolders = await this.fetchAllPages(url, authConfig);
+    const allFolders = await this.metaApi.fetchAllPages(url, authConfig);
 
     // Identify top-level folders in DB under this root that are MISSING from Meta
     const topLevelMetaIds = allFolders.map((f) => f.id);
@@ -267,7 +178,7 @@ export class MediaSyncService implements OnModuleInit {
 
   async syncMetaAssets(folderId?: string) {
     this.logger.log('🎨 Starting Creatives Sync...');
-    const authConfig = await this.getMetaAuthConfig();
+    const authConfig = await this.metaApi.getMetaAuthConfig();
     const token = authConfig.accessToken;
     const businessId = this.businessId || '1916878948527753';
 
@@ -294,7 +205,6 @@ export class MediaSyncService implements OnModuleInit {
 
     let nextUrl: string | null =
       `https://graph.facebook.com/v24.0/${businessId}/creatives?access_token=${token}&fields=${fields.join(',')}&limit=50&method=get&pretty=0&suppress_http_code=1&xref=fe47908523b96c1c2`;
-
     let totalSynced = 0;
     let shouldStop = false;
     let pageCount = 0;
@@ -307,17 +217,8 @@ export class MediaSyncService implements OnModuleInit {
       pageCount++;
       this.logger.debug(`syncMetaAssets: Fetching page ${pageCount}...`);
       try {
-        const response = await axios.get(nextUrl, {
-          headers: this.getHeaders(authConfig),
-        });
-        if (response.data.error) {
-          this.logger.debug(
-            `syncMetaAssets: Meta error received on page ${pageCount}`,
-          );
-          await this.handleMetaError(response.data);
-          break;
-        }
-        const data = response.data.data || [];
+        const response = await this.metaApi.request('get', nextUrl);
+        const data = response.data || [];
         this.logger.debug(
           `syncMetaAssets: Fetched ${data.length} assets on page ${pageCount}`,
         );
@@ -386,14 +287,13 @@ export class MediaSyncService implements OnModuleInit {
           );
         }
 
-        nextUrl = response.data.paging?.next;
+        nextUrl = response.paging?.next;
         if (data.length < 50) nextUrl = null;
 
         if (nextUrl && !shouldStop) {
           await sleep(3 * 60 * 1000);
         }
       } catch (err: any) {
-        await this.handleMetaError(err.response?.data || err);
         this.logger.error(
           `Asset Sync Error: ${err.response?.data || err.message}`,
         );
@@ -407,7 +307,7 @@ export class MediaSyncService implements OnModuleInit {
 
   async syncVideoSources() {
     this.logger.log('🎥 Starting Video Sources Sync...');
-    const authConfig = await this.getMetaAuthConfig();
+    const authConfig = await this.metaApi.getMetaAuthConfig();
     const token = authConfig.accessToken;
     if (!token) {
       this.logger.error('Chưa cấu hình Meta Auth');
@@ -416,10 +316,7 @@ export class MediaSyncService implements OnModuleInit {
 
     // Find videos that missing source
     const videos = await this.prisma.creativeAsset.findMany({
-      where: {
-        type: AssetType.VIDEO,
-        video_source: null,
-      },
+      where: { type: AssetType.VIDEO, video_source: null },
       take: 20,
     });
 
@@ -444,46 +341,33 @@ export class MediaSyncService implements OnModuleInit {
 
       await Promise.all(
         chunk.map(async (v) => {
-          const videoUrl = `https://graph.facebook.com/v24.0/${v.id}`;
-          const videoParams = new URLSearchParams({
-            access_token: token,
-            fields: fields.join(','),
-            method: 'get',
-            pretty: '0',
-            suppress_http_code: '1',
-            xref: 'fe47908523b96c1c2',
-          });
-
           try {
             this.logger.debug(
               `syncVideoSources: Fetching source for video ID: ${v.id}`,
             );
-            const res = await axios
-              .get(`${videoUrl}?${videoParams.toString()}`, {
-                headers: this.getHeaders(authConfig),
-              })
-              .then((r) => r.data);
+            const res = await this.metaApi.request('get', v.video_id!, {
+              fields: 'id,source,length,thumbnails',
+            });
             if (res.id) {
-              const thumbnail = res.video?.thumbnails?.data?.find(
+              const thumbnail = res?.thumbnails?.data?.find(
                 (d: any) => d?.is_preferred,
               );
               await this.prisma.creativeAsset.update({
-                where: { id: v.id },
+                where: { video_id: res.id },
                 data: {
-                  name: res.name,
-                  creation_time: res.last_updated_time,
-                  folderId: res.parent_folder_id,
-                  video_id: res.video.id,
+                  // name: res.name,
+                  // creation_time: res.last_updated_time,
+                  // folderId: res.parent_folder_id,
+                  // video_id: res.video.id,
                   thumbnail: thumbnail?.uri,
                   height: thumbnail?.height,
                   width: thumbnail?.width,
-                  duration: res?.video?.length,
-                  video_source: res?.video?.source,
-                  video_thumbnails: res?.video?.thumbnails,
+                  duration: res?.length,
+                  video_source: res?.source,
+                  video_thumbnails: res?.thumbnails,
                   urlExpiredAt: parseMetaUrlExpireTime([
-                    res?.video?.source,
-                    ...(res?.video?.thumbnails?.data?.map((t: any) => t.uri) ||
-                      []),
+                    res?.source,
+                    ...(res?.thumbnails?.data?.map((t: any) => t.uri) || []),
                   ]),
                 },
               });
@@ -503,7 +387,7 @@ export class MediaSyncService implements OnModuleInit {
 
       if (i + chunkSize < videos.length) {
         // Sleep 30 seconds between batches of 20 to avoid rate limits
-        await sleep(30000);
+        await sleep(100000);
       }
     }
 
@@ -515,7 +399,7 @@ export class MediaSyncService implements OnModuleInit {
 
   async syncExpiredUrls() {
     this.logger.log('🔄 Starting Expired URLs Sync...');
-    const authConfig = await this.getMetaAuthConfig();
+    const authConfig = await this.metaApi.getMetaAuthConfig();
     const token = authConfig.accessToken;
     if (!token) {
       this.logger.error('Chưa cấu hình Meta Auth');
@@ -565,34 +449,11 @@ export class MediaSyncService implements OnModuleInit {
       );
 
       const isVideo = asset.type === AssetType.VIDEO;
-      const url = `https://graph.facebook.com/v24.0/${asset.id}`;
-      const params = new URLSearchParams({
-        access_token: token,
-        fields: (isVideo ? fieldsVideo : fieldsImage).join(','),
-        method: 'get',
-        pretty: '0',
-        suppress_http_code: '1',
-        xref: 'fe47908523b96c1c2',
-      });
 
       try {
-        const res = await axios
-          .get(`${url}?${params.toString()}`, {
-            headers: this.getHeaders(authConfig),
-          })
-          .then((r) => r.data);
-
-        if (res.error) {
-          if (res.error.code === 100 || res.error.error_subcode === 33) {
-            this.logger.log(`Asset ${asset.id} not found on Meta. Deleting...`);
-            await this.prisma.creativeAsset.delete({ where: { id: asset.id } });
-            totalDeleted++;
-            continue;
-          } else {
-            await this.handleMetaError(res);
-            continue;
-          }
-        }
+        const res = await this.metaApi.request('get', asset.id, {
+          fields: (isVideo ? fieldsVideo : fieldsImage).join(','),
+        });
 
         if (res.id) {
           if (isVideo) {
@@ -642,7 +503,8 @@ export class MediaSyncService implements OnModuleInit {
           );
         }
       } catch (err: any) {
-        const errData = err.response?.data?.error || err.response?.data;
+        const errData =
+          err.metaError || err.response?.data?.error || err.response?.data;
         if (errData && (errData.code === 100 || errData.error_subcode === 33)) {
           this.logger.log(`Asset ${asset.id} not found on Meta. Deleting...`);
           await this.prisma.creativeAsset.delete({ where: { id: asset.id } });

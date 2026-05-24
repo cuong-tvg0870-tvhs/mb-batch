@@ -65,8 +65,17 @@ export class MetaTransformHelper {
     const c = ad.creative;
     if (!c) return null;
 
-    const [pageId, postId] =
+    let [pageId, postId] =
       (c?.effective_object_story_id || c?.object_story_id)?.split('_') || [];
+
+    if (!postId && pageId) {
+      postId = pageId;
+      pageId = undefined;
+    }
+
+    if (!pageId) {
+      pageId = c?.actor_id || c?.object_story_spec?.page_id;
+    }
 
     return {
       id: c.id,
