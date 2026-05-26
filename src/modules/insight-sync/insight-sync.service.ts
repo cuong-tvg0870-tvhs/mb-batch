@@ -1,20 +1,40 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { CreativeStatus, InsightRange, LevelInsight } from '@prisma/client';
 import dayjs from 'dayjs';
 import { PrismaBatchHelper } from '../../common/helpers/prisma-batch.helper';
 import { chunk, extractCampaignMetrics } from '../../common/utils';
+import { MetaApiService } from '../meta-api/meta-api.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { InsightSyncLevel, InsightSyncRange } from './insight-sync.constants';
-import { MetaApiService } from '../meta-api/meta-api.service';
 
 @Injectable()
-export class InsightSyncService {
+export class InsightSyncService implements OnModuleInit {
   private readonly logger = new Logger(InsightSyncService.name);
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly metaApi: MetaApiService,
   ) {}
+
+  async onModuleInit() {
+    // Trigger immediate sync in development mode for testing
+    this.logger.log('🚀 Triggering immediate sync for development...');
+    // Wait a bit for everything to be ready
+    setTimeout(async () => {
+      try {
+        const accounts = await this.prisma.account.findMany({
+          where: { needsReauth: false },
+          select: { id: true },
+        });
+        for (const account of accounts) {
+          await this.aggregateCreativeInsights(account.id);
+        }
+        this.logger.log('✅ Triggered local aggregation successfully.');
+      } catch (err: any) {
+        this.logger.error(`Failed to trigger immediate sync: ${err.message}`);
+      }
+    }, 5000);
+  }
 
   /**
    * Main entry point for syncing insights for one account
@@ -540,24 +560,33 @@ export class InsightSyncService {
         });
       }
 
-      // 5. Batch Upsert CreativeInsights
-      await prismaHelper.upsertMany(creativeInsightUpserts, (item) =>
-        this.prisma.creativeInsight.upsert({
-          where: {
-            creativeId_dateStart_range: {
-              creativeId: item.creativeId,
-              dateStart: item.dateStart,
-              range: item.range,
-            },
+      // 5. Delete existing insights for these ranges to avoid duplicates when dateStart changes
+      await this.prisma.creativeInsight.deleteMany({
+        where: {
+          creativeId: { in: batch.map((c) => c.id) },
+          range: {
+            in: [
+              InsightRange.MAX,
+              InsightRange.DAY_7,
+              InsightRange.DAY_3,
+              InsightRange.TODAY,
+            ],
           },
-          update: item.data,
-          create: {
-            creativeId: item.creativeId,
-            dateStart: item.dateStart,
-            range: item.range,
-            ...item.data,
-          },
-        }),
+        },
+      });
+
+      // 5.1 Batch Create CreativeInsights
+      const createData = creativeInsightUpserts.map((item) => ({
+        creativeId: item.creativeId,
+        dateStart: item.dateStart,
+        range: item.range,
+        ...item.data,
+      }));
+
+      await prismaHelper.createManySafe(
+        this.prisma.creativeInsight as any,
+        createData,
+        100,
       );
 
       // 6. Fetch Insight IDs to update relations on Creative

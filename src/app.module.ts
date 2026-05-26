@@ -3,7 +3,11 @@ import { Logger, Module, OnModuleInit } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { configLoads } from './config';
+import { InsightSyncModule } from './modules/insight-sync/insight-sync.module';
+import { LarkSyncModule } from './modules/lark-sync/lark-sync.module';
 import { MediaSyncModule } from './modules/media-sync/media-sync.module';
+import { MetaApiModule } from './modules/meta-api/meta-api.module';
+import { MetaSyncModule } from './modules/meta-sync/meta-sync.module';
 
 export const global_modules = [
   ScheduleModule.forRoot(),
@@ -24,11 +28,6 @@ export const global_modules = [
     inject: [ConfigService],
   }),
 ];
-
-import { InsightSyncModule } from './modules/insight-sync/insight-sync.module';
-import { LarkSyncModule } from './modules/lark-sync/lark-sync.module';
-import { MetaApiModule } from './modules/meta-api/meta-api.module';
-import { MetaSyncModule } from './modules/meta-sync/meta-sync.module';
 
 @Module({
   imports: [
