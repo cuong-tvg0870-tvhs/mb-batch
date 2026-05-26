@@ -109,7 +109,7 @@ export class MediaSyncService implements OnModuleInit {
       metadata: '1',
     });
 
-    const url = `https://graph.facebook.com/v24.0/${rootId}/subfolders?${params.toString()}`;
+    const url = `https://graph.facebook.com/v24.0/${rootId}/subfolders?access_token=${token}&${params.toString()}`;
     const allFolders = await this.metaApi.fetchAllPages(url, authConfig);
 
     // Identify top-level folders in DB under this root that are MISSING from Meta
