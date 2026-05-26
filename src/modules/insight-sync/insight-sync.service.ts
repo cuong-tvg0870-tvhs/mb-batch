@@ -18,24 +18,22 @@ export class InsightSyncService implements OnModuleInit {
 
   async onModuleInit() {
     // Trigger immediate sync in development mode for testing
-    if (process.env.NODE_ENV !== 'production') {
-      this.logger.log('🚀 Triggering immediate sync for development...');
-      // Wait a bit for everything to be ready
-      setTimeout(async () => {
-        try {
-          const accounts = await this.prisma.account.findMany({
-            where: { needsReauth: false },
-            select: { id: true },
-          });
-          for (const account of accounts) {
-            await this.aggregateCreativeInsights(account.id);
-          }
-          this.logger.log('✅ Triggered local aggregation successfully.');
-        } catch (err: any) {
-          this.logger.error(`Failed to trigger immediate sync: ${err.message}`);
+    this.logger.log('🚀 Triggering immediate sync for development...');
+    // Wait a bit for everything to be ready
+    setTimeout(async () => {
+      try {
+        const accounts = await this.prisma.account.findMany({
+          where: { needsReauth: false },
+          select: { id: true },
+        });
+        for (const account of accounts) {
+          await this.aggregateCreativeInsights(account.id);
         }
-      }, 5000);
-    }
+        this.logger.log('✅ Triggered local aggregation successfully.');
+      } catch (err: any) {
+        this.logger.error(`Failed to trigger immediate sync: ${err.message}`);
+      }
+    }, 5000);
   }
 
   /**
