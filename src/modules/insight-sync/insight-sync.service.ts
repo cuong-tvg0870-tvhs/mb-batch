@@ -458,6 +458,34 @@ export class InsightSyncService implements OnModuleInit {
         }
       };
 
+      const recalculateDerivedMetrics = (target: Record<string, number>) => {
+        const impressions = target.impressions || 0;
+        const clicks = target.clicks || 0;
+        const spend = target.spend || 0;
+        const purchases = target.purchases || 0;
+        const purchaseValue = target.purchaseValue || 0;
+        const registrationComplete = target.registrationComplete || 0;
+        const results = purchases + registrationComplete;
+        const videoPlay = target.videoPlay || 0;
+        const video3s = target.video3s || 0;
+        const video100 = target.video100 || 0;
+        const uniqueClicks = target.uniqueClicks || 0;
+        const reach = target.reach || 0;
+
+        target.ctr = impressions > 0 ? (clicks / impressions) * 100 : 0;
+        target.cpc = clicks > 0 ? spend / clicks : 0;
+        target.cpm = impressions > 0 ? (spend / impressions) * 1000 : 0;
+        target.roas = spend > 0 ? purchaseValue / spend : 0;
+        target.cvr = clicks > 0 ? purchases / clicks : 0;
+        target.costPerResult = results > 0 ? spend / results : 0;
+        target.aov = results > 0 ? purchaseValue / results : 0;
+        target.adsCostRatio = target.roas > 0 ? 1 / target.roas : 0;
+        target.hookRate = videoPlay > 0 ? +(video3s / videoPlay * 100).toFixed(2) : 0;
+        target.holdRate = video3s > 0 ? +(video100 / video3s * 100).toFixed(2) : 0;
+        target.uniqueCtr = reach > 0 ? (uniqueClicks / reach) * 100 : 0;
+        target.results = results;
+      };
+
       // 4. Calculate for each Creative in batch
       for (const creative of batch) {
         const ads = creative.ads.map((a) => a.id);
@@ -483,6 +511,14 @@ export class InsightSyncService implements OnModuleInit {
               sumMetrics(bucket.daily[ins.dateStart], ins);
             }
           }
+        }
+
+        recalculateDerivedMetrics(bucket.max);
+        recalculateDerivedMetrics(bucket.last7d);
+        recalculateDerivedMetrics(bucket.last3d);
+        recalculateDerivedMetrics(bucket.today);
+        for (const dateStart of Object.keys(bucket.daily)) {
+          recalculateDerivedMetrics(bucket.daily[dateStart]);
         }
 
         // Add to upsert list
