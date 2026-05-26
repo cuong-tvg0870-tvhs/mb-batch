@@ -434,6 +434,7 @@ export class InsightSyncService implements OnModuleInit {
               InsightRange.DAY_7,
               InsightRange.DAY_3,
               InsightRange.TODAY,
+              InsightRange.DAILY,
             ],
           },
         },
@@ -465,6 +466,7 @@ export class InsightSyncService implements OnModuleInit {
           last7d: {} as Record<string, number>,
           last3d: {} as Record<string, number>,
           today: {} as Record<string, number>,
+          daily: {} as Record<string, Record<string, number>>,
         };
 
         for (const adId of ads) {
@@ -476,11 +478,15 @@ export class InsightSyncService implements OnModuleInit {
             if (ins.range === InsightRange.DAY_3)
               sumMetrics(bucket.last3d, ins);
             if (ins.range === InsightRange.TODAY) sumMetrics(bucket.today, ins);
+            if (ins.range === InsightRange.DAILY) {
+              if (!bucket.daily[ins.dateStart]) bucket.daily[ins.dateStart] = {};
+              sumMetrics(bucket.daily[ins.dateStart], ins);
+            }
           }
         }
 
         // Add to upsert list
-        const ranges = [
+        const ranges: any[] = [
           {
             range: InsightRange.MAX,
             dateStart: '1975-01-01',
@@ -498,6 +504,14 @@ export class InsightSyncService implements OnModuleInit {
           },
           { range: InsightRange.TODAY, dateStart: today, data: bucket.today },
         ];
+
+        for (const dateStart of Object.keys(bucket.daily)) {
+          ranges.push({
+            range: InsightRange.DAILY,
+            dateStart: dateStart,
+            data: bucket.daily[dateStart],
+          });
+        }
 
         for (const r of ranges) {
           creativeInsightUpserts.push({
@@ -570,6 +584,7 @@ export class InsightSyncService implements OnModuleInit {
               InsightRange.DAY_7,
               InsightRange.DAY_3,
               InsightRange.TODAY,
+              InsightRange.DAILY,
             ],
           },
         },
