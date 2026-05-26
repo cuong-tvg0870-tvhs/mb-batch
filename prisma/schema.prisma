@@ -2029,3 +2029,361 @@ model SavedFilter {
     @@unique([userId, tableKey, name])
     @@index([userId, tableKey])
 }
+
+// ==========================================================================
+// AUTOMATION (Birch-style rule engine)
+// Added in migration `add_automation`. Không chạm vào models legacy ở trên.
+// ==========================================================================
+
+enum AutomationRuleLevel {
+    AD_ACCOUNT
+    CAMPAIGN
+    ADSET
+    AD
+}
+
+enum AutomationScheduleType {
+    INTERVAL
+    SPECIFIC
+}
+
+enum AutomationTaskKind {
+    START
+    PAUSE
+    DUPLICATE
+    NOTIFY
+    INCREASE_BUDGET
+    DECREASE_BUDGET
+    SET_SPENDING_LIMITS
+    REMOVE_SPENDING_LIMITS
+    INCREASE_SPENDING_LIMITS
+    DECREASE_SPENDING_LIMITS
+    ADD_TO_NAME
+    REMOVE_FROM_NAME
+    REPLACE_TEXT_IN_NAME
+}
+
+enum AutomationGroupOperator {
+    AND
+    OR
+}
+
+enum AutomationCompareType {
+    VALUE
+    METRIC
+    RANKING
+}
+
+model AutomationCategory {
+    id       String @id @default(uuid())
+    name     String
+    position Int    @default(0)
+
+    folders AutomationFolder[]
+    rules   AutomationRule[]
+
+    createdById String?
+    createdAt   DateTime  @default(now())
+    updatedAt   DateTime  @updatedAt
+    deletedAt   DateTime?
+
+    @@index([createdById, position])
+}
+
+model AutomationFolder {
+    id       String @id @default(uuid())
+    name     String
+    position Int    @default(0)
+
+    categoryId String
+    category   AutomationCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+    parentId String?
+    parent   AutomationFolder?  @relation("AutomationFolderTree", fields: [parentId], references: [id], onDelete: Cascade)
+    children AutomationFolder[] @relation("AutomationFolderTree")
+
+    rules AutomationRule[]
+
+    createdById String?
+    createdAt   DateTime  @default(now())
+    updatedAt   DateTime  @updatedAt
+    deletedAt   DateTime?
+
+    @@index([categoryId, parentId, position])
+    @@index([parentId])
+}
+
+model AutomationRule {
+    id                  String                  @id @default(uuid())
+    name                String
+    status              AutomationRuleStatus    @default(DRAFT)
+    level               AutomationRuleLevel
+    timezone            String
+    notifyErrorsOnly    Boolean                 @default(false)
+    filterGroupOperator AutomationGroupOperator @default(OR)
+    position            Int                     @default(0)
+
+    categoryId String
+    category   AutomationCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+    folderId String?
+    folder   AutomationFolder? @relation(fields: [folderId], references: [id], onDelete: SetNull)
+
+    schedule     AutomationSchedule?
+    filterGroups AutomationFilterGroup[]
+    tasks        AutomationTask[]
+    adAccounts   AutomationRuleAdAccount[]
+    notifyUsers  AutomationRuleNotifyUser[]
+    runs         AutomationRuleRun[]
+
+    createdById String?
+    createdAt   DateTime  @default(now())
+    updatedAt   DateTime  @updatedAt
+    deletedAt   DateTime?
+
+    @@index([categoryId, folderId, position])
+    @@index([createdById, updatedAt(sort: Desc)])
+    @@index([status, updatedAt(sort: Desc)])
+}
+
+enum AutomationRuleStatus {
+    DRAFT
+    ACTIVE
+    PAUSED
+}
+
+// Junction tới legacy Account: scalar FK only (không @relation sang Account để không
+// phải thêm back-relation vào model Account cũ).
+model AutomationRuleAdAccount {
+    ruleId    String
+    accountId String
+
+    rule AutomationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+    @@id([ruleId, accountId])
+    @@index([accountId])
+}
+
+/// User-defined custom timeframe (Days range 0..90, hoặc Hours range 0..24).
+/// Lưu offsets thay vì absolute timestamps — runner resolve relative tới `now`
+/// theo ad account timezone qua `resolveCustomTimeframeWindow`.
+/// Rule reference qua chuỗi `"custom:<id>"` trong AutomationTaskCondition.params.timeframe.
+/// `accountId` là scalar FK (không @relation back-ref, theo pattern AutomationRuleAdAccount).
+model AutomationCustomTimeframe {
+    id          String   @id @default(uuid())
+    name        String
+    kind        String // "days" | "hours" — validate ở zod
+    fromOffset  Int // L position; 0 = today/current hour
+    toOffset    Int // R position; fromOffset <= toOffset; max 90 (days) hoặc 24 (hours)
+    accountId   String
+    createdById String?
+    createdAt   DateTime @default(now())
+    updatedAt   DateTime @updatedAt
+
+    @@index([accountId])
+}
+
+// Junction tới legacy User: scalar FK only.
+model AutomationRuleNotifyUser {
+    ruleId String
+    userId String
+
+    rule AutomationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+    @@id([ruleId, userId])
+    @@index([userId])
+}
+
+model AutomationSchedule {
+    id     String         @id @default(uuid())
+    ruleId String         @unique
+    rule   AutomationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+    type          AutomationScheduleType @default(INTERVAL)
+    interval      String?
+    specificSlots Json?
+    useDateRange  Boolean                @default(false)
+    dateFrom      DateTime?
+    dateTo        DateTime?
+}
+
+model AutomationFilterGroup {
+    id       String                  @id @default(uuid())
+    ruleId   String
+    rule     AutomationRule          @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+    operator AutomationGroupOperator @default(AND)
+    position Int                     @default(0)
+
+    filters AutomationFilter[]
+
+    @@index([ruleId, position])
+}
+
+model AutomationFilter {
+    id            String                @id @default(uuid())
+    filterGroupId String
+    filterGroup   AutomationFilterGroup @relation(fields: [filterGroupId], references: [id], onDelete: Cascade)
+
+    field     String
+    operator  String
+    values    Json
+    timeframe String?
+    position  Int     @default(0)
+
+    @@index([filterGroupId, position])
+}
+
+model AutomationTask {
+    id       String             @id @default(uuid())
+    ruleId   String
+    rule     AutomationRule     @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+    kind     AutomationTaskKind
+    subtitle String?
+    params   Json?
+    position Int                @default(0)
+
+    rootGroup AutomationTaskGroup?    @relation("AutomationTaskRoot")
+    groups    AutomationTaskGroup[]   @relation("AutomationTaskAllGroups")
+    runItems  AutomationRuleRunItem[]
+
+    @@index([ruleId, position])
+}
+
+model AutomationTaskGroup {
+    id     String         @id @default(uuid())
+    taskId String
+    task   AutomationTask @relation("AutomationTaskAllGroups", fields: [taskId], references: [id], onDelete: Cascade)
+
+    rootForTaskId String?         @unique
+    rootForTask   AutomationTask? @relation("AutomationTaskRoot", fields: [rootForTaskId], references: [id], onDelete: Cascade)
+
+    parentGroupId String?
+    parentGroup   AutomationTaskGroup?  @relation("AutomationGroupTree", fields: [parentGroupId], references: [id], onDelete: Cascade)
+    childGroups   AutomationTaskGroup[] @relation("AutomationGroupTree")
+
+    conditions AutomationTaskCondition[]
+
+    operator AutomationGroupOperator @default(AND)
+    position Int                     @default(0)
+
+    @@index([taskId, parentGroupId, position])
+}
+
+model AutomationTaskCondition {
+    id          String                @id @default(uuid())
+    groupId     String
+    group       AutomationTaskGroup   @relation(fields: [groupId], references: [id], onDelete: Cascade)
+    compareType AutomationCompareType @default(VALUE)
+    params      Json
+    position    Int                   @default(0)
+
+    @@index([groupId, position])
+}
+
+// ==========================================================================
+// AUTOMATION RUNNER LOG (Bir.ch-style scan & log)
+// ==========================================================================
+
+enum AutomationRuleRunStatus {
+    RUNNING
+    COMPLETED
+    FAILED
+    SKIPPED_OVERLAP
+    SKIPPED_OUT_OF_DATE_RANGE
+}
+
+enum AutomationRuleRunItemStatus {
+    NOT_MATCHED // entity passed filter group but no task condition matched
+    PENDING
+    CONFIRMED
+    REJECTED
+    EXPIRED
+    EXECUTED
+    FAILED
+    SKIPPED // handler decided no API call needed (cap reached, frequency limit, CBO/ABO mismatch, …)
+}
+
+/// Một AutomationRuleRun = 1 lần (rule × ad account) được scheduler fire.
+model AutomationRuleRun {
+    id String @id @default(uuid())
+
+    ruleId String
+    rule   AutomationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+    // Scalar FK only sang Account (model ngoài block automation)
+    accountId String
+
+    scheduledFor DateTime
+    startedAt    DateTime?
+    finishedAt   DateTime?
+
+    status AutomationRuleRunStatus @default(RUNNING)
+
+    entitiesScanned Int @default(0)
+    matchedCount    Int @default(0)
+    errorsCount     Int @default(0)
+
+    errorMessage String?
+    ruleSnapshot Json?
+
+    items AutomationRuleRunItem[]
+
+    createdAt DateTime @default(now())
+
+    @@index([ruleId, scheduledFor(sort: Desc)])
+    @@index([accountId, scheduledFor(sort: Desc)])
+    @@index([status, scheduledFor(sort: Desc)])
+}
+
+/// Mỗi entity match 1 task = 1 row, lưu snapshot + change preview cho UI log-detail.
+model AutomationRuleRunItem {
+    id String @id @default(uuid())
+
+    runId String
+    run   AutomationRuleRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+    // Nullable for NOT_MATCHED rows (entity passed filter but no task condition matched)
+    taskId   String?
+    task     AutomationTask?     @relation(fields: [taskId], references: [id], onDelete: SetNull)
+    taskKind AutomationTaskKind?
+
+    level       AutomationRuleLevel
+    // Scalar — entityId là Campaign.id / AdSet.id / Ad.id (3 bảng ngoài block automation)
+    entityId    String
+    entityName  String
+    parentLabel String?
+
+    status AutomationRuleRunItemStatus @default(PENDING)
+
+    snapshot      Json
+    changePreview Json
+    evaluation    Json?
+
+    matchedConditionSummary String?
+
+    // Scalar FK only sang User (model ngoài block automation)
+    confirmedAt   DateTime?
+    confirmedById String?
+    executedAt    DateTime?
+    errorMessage  String?
+
+    /// Number of times the Meta executor has attempted this item — increments on
+    /// every retry. Used by the processor for backoff and for FE diagnostics.
+    executionAttempts Int @default(0)
+
+    /// Structured Meta API error captured on the most recent attempt (code,
+    /// subcode, fbtrace, user/developer messages). Null while item is healthy.
+    executionError Json?
+
+    /// `fbtrace_id` from the Meta response; surfaced in FE tooltips so support
+    /// can correlate with Meta's own logs.
+    metaTraceId String?
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@index([runId])
+    @@index([entityId])
+    @@index([taskId])
+    @@index([status, createdAt(sort: Desc)])
+}
