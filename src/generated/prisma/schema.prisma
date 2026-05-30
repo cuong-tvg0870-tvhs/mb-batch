@@ -1,0 +1,2430 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// =======================
+// ENUMS
+// =======================
+enum Role {
+  ADMIN
+  EMPLOYEE
+}
+
+enum AccountType {
+  AD_ACCOUNT
+  PAGE
+  INSTAGRAM
+  BUSINESS_MANAGER
+}
+
+enum MemberRole {
+  OWNER
+  MANAGER
+  EDITOR
+  VIEWER
+}
+
+enum FanpagePermission {
+  VIEW
+  EDIT
+  ADMIN
+}
+
+enum ProductCatalogPermission {
+  VIEW
+  EDIT
+  ADMIN
+}
+
+/// ===============================
+/// ENUMS
+/// ===============================
+
+enum Status {
+  DRAFT
+  ACTIVE
+  PAUSED
+  DELETED
+  ARCHIVED
+}
+
+enum InsightRange {
+  MAX
+  DAY_7
+  DAY_3
+  TODAY
+  DAILY
+}
+
+enum LevelInsight {
+  AD
+  CAMPAIGN
+  ADSET
+}
+
+// =======================
+// MODELS
+// =======================
+model TargetingInterest {
+  id                        String  @id @default(uuid())
+  name                      String
+  description               String?
+  audience_size_lower_bound Int?
+  audience_size_upper_bound Int?
+  path                      Json?
+  topic                     String?
+}
+
+model DropdownCategory {
+  id          String  @id @default(uuid())
+  key         String  @unique
+  name        String
+  description String?
+
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  createdById String?
+  updatedAt   DateTime  @updatedAt
+  updatedById String?
+  deletedAt   DateTime?
+
+  items DropdownItem[] @relation("DropdownCategory_Items")
+
+  @@index([key])
+}
+
+model DropdownItem {
+  id          String    @id @default(uuid())
+  categoryId  String
+  externalId  String? // ví dụ: "LINK_CLICKS"
+  name        String
+  value       String?
+  description String?
+  color       String?
+  sortOrder   Int       @default(0)
+  metadata    Json?
+  isDefault   Boolean   @default(false)
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  createdById String?
+  updatedAt   DateTime  @updatedAt
+  updatedById String?
+  deletedAt   DateTime?
+
+  category DropdownCategory @relation("DropdownCategory_Items", fields: [categoryId], references: [id])
+
+  @@unique([categoryId, value])
+  @@index([categoryId])
+  @@index([externalId])
+}
+
+model User {
+  id            String  @id @default(uuid())
+  email         String  @unique
+  employee_id   String?
+  name          String
+  password      String
+  role          Role    @default(EMPLOYEE)
+  facebookToken String?
+
+  parentId String?
+  parent   User?   @relation("UserChildren", fields: [parentId], references: [id])
+  children User[]  @relation("UserChildren")
+
+  locale String?
+
+  // relations
+  changeLogs     ChangeLog[]          @relation("change_actor")
+  accountMembers AccountMember[]      @relation("UserAccountMembers")
+  userFanpages   UserFanpage[]
+  userCatalogs   UserProductCatalog[]
+  projectMembers ProjectMember[]
+  folderMembers  FolderMember[]
+  savedFilters   SavedFilter[]
+
+  createdAt   DateTime  @default(now())
+  createdById String?
+  updatedAt   DateTime  @updatedAt
+  updatedById String?
+  deletedAt   DateTime?
+  deletedById String?
+
+  activities UserActivity[]
+}
+
+model UserActivity {
+  id          String   @id @default(uuid())
+  userId      String? // Có thể null nếu API gọi khi chưa đăng nhập
+  user        User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  method      String // VD: GET, POST, PUT, DELETE
+  path        String // API endpoint (VD: /api/campaigns)
+  actionLabel String? // Human readable action
+  ipAddress   String? // Địa chỉ IP
+  userAgent   String? // Browser/Device
+  duration    Int? // Thời gian phản hồi API (để đo performance)
+  statusCode  Int? // Trạng thái HTTP (200, 400, 500)
+  createdAt   DateTime @default(now())
+
+  // Tối ưu tốc độ query khi bạn thống kê tần suất
+  @@index([userId])
+  @@index([createdAt])
+  @@index([path, method])
+}
+
+model UserFanpage {
+  id     String  @id @default(uuid())
+  userId String
+  user   User    @relation(fields: [userId], references: [id])
+  pageId String // ID của Fanpage (ví dụ từ Meta)
+  page   Fanpage @relation(fields: [pageId], references: [id])
+
+  name       String? // Tên hiển thị trong dropdown
+  permission FanpagePermission @default(VIEW)
+  isActive   Boolean           @default(true)
+  createdAt  DateTime          @default(now())
+
+  @@index([userId, pageId])
+}
+
+model UserProductCatalog {
+  id        String         @id @default(uuid())
+  userId    String
+  user      User           @relation(fields: [userId], references: [id])
+  catalogId String
+  catalog   ProductCatalog @relation(fields: [catalogId], references: [id])
+
+  permission ProductCatalogPermission @default(VIEW)
+  isActive   Boolean                  @default(true)
+  createdAt  DateTime                 @default(now())
+
+  @@index([userId, catalogId])
+}
+
+// [{"id": "249650921563125", "name": "Seyoul Beauty - Malaysia"}, {"id": "111534788320800", "name": "Seyoul Smooth Skin - ผิวเรียบเนียนไร้กาลเวลา"}]
+model Fanpage {
+  id              String           @id
+  name            String?
+  userFanpages    UserFanpage[]
+  projectFanpages ProjectFanpage[]
+  creatives       Creative[]
+}
+
+model Account {
+  // store as string to support "act_123", "page_123", "business_123"
+  id            String      @id
+  accountType   AccountType
+  name          String?
+  currency      String?
+  timezone      String?
+  businessId    String?
+  businessName  String?
+  needsReauth   Boolean     @default(false)
+  lastFetchedAt DateTime?
+  rawPayload    Json?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  pages           Json?
+  pixels          Json?
+  customAudiences Json?
+
+  /// FK to the MetaConnection whose access token authorises Meta Graph calls
+  /// targeting this ad account. Nullable while a connection has not yet been
+  /// bound — the executor refuses to push changes for accounts without one.
+  metaConnectionId String?
+  metaConnection   MetaConnection? @relation(fields: [metaConnectionId], references: [id], onDelete: SetNull)
+
+  // relations
+  members         AccountMember[]  @relation("AccountAccountMembers")
+  projectAccounts ProjectAccount[]
+  campaigns       Campaign[]
+  adSets          AdSet[]
+  ads             Ad[]
+  creatives       Creative[]
+  adImages        AdImage[]
+  adVideos        AdVideo[]
+  cidGroups       CidGroup[]
+  systemCampaigns SystemCampaign[]
+  systemAdSets    SystemAdSet[]
+  systemAds       SystemAd[]
+  systemCreatives SystemCreative[]
+
+  @@index([accountType])
+  @@index([needsReauth])
+  @@index([metaConnectionId])
+}
+
+model AccountMember {
+  id        String @id @default(uuid())
+  accountId String
+  userId    String
+
+  account Account @relation("AccountAccountMembers", fields: [accountId], references: [id], onDelete: Cascade)
+  user    User    @relation("UserAccountMembers", fields: [userId], references: [id])
+
+  role      MemberRole
+  createdAt DateTime   @default(now())
+
+  // one membership per user per account
+  @@unique([accountId, userId])
+  @@index([accountId])
+  @@index([userId])
+}
+
+model Campaign {
+  id        String  @id // store facebook id as string, e.g. "238393..."
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  systemCampaignId String?
+  systemCampaign   SystemCampaign? @relation(fields: [systemCampaignId], references: [id], onDelete: Cascade)
+
+  name            String?
+  status          String?
+  objective       String?
+  buyingType      String?
+  effectiveBudget Int       @default(0)
+  dailyBudget     Int?
+  lifetimeBudget  Int?
+  startTime       DateTime?
+  endTime         DateTime?
+  remoteUpdatedAt DateTime?
+  lastFetchedAt   DateTime?
+  rawPayload      Json?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @default(now())
+  deletedAt DateTime?
+
+  insight3dId String?          @unique
+  insight3d   CampaignInsight? @relation("Campaign_3D", fields: [insight3dId], references: [id])
+
+  insight7dId String?          @unique
+  insight7d   CampaignInsight? @relation("Campaign_7D", fields: [insight7dId], references: [id])
+
+  insightMaxId String?          @unique
+  insightMax   CampaignInsight? @relation("Campaign_MAX", fields: [insightMaxId], references: [id])
+
+  insightTodayId String?          @unique
+  insightToday   CampaignInsight? @relation("Campaign_TODAY", fields: [insightTodayId], references: [id])
+
+  adsets                   AdSet[]
+  ads                      Ad[]
+  campaignInsights         CampaignInsight[]
+  adSetInsights            AdSetInsight[]
+  creativeInsights         CreativeInsight[]
+  campaignAudienceInsights CampaignAudienceInsight[]
+
+  // INSIGHT DATA
+  impressions Int?   @default(0)
+  reach       Int?   @default(0)
+  frequency   Float? @default(0)
+
+  /**
+   * ===== TRAFFIC =====
+   */
+  clicks       Int?   @default(0)
+  uniqueClicks Int?   @default(0)
+  ctr          Float? @default(0)
+  uniqueCtr    Float? @default(0)
+  cpc          Float? @default(0)
+  cpm          Float? @default(0)
+
+  /**
+   * ===== SPEND =====
+   */
+  spend Float? @default(0)
+
+  /**
+   * ===== CONVERSION =====
+   */
+  results       Int?   @default(0)
+  costPerResult Float? @default(0)
+  aov           Int?   @default(0)
+
+  purchases     Int?   @default(0)
+  purchaseValue Float? @default(0)
+  roas          Float? @default(0)
+
+  registrationComplete      Int?   @default(0)
+  registrationCompleteValue Float? @default(0)
+  messagingStarted          Int?   @default(0)
+  messagingStartedValue     Float? @default(0)
+  outboundClicks            Int?   @default(0)
+  outboundClicksValue       Float? @default(0)
+
+  cvr          Float? @default(0)
+  adsCostRatio Float? @default(0)
+
+  qualityRanking        String?
+  engagementRateRanking String?
+  conversionRateRanking String?
+
+  /**
+   * ===== RAW =====
+   */
+  actions      Json?
+  actionValues Json?
+
+  videoPlay Float? @default(0)
+  video3s   Float? @default(0)
+  video100  Float? @default(0)
+
+  videoAvgWatchTime Float? @default(0)
+  videoThruplay     Int?   @default(0)
+  videoView         Int?   @default(0)
+
+  hookRate Float? @default(0)
+  holdRate Float? @default(0)
+
+  @@unique([id, systemCampaignId])
+  // ✅ INDEXES
+  @@index([accountId, updatedAt(sort: Desc)])
+  @@index([accountId, status, updatedAt(sort: Desc)])
+  @@index([accountId, remoteUpdatedAt(sort: Desc)])
+  // optional (nếu dùng soft delete nhiều)
+  @@index([accountId, deletedAt, updatedAt(sort: Desc)])
+  // optional (nếu dùng cursor pagination)
+  @@index([accountId, updatedAt(sort: Desc), id])
+}
+
+model AdSet {
+  id         String   @id
+  campaignId String
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  name   String?
+  status String?
+
+  optimizationGoal String?
+  destinationType  String?
+  billingEvent     String?
+  bidStrategy      String?
+
+  effectiveBudget Int  @default(0)
+  dailyBudget     Int?
+  lifetimeBudget  Int?
+
+  targeting       Json?
+  startTime       DateTime?
+  endTime         DateTime?
+  remoteUpdatedAt DateTime?
+
+  lastFetchedAt DateTime?
+  rawPayload    Json?
+
+  ads Ad[]
+
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @default(now())
+  deletedAt     DateTime?
+  adSetInsights AdSetInsight[]
+
+  // INSIGHT
+  // INSIGHT DATA
+  impressions Int?   @default(0)
+  reach       Int?   @default(0)
+  frequency   Float? @default(0)
+
+  /**
+   * ===== TRAFFIC =====
+   */
+  clicks       Int?   @default(0)
+  uniqueClicks Int?   @default(0)
+  ctr          Float? @default(0)
+  uniqueCtr    Float? @default(0)
+  cpc          Float? @default(0)
+  cpm          Float? @default(0)
+
+  /**
+   * ===== SPEND =====
+   */
+  spend Float? @default(0)
+
+  /**
+   * ===== CONVERSION =====
+   */
+  results       Int?   @default(0)
+  costPerResult Float? @default(0)
+  aov           Int?   @default(0)
+
+  purchases     Int?   @default(0)
+  purchaseValue Float? @default(0)
+  roas          Float? @default(0)
+
+  registrationComplete      Int?   @default(0)
+  registrationCompleteValue Float? @default(0)
+  messagingStarted          Int?   @default(0)
+  messagingStartedValue     Float? @default(0)
+  outboundClicks            Int?   @default(0)
+  outboundClicksValue       Float? @default(0)
+
+  cvr          Float? @default(0)
+  adsCostRatio Float? @default(0)
+
+  qualityRanking        String?
+  engagementRateRanking String?
+  conversionRateRanking String?
+
+  /**
+   * ===== RAW =====
+   */
+  actions      Json?
+  actionValues Json?
+
+  videoPlay Float? @default(0)
+  video3s   Float? @default(0)
+  video100  Float? @default(0)
+
+  videoAvgWatchTime Float? @default(0)
+  videoThruplay     Int?   @default(0)
+  videoView         Int?   @default(0)
+
+  hookRate              Float?                 @default(0)
+  holdRate              Float?                 @default(0)
+  adsetAudienceInsights AdsetAudienceInsight[]
+
+  insight3dId String?       @unique
+  insight3d   AdSetInsight? @relation("AdSet_3D", fields: [insight3dId], references: [id])
+
+  insight7dId String?       @unique
+  insight7d   AdSetInsight? @relation("AdSet_7D", fields: [insight7dId], references: [id])
+
+  insightMaxId String?       @unique
+  insightMax   AdSetInsight? @relation("AdSet_MAX", fields: [insightMaxId], references: [id])
+
+  insightTodayId String?       @unique
+  insightToday   AdSetInsight? @relation("AdSet_TODAY", fields: [insightTodayId], references: [id])
+
+  // 🔥 list theo campaign
+  @@index([campaignId, updatedAt(sort: Desc)])
+  // 🔥 list theo account
+  @@index([accountId, updatedAt(sort: Desc)])
+  // 🔥 filter + sort
+  @@index([accountId, status, updatedAt(sort: Desc)])
+  // 🔥 sync data
+  @@index([accountId, remoteUpdatedAt(sort: Desc)])
+  // 🔥 soft delete (nếu dùng)
+  @@index([accountId, deletedAt, updatedAt(sort: Desc)])
+  // 🔥 pagination mượt
+  @@index([campaignId, updatedAt(sort: Desc), id])
+}
+
+model Ad {
+  id String @id
+
+  adsetId String
+  adset   AdSet  @relation(fields: [adsetId], references: [id], onDelete: Cascade)
+
+  cid      String?
+  cidGroup CidGroup? @relation(fields: [cid], references: [cid], onDelete: Cascade)
+
+  campaignId String?
+  campaign   Campaign? @relation(fields: [campaignId], references: [id])
+
+  accountId String?
+  account   Account? @relation(fields: [accountId], references: [id])
+
+  name             String?
+  status           String?
+  effectiveStatus  String?
+  configuredStatus String?
+  creativeId       String?
+  creative         Creative?   @relation(fields: [creativeId], references: [id])
+  remoteUpdatedAt  DateTime?
+  lastFetchedAt    DateTime?
+  rawPayload       Json?
+  adInsights       AdInsight[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @default(now())
+  deletedAt DateTime?
+
+  // INSIGHT
+  // INSIGHT DATA
+  impressions Int?   @default(0)
+  reach       Int?   @default(0)
+  frequency   Float? @default(0)
+
+  /**
+   * ===== TRAFFIC =====
+   */
+  clicks       Int?   @default(0)
+  uniqueClicks Int?   @default(0)
+  ctr          Float? @default(0)
+  uniqueCtr    Float? @default(0)
+  cpc          Float? @default(0)
+  cpm          Float? @default(0)
+
+  /**
+   * ===== SPEND =====
+   */
+  spend Float? @default(0)
+
+  /**
+   * ===== CONVERSION =====
+   */
+  results       Int?   @default(0)
+  costPerResult Float? @default(0)
+  aov           Int?   @default(0)
+
+  purchases     Int?   @default(0)
+  purchaseValue Float? @default(0)
+  roas          Float? @default(0)
+
+  registrationComplete      Int?   @default(0)
+  registrationCompleteValue Float? @default(0)
+  messagingStarted          Int?   @default(0)
+  messagingStartedValue     Float? @default(0)
+  outboundClicks            Int?   @default(0)
+  outboundClicksValue       Float? @default(0)
+
+  cvr          Float? @default(0)
+  adsCostRatio Float? @default(0)
+
+  qualityRanking        String?
+  engagementRateRanking String?
+  conversionRateRanking String?
+
+  /**
+   * ===== RAW =====
+   */
+  actions      Json?
+  actionValues Json?
+
+  videoPlay Float? @default(0)
+  video3s   Float? @default(0)
+  video100  Float? @default(0)
+
+  videoAvgWatchTime Float? @default(0)
+  videoThruplay     Int?   @default(0)
+  videoView         Int?   @default(0)
+
+  hookRate           Float?              @default(0)
+  holdRate           Float?              @default(0)
+  adAudienceInsights AdAudienceInsight[]
+
+  insight3dId String?    @unique
+  insight3d   AdInsight? @relation("Ad_3D", fields: [insight3dId], references: [id])
+
+  insight7dId String?    @unique
+  insight7d   AdInsight? @relation("Ad_7D", fields: [insight7dId], references: [id])
+
+  insightMaxId String?    @unique
+  insightMax   AdInsight? @relation("Ad_MAX", fields: [insightMaxId], references: [id])
+
+  insightTodayId String?    @unique
+  insightToday   AdInsight? @relation("Ad_TODAY", fields: [insightTodayId], references: [id])
+
+  // 🔥 list theo adset
+  @@index([adsetId, updatedAt(sort: Desc)])
+  // 🔥 list theo campaign (rất hay dùng dashboard)
+  @@index([campaignId, updatedAt(sort: Desc)])
+  // 🔥 list theo account
+  @@index([accountId, updatedAt(sort: Desc)])
+  // 🔥 filter + sort
+  @@index([accountId, status, updatedAt(sort: Desc)])
+  // 🔥 sync
+  @@index([accountId, remoteUpdatedAt(sort: Desc)])
+  // 🔥 join creative
+  @@index([creativeId])
+  // 🔥 join cid (nếu dùng tracking nhiều)
+  @@index([cid])
+  // 🔥 pagination
+  @@index([adsetId, updatedAt(sort: Desc), id])
+  // 🔥 soft delete
+  @@index([accountId, deletedAt, updatedAt(sort: Desc)])
+}
+
+enum CidStatus {
+  OTHER
+  TEST
+  NEED_TO_SPEND
+  SCALE_P1
+  SCALE_P2
+  REVIEW
+  OFF
+}
+
+model CidGroup {
+  id  String @id @default(uuid())
+  cid String @unique
+  ads Ad[]
+
+  accountId String?
+  account   Account? @relation(fields: [accountId], references: [id])
+
+  name        String?
+  description String?
+
+  spentMax    Float?
+  spent7d     Float?
+  spent3d     Float?
+  roasMax     Float?
+  roas7d      Float?
+  roas3d      Float?
+  ctrMax      Float?
+  purchaseMax Float?
+
+  status        CidStatus? // Test / Need to Spend / Scale P1 / Scale P2 / Review / Off
+  lastUpdatedAt DateTime?
+  lastPushedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([accountId])
+  @@index([status])
+  @@index([cid])
+  @@map("CID")
+}
+
+model Creative {
+  id String @id
+
+  adId String? // optional backref id if you want link from ad->creative
+  ads  Ad[]
+
+  accountId String?
+  account   Account? @relation(fields: [accountId], references: [id])
+
+  pageId String?
+
+  systemPageId String?
+  page         Fanpage? @relation(fields: [systemPageId], references: [id])
+
+  postId              String?
+  objectStoryId       String?
+  effectObjectStoryId String?
+  name                String?
+  creativeType        String? // IMAGE, VIDEO, CAROUSEL, LINK, ...
+
+  imageHash String?
+  imageId   String?
+  adImage   AdImage? @relation(fields: [imageId], references: [id])
+
+  imageUrl     String?
+  thumbnailUrl String?
+
+  performanceStatus CreativeStatus?
+
+  previewUrl      String?
+  remoteUpdatedAt DateTime?
+  lastFetchedAt   DateTime?
+  rawPayload      Json?
+  urlExpiredAt    DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @default(now())
+
+  videoId          String?
+  adVideo          AdVideo?          @relation(fields: [videoId], references: [id])
+  creativeInsights CreativeInsight[]
+
+  assetMappings CreativeAssetMapping[]
+
+  // INSIGHT DATA
+  impressions Int?   @default(0)
+  reach       Int?   @default(0)
+  frequency   Float? @default(0)
+
+  /**
+   * ===== TRAFFIC =====
+   */
+  clicks       Int?   @default(0)
+  uniqueClicks Int?   @default(0)
+  ctr          Float? @default(0)
+  uniqueCtr    Float? @default(0)
+  cpc          Float? @default(0)
+  cpm          Float? @default(0)
+
+  /**
+   * ===== SPEND =====
+   */
+  spend Float? @default(0)
+
+  /**
+   * ===== CONVERSION =====
+   */
+  results       Int?   @default(0)
+  costPerResult Float? @default(0)
+  aov           Int?   @default(0)
+
+  purchases     Int?   @default(0)
+  purchaseValue Float? @default(0)
+  roas          Float? @default(0)
+
+  registrationComplete      Int?   @default(0)
+  registrationCompleteValue Float? @default(0)
+  messagingStarted          Int?   @default(0)
+  messagingStartedValue     Float? @default(0)
+  outboundClicks            Int?   @default(0)
+  outboundClicksValue       Float? @default(0)
+
+  cvr          Float? @default(0)
+  adsCostRatio Float? @default(0)
+
+  qualityRanking        String?
+  engagementRateRanking String?
+  conversionRateRanking String?
+
+  /**
+   * ===== RAW =====
+   */
+  actions      Json?
+  actionValues Json?
+
+  videoPlay Float? @default(0)
+  video3s   Float? @default(0)
+  video100  Float? @default(0)
+
+  videoAvgWatchTime Float? @default(0)
+  videoThruplay     Int?   @default(0)
+  videoView         Int?   @default(0)
+
+  hookRate Float? @default(0)
+  holdRate Float? @default(0)
+
+  insight3dId String?          @unique
+  insight3d   CreativeInsight? @relation("Creative_3D", fields: [insight3dId], references: [id])
+
+  insight7dId String?          @unique
+  insight7d   CreativeInsight? @relation("Creative_7D", fields: [insight7dId], references: [id])
+
+  insightMaxId String?          @unique
+  insightMax   CreativeInsight? @relation("Creative_MAX", fields: [insightMaxId], references: [id])
+
+  insightTodayId String?          @unique
+  insightToday   CreativeInsight? @relation("Creative_TODAY", fields: [insightTodayId], references: [id])
+
+  @@index([accountId, createdAt(sort: Desc)])
+  @@index([accountId, creativeType, createdAt(sort: Desc)])
+  @@index([accountId, remoteUpdatedAt(sort: Desc)])
+  @@index([adId])
+  // optional
+  @@index([imageHash])
+  @@index([videoId])
+}
+
+model CreativeInsight {
+  id String @id @default(cuid())
+
+  creativeId String
+  creative   Creative @relation(fields: [creativeId], references: [id], onDelete: Cascade)
+
+  level LevelInsight @default(AD)
+
+  dateStart String?
+  dateStop  String?
+  range     InsightRange @default(DAILY)
+
+  // INSIGHT DATA
+  impressions Int?   @default(0)
+  reach       Int?   @default(0)
+  frequency   Float? @default(0)
+
+  /**
+   * ===== TRAFFIC =====
+   */
+  clicks       Int?   @default(0)
+  uniqueClicks Int?   @default(0)
+  ctr          Float? @default(0)
+  uniqueCtr    Float? @default(0)
+  cpc          Float? @default(0)
+  cpm          Float? @default(0)
+
+  /**
+   * ===== SPEND =====
+   */
+  spend Float? @default(0)
+
+  /**
+   * ===== CONVERSION =====
+   */
+  results       Int?   @default(0)
+  costPerResult Float? @default(0)
+  aov           Int?   @default(0)
+
+  purchases     Int?   @default(0)
+  purchaseValue Float? @default(0)
+  roas          Float? @default(0)
+
+  registrationComplete      Int?   @default(0)
+  registrationCompleteValue Float? @default(0)
+  messagingStarted          Int?   @default(0)
+  messagingStartedValue     Float? @default(0)
+  outboundClicks            Int?   @default(0)
+  outboundClicksValue       Float? @default(0)
+
+  cvr          Float? @default(0)
+  adsCostRatio Float? @default(0)
+
+  qualityRanking        String?
+  engagementRateRanking String?
+  conversionRateRanking String?
+
+  /**
+   * ===== RAW =====
+   */
+  actions      Json?
+  actionValues Json?
+
+  videoPlay Float? @default(0)
+  video3s   Float? @default(0)
+  video100  Float? @default(0)
+
+  videoAvgWatchTime Float? @default(0)
+  videoThruplay     Int?   @default(0)
+  videoView         Int?   @default(0)
+
+  hookRate   Float? @default(0)
+  holdRate   Float? @default(0)
+  rawPayload Json?
+
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @default(now())
+  campaign   Campaign? @relation(fields: [campaignId], references: [id])
+  campaignId String?
+
+  creative3d    Creative? @relation("Creative_3D")
+  creative7d    Creative? @relation("Creative_7D")
+  creativeMax   Creative? @relation("Creative_MAX")
+  creativeToday Creative? @relation("Creative_TODAY")
+
+  @@unique([creativeId, dateStart, range])
+  @@index([creativeId])
+}
+
+enum CreativeStatus {
+  OTHER
+  TEST
+  NEED_SPEND
+  SCALE_P1
+  SCALE_P2
+  REVIEW
+  OFF
+}
+
+model AdImage {
+  id        String  @id @default(uuid())
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  hash          String
+  name          String?
+  url           String?
+  permalink_url String?
+  width         Int?
+  height        Int?
+  urlExpiredAt  DateTime?
+
+  status      String?
+  createdTime DateTime?
+  rawPayload  Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now())
+
+  creatives Creative[]
+
+  @@unique([accountId, hash, id])
+  @@index([accountId])
+  @@index([hash])
+}
+
+model AdVideo {
+  id        String  @id // Meta video_id
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  title        String?
+  source       String?
+  description  String?
+  status       String? // READY, PROCESSING, ERROR
+  length       Int? // seconds
+  urlExpiredAt DateTime?
+
+  thumbnailUrl String?
+
+  remoteCreatedAt DateTime?
+  remoteUpdatedAt DateTime?
+  lastFetchedAt   DateTime?
+
+  rawPayload Json?
+
+  createdTime DateTime?
+
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @default(now())
+  creatives Creative[]
+
+  @@unique([accountId, id])
+  @@index([status])
+  @@index([accountId])
+}
+
+model AdInsight {
+  id String @id @default(cuid())
+
+  adId String
+  ad   Ad     @relation(fields: [adId], references: [id], onDelete: Cascade)
+
+  level LevelInsight @default(AD)
+
+  dateStart   String
+  dateStop    String
+  range       InsightRange @default(DAILY)
+  // INSIGHT DATA
+  impressions Int?         @default(0)
+  reach       Int?         @default(0)
+  frequency   Float?       @default(0)
+
+  /**
+   * ===== TRAFFIC =====
+   */
+  clicks       Int?   @default(0)
+  uniqueClicks Int?   @default(0)
+  ctr          Float? @default(0)
+  uniqueCtr    Float? @default(0)
+  cpc          Float? @default(0)
+  cpm          Float? @default(0)
+
+  /**
+   * ===== SPEND =====
+   */
+  spend Float? @default(0)
+
+  /**
+   * ===== CONVERSION =====
+   */
+  results       Int?   @default(0)
+  costPerResult Float? @default(0)
+  aov           Int?   @default(0)
+
+  purchases     Int?   @default(0)
+  purchaseValue Float? @default(0)
+  roas          Float? @default(0)
+
+  registrationComplete      Int?   @default(0)
+  registrationCompleteValue Float? @default(0)
+  messagingStarted          Int?   @default(0)
+  messagingStartedValue     Float? @default(0)
+  outboundClicks            Int?   @default(0)
+  outboundClicksValue       Float? @default(0)
+
+  cvr          Float? @default(0)
+  adsCostRatio Float? @default(0)
+
+  qualityRanking        String?
+  engagementRateRanking String?
+  conversionRateRanking String?
+
+  /**
+   * ===== RAW =====
+   */
+  actions      Json?
+  actionValues Json?
+
+  videoPlay Float? @default(0)
+  video3s   Float? @default(0)
+  video100  Float? @default(0)
+
+  videoAvgWatchTime Float? @default(0)
+  videoThruplay     Int?   @default(0)
+  videoView         Int?   @default(0)
+
+  hookRate   Float? @default(0)
+  holdRate   Float? @default(0)
+  rawPayload Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now())
+
+  ad3d    Ad? @relation("Ad_3D")
+  ad7d    Ad? @relation("Ad_7D")
+  adMax   Ad? @relation("Ad_MAX")
+  adToday Ad? @relation("Ad_TODAY")
+
+  @@unique([adId, dateStart, range])
+  @@index([adId])
+}
+
+model CampaignInsight {
+  id String @id @default(cuid())
+
+  campaignId String
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  level LevelInsight @default(CAMPAIGN)
+
+  dateStart String
+  dateStop  String
+  range     InsightRange @default(DAILY)
+
+  // INSIGHT DATA
+  impressions Int?   @default(0)
+  reach       Int?   @default(0)
+  frequency   Float? @default(0)
+
+  /**
+   * ===== TRAFFIC =====
+   */
+  clicks       Int?   @default(0)
+  uniqueClicks Int?   @default(0)
+  ctr          Float? @default(0)
+  uniqueCtr    Float? @default(0)
+  cpc          Float? @default(0)
+  cpm          Float? @default(0)
+
+  /**
+   * ===== SPEND =====
+   */
+  spend Float? @default(0)
+
+  /**
+   * ===== CONVERSION =====
+   */
+  results       Int?   @default(0)
+  costPerResult Float? @default(0)
+  aov           Int?   @default(0)
+
+  purchases     Int?   @default(0)
+  purchaseValue Float? @default(0)
+  roas          Float? @default(0)
+
+  registrationComplete      Int?   @default(0)
+  registrationCompleteValue Float? @default(0)
+  messagingStarted          Int?   @default(0)
+  messagingStartedValue     Float? @default(0)
+  outboundClicks            Int?   @default(0)
+  outboundClicksValue       Float? @default(0)
+
+  cvr          Float? @default(0)
+  adsCostRatio Float? @default(0)
+
+  qualityRanking        String?
+  engagementRateRanking String?
+  conversionRateRanking String?
+
+  /**
+   * ===== RAW =====
+   */
+  actions      Json?
+  actionValues Json?
+
+  videoPlay Float? @default(0)
+  video3s   Float? @default(0)
+  video100  Float? @default(0)
+
+  videoAvgWatchTime Float? @default(0)
+  videoThruplay     Int?   @default(0)
+  videoView         Int?   @default(0)
+
+  hookRate Float? @default(0)
+  holdRate Float? @default(0)
+
+  rawPayload Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now())
+
+  campaign3d    Campaign? @relation("Campaign_3D")
+  campaign7d    Campaign? @relation("Campaign_7D")
+  campaignMax   Campaign? @relation("Campaign_MAX")
+  campaignToday Campaign? @relation("Campaign_TODAY")
+
+  @@unique([campaignId, dateStart, range])
+  @@index([campaignId])
+  @@index([dateStart, dateStop])
+}
+
+model AdSetInsight {
+  id String @id @default(cuid())
+
+  adSetId String
+  adSet   AdSet  @relation(fields: [adSetId], references: [id], onDelete: Cascade)
+
+  level LevelInsight @default(ADSET)
+
+  dateStart String
+  dateStop  String
+  range     InsightRange @default(DAILY)
+
+  // INSIGHT DATA
+  impressions Int?   @default(0)
+  reach       Int?   @default(0)
+  frequency   Float? @default(0)
+
+  /**
+   * ===== TRAFFIC =====
+   */
+  clicks       Int?   @default(0)
+  uniqueClicks Int?   @default(0)
+  ctr          Float? @default(0)
+  uniqueCtr    Float? @default(0)
+  cpc          Float? @default(0)
+  cpm          Float? @default(0)
+
+  /**
+   * ===== SPEND =====
+   */
+  spend Float? @default(0)
+
+  /**
+   * ===== CONVERSION =====
+   */
+  results       Int?   @default(0)
+  aov           Int?   @default(0)
+  costPerResult Float? @default(0)
+
+  purchases     Int?   @default(0)
+  purchaseValue Float? @default(0)
+  roas          Float? @default(0)
+
+  registrationComplete      Int?   @default(0)
+  registrationCompleteValue Float? @default(0)
+  messagingStarted          Int?   @default(0)
+  messagingStartedValue     Float? @default(0)
+  outboundClicks            Int?   @default(0)
+  outboundClicksValue       Float? @default(0)
+  cvr                       Float? @default(0)
+  adsCostRatio              Float? @default(0)
+
+  qualityRanking        String?
+  engagementRateRanking String?
+  conversionRateRanking String?
+
+  /**
+   * ===== RAW =====
+   */
+  actions      Json?
+  actionValues Json?
+
+  videoPlay Float? @default(0)
+  video3s   Float? @default(0)
+  video100  Float? @default(0)
+
+  videoAvgWatchTime Float? @default(0)
+  videoThruplay     Int?   @default(0)
+  videoView         Int?   @default(0)
+
+  hookRate Float? @default(0)
+  holdRate Float? @default(0)
+
+  rawPayload Json?
+
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @default(now())
+  campaign   Campaign? @relation(fields: [campaignId], references: [id])
+  campaignId String?
+
+  adset3d    AdSet? @relation("AdSet_3D")
+  adset7d    AdSet? @relation("AdSet_7D")
+  adsetMax   AdSet? @relation("AdSet_MAX")
+  adsetToday AdSet? @relation("AdSet_TODAY")
+
+  @@unique([adSetId, dateStart, range])
+  @@index([adSetId])
+}
+
+model CampaignAudienceInsight {
+  id String @id @default(cuid())
+
+  campaignId String
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  level LevelInsight @default(CAMPAIGN)
+
+  /**
+   * ===== TIME =====
+   * Không theo ngày → dùng ALL_TIME
+   * Nhưng vẫn giữ field để mở rộng
+   */
+  dateStart String?
+  dateStop  String?
+  range     InsightRange @default(MAX)
+
+  /**
+   * ===== BREAKDOWN =====
+   */
+  age    String // e.g. "18-24", "25-34"
+  gender String // "male" | "female" | "unknown"
+
+  // INSIGHT DATA
+  impressions Int?   @default(0)
+  reach       Int?   @default(0)
+  frequency   Float? @default(0)
+
+  /**
+   * ===== TRAFFIC =====
+   */
+  clicks       Int?   @default(0)
+  uniqueClicks Int?   @default(0)
+  ctr          Float? @default(0)
+  uniqueCtr    Float? @default(0)
+  cpc          Float? @default(0)
+  cpm          Float? @default(0)
+
+  /**
+   * ===== SPEND =====
+   */
+  spend Float? @default(0)
+
+  /**
+   * ===== CONVERSION =====
+   */
+  results       Int?   @default(0)
+  costPerResult Float? @default(0)
+  aov           Int?   @default(0)
+
+  purchases     Int?   @default(0)
+  purchaseValue Float? @default(0)
+  roas          Float? @default(0)
+
+  registrationComplete      Int?   @default(0)
+  registrationCompleteValue Float? @default(0)
+  messagingStarted          Int?   @default(0)
+  messagingStartedValue     Float? @default(0)
+  outboundClicks            Int?   @default(0)
+  outboundClicksValue       Float? @default(0)
+
+  cvr          Float? @default(0)
+  adsCostRatio Float? @default(0)
+
+  qualityRanking        String?
+  engagementRateRanking String?
+  conversionRateRanking String?
+
+  /**
+   * ===== RAW =====
+   */
+  actions      Json?
+  actionValues Json?
+
+  videoPlay Float? @default(0)
+  video3s   Float? @default(0)
+  video100  Float? @default(0)
+
+  videoAvgWatchTime Float? @default(0)
+  videoThruplay     Int?   @default(0)
+  videoView         Int?   @default(0)
+
+  hookRate Float? @default(0)
+  holdRate Float? @default(0)
+
+  rawPayload Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now())
+
+  /**
+   * ===== CONSTRAINT =====
+   */
+  @@unique([campaignId, age, gender, range])
+  @@index([campaignId])
+  @@index([age, gender])
+}
+
+model AdsetAudienceInsight {
+  id String @id @default(cuid())
+
+  adsetId String
+  adset   AdSet  @relation(fields: [adsetId], references: [id], onDelete: Cascade)
+
+  level LevelInsight @default(ADSET)
+
+  /**
+   * ===== TIME =====
+   * Không theo ngày → dùng ALL_TIME
+   * Nhưng vẫn giữ field để mở rộng
+   */
+  dateStart String?
+  dateStop  String?
+  range     InsightRange @default(MAX)
+
+  /**
+   * ===== BREAKDOWN =====
+   */
+  age    String // e.g. "18-24", "25-34"
+  gender String // "male" | "female" | "unknown"
+
+  // INSIGHT DATA
+  impressions Int?   @default(0)
+  reach       Int?   @default(0)
+  frequency   Float? @default(0)
+
+  /**
+   * ===== TRAFFIC =====
+   */
+  clicks       Int?   @default(0)
+  uniqueClicks Int?   @default(0)
+  ctr          Float? @default(0)
+  uniqueCtr    Float? @default(0)
+  cpc          Float? @default(0)
+  cpm          Float? @default(0)
+
+  /**
+   * ===== SPEND =====
+   */
+  spend Float? @default(0)
+
+  /**
+   * ===== CONVERSION =====
+   */
+  results       Int?   @default(0)
+  costPerResult Float? @default(0)
+  aov           Int?   @default(0)
+
+  purchases     Int?   @default(0)
+  purchaseValue Float? @default(0)
+  roas          Float? @default(0)
+
+  registrationComplete      Int?   @default(0)
+  registrationCompleteValue Float? @default(0)
+  messagingStarted          Int?   @default(0)
+  messagingStartedValue     Float? @default(0)
+  outboundClicks            Int?   @default(0)
+  outboundClicksValue       Float? @default(0)
+
+  cvr          Float? @default(0)
+  adsCostRatio Float? @default(0)
+
+  qualityRanking        String?
+  engagementRateRanking String?
+  conversionRateRanking String?
+
+  /**
+   * ===== RAW =====
+   */
+  actions      Json?
+  actionValues Json?
+
+  videoPlay Float? @default(0)
+  video3s   Float? @default(0)
+  video100  Float? @default(0)
+
+  videoAvgWatchTime Float? @default(0)
+  videoThruplay     Int?   @default(0)
+  videoView         Int?   @default(0)
+
+  hookRate Float? @default(0)
+  holdRate Float? @default(0)
+
+  rawPayload Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now())
+
+  /**
+   * ===== CONSTRAINT =====
+   */
+  @@unique([adsetId, age, gender, level, range, dateStart])
+  @@index([adsetId])
+  @@index([age, gender])
+}
+
+model AdAudienceInsight {
+  id String @id @default(cuid())
+
+  adId String
+  ad   Ad     @relation(fields: [adId], references: [id], onDelete: Cascade)
+
+  level LevelInsight @default(AD)
+
+  /**
+   * ===== TIME =====
+   * Không theo ngày → dùng ALL_TIME
+   * Nhưng vẫn giữ field để mở rộng
+   */
+  dateStart String?
+  dateStop  String?
+  range     InsightRange @default(MAX)
+
+  /**
+   * ===== BREAKDOWN =====
+   */
+  age    String // e.g. "18-24", "25-34"
+  gender String // "male" | "female" | "unknown"
+
+  // INSIGHT DATA
+  impressions Int?   @default(0)
+  reach       Int?   @default(0)
+  frequency   Float? @default(0)
+
+  /**
+   * ===== TRAFFIC =====
+   */
+  clicks       Int?   @default(0)
+  uniqueClicks Int?   @default(0)
+  ctr          Float? @default(0)
+  uniqueCtr    Float? @default(0)
+  cpc          Float? @default(0)
+  cpm          Float? @default(0)
+
+  /**
+   * ===== SPEND =====
+   */
+  spend Float? @default(0)
+
+  /**
+   * ===== CONVERSION =====
+   */
+  results       Int?   @default(0)
+  costPerResult Float? @default(0)
+  aov           Int?   @default(0)
+
+  purchases     Int?   @default(0)
+  purchaseValue Float? @default(0)
+  roas          Float? @default(0)
+
+  registrationComplete      Int?   @default(0)
+  registrationCompleteValue Float? @default(0)
+  messagingStarted          Int?   @default(0)
+  messagingStartedValue     Float? @default(0)
+  outboundClicks            Int?   @default(0)
+  outboundClicksValue       Float? @default(0)
+
+  cvr          Float? @default(0)
+  adsCostRatio Float? @default(0)
+
+  qualityRanking        String?
+  engagementRateRanking String?
+  conversionRateRanking String?
+
+  /**
+   * ===== RAW =====
+   */
+  actions      Json?
+  actionValues Json?
+
+  videoPlay Float? @default(0)
+  video3s   Float? @default(0)
+  video100  Float? @default(0)
+
+  videoAvgWatchTime Float? @default(0)
+  videoThruplay     Int?   @default(0)
+  videoView         Int?   @default(0)
+
+  hookRate Float? @default(0)
+  holdRate Float? @default(0)
+
+  rawPayload Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now())
+
+  /**
+   * ===== CONSTRAINT =====
+   */
+  @@unique([adId, age, gender, level, range, dateStart])
+  @@index([adId])
+  @@index([age, gender])
+}
+
+model ChangeLog {
+  id         String   @id @default(uuid())
+  actorId    String
+  actor      User     @relation("change_actor", fields: [actorId], references: [id])
+  action     String
+  targetType String?
+  targetId   String?
+  diff       Json?
+  createdAt  DateTime @default(now())
+
+  @@index([actorId])
+  @@index([targetType, targetId])
+}
+
+// --- MODELS ---
+model TemplateCampaign {
+  id   String @id @default(cuid())
+  name String
+  data Json?
+
+  reference_id String?
+  reference    SystemCampaign? @relation(fields: [reference_id], references: [id])
+
+  createdById String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  @@index([name])
+  @@index([reference_id])
+  @@index([createdById, createdAt(sort: Desc)])
+}
+
+model SystemCampaign {
+  id      String  @id @default(cuid())
+  data    Json?
+  meta_id String?
+  cid     String?
+
+  status Status @default(DRAFT)
+
+  createdById String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  accountId String?
+  account   Account?      @relation(fields: [accountId], references: [id])
+  ad_sets   SystemAdSet[]
+
+  is_template Boolean? @default(false)
+
+  campaign_name        String?
+  campaign_objective   String?
+  campaign_budgetType  String?
+  campaign_budget      Int?
+  campaign_bidStrategy String?
+  campaign_bidAmount   Int?
+  campaign_CBO         Boolean?
+  campaigns            Campaign[]
+  templateCampaigns    TemplateCampaign[]
+
+  errors           Json?
+  isPublishing     Boolean          @default(false)
+  hasMetaChanges   Boolean          @default(true)
+  publishHistories PublishHistory[]
+
+  @@index([status])
+  @@index([createdById, createdAt(sort: Desc)])
+}
+
+model SystemAdSet {
+  id      String  @id @default(cuid())
+  data    Json?
+  meta_id String?
+
+  status Status @default(DRAFT)
+
+  createdById String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  campaignId String?
+  campaign   SystemCampaign? @relation(fields: [campaignId], references: [id])
+
+  accountId String?
+  account   Account? @relation(fields: [accountId], references: [id])
+
+  ads SystemAd[]
+
+  adset_name         String?
+  adset_optimization String?
+  adset_budgetType   String?
+  adset_budget       Int?
+  adset_bidStrategy  String?
+  adset_bidAmount    Int?
+
+  @@index([status])
+  @@index([createdById, createdAt(sort: Desc)])
+}
+
+model SystemAd {
+  id      String  @id @default(cuid())
+  data    Json?
+  meta_id String?
+
+  status Status @default(DRAFT)
+
+  createdById String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  adSetId String?
+  adSet   SystemAdSet? @relation(fields: [adSetId], references: [id])
+
+  accountId String?
+  account   Account?         @relation(fields: [accountId], references: [id])
+  creative  SystemCreative[]
+
+  @@index([status])
+  @@index([createdById, createdAt(sort: Desc)])
+}
+
+model SystemCreative {
+  id   String @id @default(cuid())
+  data Json?
+
+  url_json Json?
+
+  meta_id String?
+
+  status Status @default(DRAFT)
+
+  createdById String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  adId String?
+  ad   SystemAd? @relation(fields: [adId], references: [id])
+
+  accountId String?
+  account   Account? @relation(fields: [accountId], references: [id])
+
+  @@index([status])
+  @@index([createdById, createdAt(sort: Desc)])
+}
+
+model PublishHistory {
+  id         String         @id @default(cuid())
+  campaignId String
+  campaign   SystemCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  status     String // 'PUBLISHING', 'SUCCESS', 'FAILED'
+  steps      Json // Details of each step: [{ key, label, status, current, total, error, metaId }]
+  error      String? // Overall error message
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  @@index([campaignId])
+}
+
+enum FolderStatus {
+  ACTIVE
+  DEACTIVE
+}
+
+model CreativeFolder {
+  id            String           @id
+  name          String
+  description   String?
+  parentId      String?
+  parent        CreativeFolder?  @relation("FolderTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children      CreativeFolder[] @relation("FolderTree")
+  creation_time String?
+  // relations
+  assets        CreativeAsset[]
+
+  createdAtLocal DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  status FolderStatus @default(ACTIVE)
+
+  @@index([parentId])
+}
+
+enum AssetType {
+  IMAGE
+  VIDEO
+}
+
+model CreativeAsset {
+  id   String    @id
+  name String?
+  type AssetType
+
+  width     Int?
+  height    Int?
+  thumbnail String?
+
+  imageUrl  String?
+  imageHash String? @unique // 🔥 tránh duplicate ảnh
+
+  drive_url String?    @unique // 🔥 thường unique
+  drive_id  String?    @unique
+  drive     DriveFile? @relation(fields: [drive_id], references: [id])
+
+  video_id         String?   @unique // 🔥 video id thường unique
+  video_source     String?
+  video_thumbnails Json?
+  duration         Int?
+  urlExpiredAt     DateTime?
+
+  creation_time String?
+
+  status Json?
+
+  folderId String
+  folder   CreativeFolder @relation(fields: [folderId], references: [id], onDelete: Cascade)
+
+  createdAtLocal DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  videoSource Json?
+
+  larkRecord LarkRecord?
+
+  assetMappings CreativeAssetMapping[]
+
+  @@index([folderId])
+}
+
+model CreativeAssetMapping {
+  id String @id @default(uuid())
+
+  creativeId String
+  creative   Creative @relation(fields: [creativeId], references: [id], onDelete: Cascade)
+
+  creativeAssetId String
+  creativeAsset   CreativeAsset @relation(fields: [creativeAssetId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([creativeId, creativeAssetId])
+  @@index([creativeAssetId])
+  @@index([creativeId])
+}
+
+model LarkRecord {
+  id  String @id
+  raw Json
+
+  cid String? @unique // 🔥 cực quan trọng (ID Content)
+
+  project_name String?
+  project_code String?
+
+  brand_name String?
+  brand_code String?
+
+  product_code String?
+  product_name String?
+
+  employee_id   String?
+  employee_name String?
+
+  drive_url String?
+
+  drive_id String?
+  drive    DriveFile? @relation(fields: [drive_id], references: [id])
+
+  creative_asset_id String?        @unique
+  creative_asset    CreativeAsset? @relation(fields: [creative_asset_id], references: [id])
+
+  production_date DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([production_date])
+  @@index([brand_code, product_code])
+}
+
+model DriveFile {
+  id  String @id
+  raw Json
+
+  parentId       String?
+  name           String?
+  mimeType       String?
+  webContentLink String?
+  webViewLink    String?
+  size           String?
+
+  larkRecord    LarkRecord[]
+  creativeAsset CreativeAsset?
+
+  drive_permission Boolean?
+  last_seen_at     DateTime?
+}
+
+model SystemConfig {
+  id          String   @id @default(uuid())
+  key         String   @unique
+  value       Json
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("system_configs")
+}
+
+model Permission {
+  id       String           @id @default(uuid())
+  action   String // e.g. "read", "write", "assign"
+  resource String // e.g. "ad_account", "fanpage", "campaign"
+  roles    RolePermission[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([action, resource])
+}
+
+model RolePermission {
+  id           String     @id @default(uuid())
+  role         Role
+  permissionId String
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([role, permissionId])
+  @@index([permissionId])
+}
+
+enum ProjectRole {
+  MANAGER
+  LEADER
+  MEMBER
+}
+
+enum FolderPermission {
+  VIEW
+  EDIT
+}
+
+model Project {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  status      String   @default("ACTIVE")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  members  ProjectMember[]
+  accounts ProjectAccount[]
+  fanpages ProjectFanpage[]
+  catalogs ProjectProductCatalog[]
+  folders  ProjectFolder[]
+}
+
+model ProjectMember {
+  id        String      @id @default(uuid())
+  projectId String
+  project   Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      ProjectRole
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([projectId, userId])
+  @@index([projectId])
+  @@index([userId])
+}
+
+model ProjectAccount {
+  id        String  @id @default(uuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([projectId, accountId])
+  @@index([projectId])
+  @@index([accountId])
+}
+
+model ProjectFanpage {
+  id        String  @id @default(uuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  pageId    String
+  page      Fanpage @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([projectId, pageId])
+  @@index([projectId])
+  @@index([pageId])
+}
+
+model ProjectProductCatalog {
+  id        String         @id @default(uuid())
+  projectId String
+  project   Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  catalogId String
+  catalog   ProductCatalog @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([projectId, catalogId])
+  @@index([projectId])
+  @@index([catalogId])
+}
+
+model ProjectFolder {
+  id        String  @id @default(uuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  folderId  String
+
+  createdAt DateTime @default(now())
+
+  @@unique([projectId, folderId])
+  @@index([projectId])
+  @@index([folderId])
+}
+
+model FolderMember {
+  id         String           @id @default(uuid())
+  userId     String
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  folderId   String
+  permission FolderPermission
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, folderId])
+  @@index([userId])
+  @@index([folderId])
+}
+
+model ProductCatalog {
+  id               String  @id // Meta Catalog ID
+  name             String
+  fallbackImageUrl String?
+  businessId       String? // Business Manager ID (plain string)
+  accountId        String? // Ad Account ID (plain string)
+
+  productSets     ProductSet[]
+  productFeeds    ProductFeed[]
+  userCatalogs    UserProductCatalog[]
+  projectCatalogs ProjectProductCatalog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId])
+  @@index([accountId])
+}
+
+model ProductSet {
+  id           String         @id // Meta Product Set ID
+  catalogId    String
+  catalog      ProductCatalog @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+  name         String
+  filter       Json?
+  productCount Int            @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([catalogId])
+}
+
+model ProductFeed {
+  id        String         @id // Meta Product Feed ID
+  catalogId String
+  catalog   ProductCatalog @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+  name      String
+  country   String?
+  schedule  Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([catalogId])
+}
+
+model SavedFilter {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tableKey  String // Identifies the screen/table (e.g., "campaign-table")
+  name      String
+  filters   Json // Stores search, sortBy, sortOrder, and filters object
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, tableKey, name])
+  @@index([userId, tableKey])
+}
+
+// ==========================================================================
+// AUTOMATION (Birch-style rule engine)
+// Added in migration `add_automation`. Không chạm vào models legacy ở trên.
+// ==========================================================================
+
+enum AutomationRuleLevel {
+  AD_ACCOUNT
+  CAMPAIGN
+  ADSET
+  AD
+}
+
+enum AutomationScheduleType {
+  INTERVAL
+  SPECIFIC
+}
+
+enum AutomationTaskKind {
+  START
+  PAUSE
+  DUPLICATE
+  NOTIFY
+  INCREASE_BUDGET
+  DECREASE_BUDGET
+  SET_SPENDING_LIMITS
+  REMOVE_SPENDING_LIMITS
+  INCREASE_SPENDING_LIMITS
+  DECREASE_SPENDING_LIMITS
+  ADD_TO_NAME
+  REMOVE_FROM_NAME
+  REPLACE_TEXT_IN_NAME
+}
+
+enum AutomationGroupOperator {
+  AND
+  OR
+}
+
+enum AutomationCompareType {
+  VALUE
+  METRIC
+  RANKING
+}
+
+model AutomationCategory {
+  id       String @id @default(uuid())
+  name     String
+  position Int    @default(0)
+
+  folders AutomationFolder[]
+  rules   AutomationRule[]
+
+  createdById String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  @@index([createdById, position])
+}
+
+model AutomationFolder {
+  id       String @id @default(uuid())
+  name     String
+  position Int    @default(0)
+
+  categoryId String
+  category   AutomationCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  parentId String?
+  parent   AutomationFolder?  @relation("AutomationFolderTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children AutomationFolder[] @relation("AutomationFolderTree")
+
+  rules AutomationRule[]
+
+  createdById String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  @@index([categoryId, parentId, position])
+  @@index([parentId])
+}
+
+model AutomationRule {
+  id                  String                  @id @default(uuid())
+  name                String
+  status              AutomationRuleStatus    @default(DRAFT)
+  level               AutomationRuleLevel
+  timezone            String
+  notifyErrorsOnly    Boolean                 @default(false)
+  filterGroupOperator AutomationGroupOperator @default(OR)
+  position            Int                     @default(0)
+
+  categoryId String
+  category   AutomationCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  folderId String?
+  folder   AutomationFolder? @relation(fields: [folderId], references: [id], onDelete: SetNull)
+
+  schedule     AutomationSchedule?
+  filterGroups AutomationFilterGroup[]
+  tasks        AutomationTask[]
+  adAccounts   AutomationRuleAdAccount[]
+  notifyUsers  AutomationRuleNotifyUser[]
+  runs         AutomationRuleRun[]
+
+  createdById String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  @@index([categoryId, folderId, position])
+  @@index([createdById, updatedAt(sort: Desc)])
+  @@index([status, updatedAt(sort: Desc)])
+}
+
+enum AutomationRuleStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+}
+
+// Junction tới legacy Account: scalar FK only (không @relation sang Account để không
+// phải thêm back-relation vào model Account cũ).
+model AutomationRuleAdAccount {
+  ruleId    String
+  accountId String
+
+  rule AutomationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  @@id([ruleId, accountId])
+  @@index([accountId])
+}
+
+/// User-defined custom timeframe (Days range 0..90, hoặc Hours range 0..24).
+/// Lưu offsets thay vì absolute timestamps — runner resolve relative tới `now`
+/// theo ad account timezone qua `resolveCustomTimeframeWindow`.
+/// Rule reference qua chuỗi `"custom:<id>"` trong AutomationTaskCondition.params.timeframe.
+/// `accountId` là scalar FK (không @relation back-ref, theo pattern AutomationRuleAdAccount).
+model AutomationCustomTimeframe {
+  id          String   @id @default(uuid())
+  name        String
+  kind        String // "days" | "hours" — validate ở zod
+  fromOffset  Int // L position; 0 = today/current hour
+  toOffset    Int // R position; fromOffset <= toOffset; max 90 (days) hoặc 24 (hours)
+  accountId   String
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([accountId])
+}
+
+// Junction tới legacy User: scalar FK only.
+model AutomationRuleNotifyUser {
+  ruleId String
+  userId String
+
+  rule AutomationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  @@id([ruleId, userId])
+  @@index([userId])
+}
+
+model AutomationSchedule {
+  id     String         @id @default(uuid())
+  ruleId String         @unique
+  rule   AutomationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  type          AutomationScheduleType @default(INTERVAL)
+  interval      String?
+  specificSlots Json?
+  useDateRange  Boolean                @default(false)
+  dateFrom      DateTime?
+  dateTo        DateTime?
+}
+
+model AutomationFilterGroup {
+  id       String                  @id @default(uuid())
+  ruleId   String
+  rule     AutomationRule          @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  operator AutomationGroupOperator @default(AND)
+  position Int                     @default(0)
+
+  filters AutomationFilter[]
+
+  @@index([ruleId, position])
+}
+
+model AutomationFilter {
+  id            String                @id @default(uuid())
+  filterGroupId String
+  filterGroup   AutomationFilterGroup @relation(fields: [filterGroupId], references: [id], onDelete: Cascade)
+
+  field     String
+  operator  String
+  values    Json
+  timeframe String?
+  position  Int     @default(0)
+
+  @@index([filterGroupId, position])
+}
+
+model AutomationTask {
+  id       String             @id @default(uuid())
+  ruleId   String
+  rule     AutomationRule     @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  kind     AutomationTaskKind
+  subtitle String?
+  params   Json?
+  position Int                @default(0)
+
+  rootGroup AutomationTaskGroup?    @relation("AutomationTaskRoot")
+  groups    AutomationTaskGroup[]   @relation("AutomationTaskAllGroups")
+  runItems  AutomationRuleRunItem[]
+
+  @@index([ruleId, position])
+}
+
+model AutomationTaskGroup {
+  id     String         @id @default(uuid())
+  taskId String
+  task   AutomationTask @relation("AutomationTaskAllGroups", fields: [taskId], references: [id], onDelete: Cascade)
+
+  rootForTaskId String?         @unique
+  rootForTask   AutomationTask? @relation("AutomationTaskRoot", fields: [rootForTaskId], references: [id], onDelete: Cascade)
+
+  parentGroupId String?
+  parentGroup   AutomationTaskGroup?  @relation("AutomationGroupTree", fields: [parentGroupId], references: [id], onDelete: Cascade)
+  childGroups   AutomationTaskGroup[] @relation("AutomationGroupTree")
+
+  conditions AutomationTaskCondition[]
+
+  operator AutomationGroupOperator @default(AND)
+  position Int                     @default(0)
+
+  @@index([taskId, parentGroupId, position])
+}
+
+model AutomationTaskCondition {
+  id          String                @id @default(uuid())
+  groupId     String
+  group       AutomationTaskGroup   @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  compareType AutomationCompareType @default(VALUE)
+  params      Json
+  position    Int                   @default(0)
+
+  @@index([groupId, position])
+}
+
+// ==========================================================================
+// AUTOMATION RUNNER LOG (Bir.ch-style scan & log)
+// ==========================================================================
+
+enum AutomationRuleRunStatus {
+  RUNNING
+  COMPLETED
+  FAILED
+  SKIPPED_OVERLAP
+  SKIPPED_OUT_OF_DATE_RANGE
+}
+
+enum AutomationRuleRunItemStatus {
+  NOT_MATCHED // entity passed filter group but no task condition matched
+  PENDING
+  CONFIRMED
+  REJECTED
+  EXPIRED
+  EXECUTED
+  FAILED
+  SKIPPED // handler decided no API call needed (cap reached, frequency limit, CBO/ABO mismatch, …)
+}
+
+/// Một AutomationRuleRun = 1 lần (rule × ad account) được scheduler fire.
+model AutomationRuleRun {
+  id String @id @default(uuid())
+
+  ruleId String
+  rule   AutomationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  // Scalar FK only sang Account (model ngoài block automation)
+  accountId String
+
+  scheduledFor DateTime
+  startedAt    DateTime?
+  finishedAt   DateTime?
+
+  status AutomationRuleRunStatus @default(RUNNING)
+
+  entitiesScanned Int @default(0)
+  matchedCount    Int @default(0)
+  errorsCount     Int @default(0)
+
+  errorMessage String?
+  ruleSnapshot Json?
+
+  items AutomationRuleRunItem[]
+
+  createdAt DateTime @default(now())
+
+  @@index([ruleId, scheduledFor(sort: Desc)])
+  @@index([accountId, scheduledFor(sort: Desc)])
+  @@index([status, scheduledFor(sort: Desc)])
+}
+
+/// Mỗi entity match 1 task = 1 row, lưu snapshot + change preview cho UI log-detail.
+model AutomationRuleRunItem {
+  id String @id @default(uuid())
+
+  runId String
+  run   AutomationRuleRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  // Nullable for NOT_MATCHED rows (entity passed filter but no task condition matched)
+  taskId   String?
+  task     AutomationTask?     @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  taskKind AutomationTaskKind?
+
+  level       AutomationRuleLevel
+  // Scalar — entityId là Campaign.id / AdSet.id / Ad.id (3 bảng ngoài block automation)
+  entityId    String
+  entityName  String
+  parentLabel String?
+
+  status AutomationRuleRunItemStatus @default(PENDING)
+
+  snapshot      Json
+  changePreview Json
+  evaluation    Json?
+
+  matchedConditionSummary String?
+
+  // Scalar FK only sang User (model ngoài block automation)
+  confirmedAt   DateTime?
+  confirmedById String?
+  executedAt    DateTime?
+  errorMessage  String?
+
+  /// Number of times the Meta executor has attempted this item — increments on
+  /// every retry. Used by the processor for backoff and for FE diagnostics.
+  executionAttempts Int @default(0)
+
+  /// Structured Meta API error captured on the most recent attempt (code,
+  /// subcode, fbtrace, user/developer messages). Null while item is healthy.
+  executionError Json?
+
+  /// `fbtrace_id` from the Meta response; surfaced in FE tooltips so support
+  /// can correlate with Meta's own logs.
+  metaTraceId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([runId])
+  @@index([entityId])
+  @@index([taskId])
+  @@index([status, createdAt(sort: Desc)])
+}
+
+enum MetaConnectionStatus {
+  ACTIVE
+  REVOKED
+  INVALID
+}
+
+model MetaConnection {
+  id String @id @default(uuid())
+
+  /// Scalar FK to User (User lives outside the automation block, keep relation lightweight).
+  userId String @unique
+
+  /// AES-256-GCM ciphertext envelope of the long-lived Meta access token.
+  encryptedAccessToken String
+
+  /// "SYSTEM_USER" for MVP; "USER" reserved for future OAuth flow.
+  tokenType String @default("SYSTEM_USER")
+
+  fbUserId     String?
+  fbBusinessId String?
+  scopes       String[] @default([])
+
+  status         MetaConnectionStatus @default(ACTIVE)
+  lastVerifiedAt DateTime?
+
+  accounts Account[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+}
