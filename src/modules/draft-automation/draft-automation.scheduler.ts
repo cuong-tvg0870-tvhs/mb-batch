@@ -3,6 +3,9 @@ import { AssetType, Status } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { DraftAutomationMetaPublisherService } from './draft-automation-meta-publisher.service';
 
+const DEFAULT_AUTOMATION_CRON = '*/30 * * * *';
+const DEFAULT_AUTOMATION_TIMEZONE = 'Asia/Ho_Chi_Minh';
+
 function formatDate(d: Date): string {
   const year = d.getFullYear();
   const month = String(d.getMonth() + 1).padStart(2, '0');
@@ -374,10 +377,21 @@ export class DraftAutomationScheduler {
       ? 'PUBLISH_IMMEDIATELY'
       : 'DRAFT_ONLY';
     const runMode = automation.runMode === 'ONCE' ? 'ONCE' : 'LOOP';
+    const cronExpression =
+      typeof automation.cronExpression === 'string' &&
+      automation.cronExpression.trim()
+        ? automation.cronExpression.trim()
+        : DEFAULT_AUTOMATION_CRON;
+    const timezone =
+      typeof automation.timezone === 'string' && automation.timezone.trim()
+        ? automation.timezone.trim()
+        : DEFAULT_AUTOMATION_TIMEZONE;
 
     return {
       ...automation,
       intervalMinutes: 30,
+      cronExpression,
+      timezone,
       publishMode,
       publishToMeta: publishMode === 'PUBLISH_IMMEDIATELY',
       runMode,
@@ -928,6 +942,8 @@ export class DraftAutomationScheduler {
             publishMode,
             scheduleCheckIntervalMinutes: 30,
             nextRunAt: automation.nextRunAt || null,
+            cronExpression: automation.cronExpression,
+            timezone: automation.timezone,
             runMode: automation.runMode,
             assetCreatedAfter: assetCreatedAfter?.toISOString() || null,
           },

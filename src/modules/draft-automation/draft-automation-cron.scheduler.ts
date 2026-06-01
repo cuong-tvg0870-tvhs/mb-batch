@@ -1,17 +1,33 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron, SchedulerRegistry } from '@nestjs/schedule';
 import { CronJob } from 'cron';
+import { CronExpressionParser } from 'cron-parser';
 import { PrismaService } from '../prisma/prisma.service';
 import { DraftAutomationScheduler } from './draft-automation.scheduler';
 
 const JOB_PREFIX = 'draft-automation-template';
 const SCHEDULE_SCAN_CRON = '*/30 * * * *';
-const NEXT_RUN_DELAY_MINUTES = 30;
+const DEFAULT_AUTOMATION_CRON = '*/30 * * * *';
+const DEFAULT_AUTOMATION_TIMEZONE = 'Asia/Ho_Chi_Minh';
+const MIN_FIRST_RUN_DELAY_MS = 30 * 60 * 1000;
 
 function parseValidDate(value: any): Date | undefined {
   if (!value) return undefined;
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
+function getCronExpression(automation: any) {
+  return typeof automation?.cronExpression === 'string' &&
+    automation.cronExpression.trim()
+    ? automation.cronExpression.trim()
+    : DEFAULT_AUTOMATION_CRON;
+}
+
+function getCronTimezone(automation: any) {
+  return typeof automation?.timezone === 'string' && automation.timezone.trim()
+    ? automation.timezone.trim()
+    : DEFAULT_AUTOMATION_TIMEZONE;
 }
 
 @Injectable()
@@ -54,7 +70,11 @@ export class DraftAutomationCronScheduler implements OnModuleInit {
         continue;
       }
 
-      const nextRunAt = parseValidDate(automation.nextRunAt);
+      const nextRunAt =
+        parseValidDate(automation.nextRunAt) ||
+        this.getNextRunAt(automation, new Date(), {
+          minimumDate: new Date(Date.now() + MIN_FIRST_RUN_DELAY_MS),
+        });
       if (!nextRunAt) {
         this.unschedule(jobName);
         continue;
@@ -64,7 +84,8 @@ export class DraftAutomationCronScheduler implements OnModuleInit {
       if (
         this.hasJob(jobName) &&
         automation.status === 'SCHEDULED' &&
-        automation.nextRunAt === this.scheduledRuns.get(jobName)
+        this.getScheduleKey(automation.nextRunAt, automation) ===
+          this.scheduledRuns.get(jobName)
       ) {
         continue;
       }
@@ -106,8 +127,54 @@ export class DraftAutomationCronScheduler implements OnModuleInit {
     this.logger.log(`Unscheduled ${jobName}`);
   }
 
-  private getNextRunAt(from: Date) {
-    return new Date(from.getTime() + NEXT_RUN_DELAY_MINUTES * 60 * 1000);
+  private getScheduleKey(nextRunAt: string | undefined, automation: any) {
+    return `${nextRunAt || ''}|${getCronExpression(automation)}|${getCronTimezone(automation)}`;
+  }
+
+  private getNextRunAt(
+    automation: any,
+    from: Date,
+    options: { minimumDate?: Date } = {},
+  ) {
+    try {
+      this.assertCronIntervalIsSafe(automation, from);
+      const interval = CronExpressionParser.parse(
+        getCronExpression(automation),
+        {
+          currentDate: from,
+          tz: getCronTimezone(automation),
+        },
+      );
+      const minimumDate = options.minimumDate || new Date(Date.now() + 1000);
+
+      for (let index = 0; index < 100; index += 1) {
+        const nextRunAt = interval.next().toDate();
+        if (nextRunAt.getTime() >= minimumDate.getTime()) {
+          return nextRunAt;
+        }
+      }
+    } catch (error: any) {
+      this.logger.warn(
+        `Invalid draft automation cron expression "${getCronExpression(automation)}": ${error?.message || error}`,
+      );
+    }
+
+    return undefined;
+  }
+
+  private assertCronIntervalIsSafe(automation: any, from: Date) {
+    const interval = CronExpressionParser.parse(getCronExpression(automation), {
+      currentDate: from,
+      tz: getCronTimezone(automation),
+    });
+    let previous = interval.next().toDate();
+    for (let index = 0; index < 12; index += 1) {
+      const next = interval.next().toDate();
+      if (next.getTime() - previous.getTime() < MIN_FIRST_RUN_DELAY_MS) {
+        throw new Error('Cron interval must be at least 30 minutes.');
+      }
+      previous = next;
+    }
   }
 
   private async scheduleTemplate(
@@ -128,7 +195,10 @@ export class DraftAutomationCronScheduler implements OnModuleInit {
     });
 
     this.schedulerRegistry.addCronJob(jobName, job);
-    this.scheduledRuns.set(jobName, nextRunAt.toISOString());
+    this.scheduledRuns.set(
+      jobName,
+      this.getScheduleKey(nextRunAt.toISOString(), automation),
+    );
     job.start();
 
     await this.updateAutomationState(templateId, {
@@ -155,6 +225,7 @@ export class DraftAutomationCronScheduler implements OnModuleInit {
     const automation = this.runner.normalizeAutomation(
       (template.data as any)?.automation,
     );
+    const firedRunAt = parseValidDate(automation.nextRunAt) || new Date();
     if (
       automation?.enabled !== true ||
       !automation?.folderId ||
@@ -196,11 +267,10 @@ export class DraftAutomationCronScheduler implements OnModuleInit {
       return;
     }
 
-    await this.scheduleTemplate(
-      templateId,
-      this.getNextRunAt(new Date()),
-      refreshedAutomation,
-    );
+    const nextRunAt = this.getNextRunAt(refreshedAutomation, firedRunAt);
+    if (!nextRunAt) return;
+
+    await this.scheduleTemplate(templateId, nextRunAt, refreshedAutomation);
   }
 
   private async updateAutomationState(templateId: string, automation: any) {
