@@ -928,6 +928,26 @@ exports.Prisma.TemplateCampaignScalarFieldEnum = {
   deletedAt: 'deletedAt'
 };
 
+exports.Prisma.DraftAutomationHistoryScalarFieldEnum = {
+  id: 'id',
+  templateId: 'templateId',
+  templateName: 'templateName',
+  creatorId: 'creatorId',
+  creatorName: 'creatorName',
+  creatorEmployeeId: 'creatorEmployeeId',
+  folderId: 'folderId',
+  status: 'status',
+  reason: 'reason',
+  conditionSummary: 'conditionSummary',
+  steps: 'steps',
+  selectedAssets: 'selectedAssets',
+  generatedCampaignId: 'generatedCampaignId',
+  error: 'error',
+  startedAt: 'startedAt',
+  finishedAt: 'finishedAt',
+  createdAt: 'createdAt'
+};
+
 exports.Prisma.SystemCampaignScalarFieldEnum = {
   id: 'id',
   data: 'data',
@@ -940,6 +960,9 @@ exports.Prisma.SystemCampaignScalarFieldEnum = {
   deletedAt: 'deletedAt',
   accountId: 'accountId',
   is_template: 'is_template',
+  createdByAutomation: 'createdByAutomation',
+  automationTemplateId: 'automationTemplateId',
+  automationTemplateName: 'automationTemplateName',
   campaign_name: 'campaign_name',
   campaign_objective: 'campaign_objective',
   campaign_budgetType: 'campaign_budgetType',
@@ -1480,6 +1503,12 @@ exports.InsightRange = exports.$Enums.InsightRange = {
   DAILY: 'DAILY'
 };
 
+exports.DraftAutomationRunStatus = exports.$Enums.DraftAutomationRunStatus = {
+  SUCCESS: 'SUCCESS',
+  SKIPPED: 'SKIPPED',
+  FAILED: 'FAILED'
+};
+
 exports.Status = exports.$Enums.Status = {
   DRAFT: 'DRAFT',
   ACTIVE: 'ACTIVE',
@@ -1618,6 +1647,7 @@ exports.Prisma.ModelName = {
   AdAudienceInsight: 'AdAudienceInsight',
   ChangeLog: 'ChangeLog',
   TemplateCampaign: 'TemplateCampaign',
+  DraftAutomationHistory: 'DraftAutomationHistory',
   SystemCampaign: 'SystemCampaign',
   SystemAdSet: 'SystemAdSet',
   SystemAd: 'SystemAd',

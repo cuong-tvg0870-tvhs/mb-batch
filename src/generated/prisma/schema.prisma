@@ -1557,9 +1557,47 @@ model TemplateCampaign {
   updatedAt   DateTime  @updatedAt
   deletedAt   DateTime?
 
+  automationHistories DraftAutomationHistory[]
+
   @@index([name])
   @@index([reference_id])
   @@index([createdById, createdAt(sort: Desc)])
+}
+
+enum DraftAutomationRunStatus {
+  SUCCESS
+  SKIPPED
+  FAILED
+}
+
+model DraftAutomationHistory {
+  id String @id @default(cuid())
+
+  templateId String
+  template   TemplateCampaign @relation(fields: [templateId], references: [id], onDelete: Cascade)
+
+  templateName      String
+  creatorId         String?
+  creatorName       String?
+  creatorEmployeeId String?
+  folderId          String?
+
+  status DraftAutomationRunStatus
+  reason String?
+
+  conditionSummary    Json?
+  steps               Json?
+  selectedAssets      Json?
+  generatedCampaignId String?
+  error               String?
+
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([templateId, createdAt(sort: Desc)])
+  @@index([creatorId, createdAt(sort: Desc)])
+  @@index([status, createdAt(sort: Desc)])
 }
 
 model SystemCampaign {
@@ -1581,6 +1619,10 @@ model SystemCampaign {
 
   is_template Boolean? @default(false)
 
+  createdByAutomation    Boolean @default(false)
+  automationTemplateId   String?
+  automationTemplateName String?
+
   campaign_name        String?
   campaign_objective   String?
   campaign_budgetType  String?
@@ -1598,6 +1640,8 @@ model SystemCampaign {
 
   @@index([status])
   @@index([createdById, createdAt(sort: Desc)])
+  @@index([createdByAutomation, createdAt(sort: Desc)])
+  @@index([automationTemplateId, createdAt(sort: Desc)])
 }
 
 model SystemAdSet {

@@ -716,6 +716,9 @@ export class DraftAutomationScheduler implements OnModuleInit {
               accountId: substitutedValues.ad_account_id,
               createdById: creator.id,
               status: Status.DRAFT,
+              createdByAutomation: true,
+              automationTemplateId: template.id,
+              automationTemplateName: template.name,
               cid: substitutedValues.cid,
               data: substitutedValues as any,
               campaign_bidAmount:
