@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { AssetType, Status } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { DraftAutomationMetaPublisherService } from './draft-automation-meta-publisher.service';
 
 function formatDate(d: Date): string {
   const year = d.getFullYear();
@@ -291,7 +292,10 @@ function replacePlaceholders(obj: any, videos: any[], images: any[]): any {
 export class DraftAutomationScheduler implements OnModuleInit {
   private readonly logger = new Logger(DraftAutomationScheduler.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly metaPublisher: DraftAutomationMetaPublisherService,
+  ) {}
 
   onModuleInit() {
     this.logger.log('DraftAutomationScheduler initialized.');
@@ -327,6 +331,9 @@ export class DraftAutomationScheduler implements OnModuleInit {
     steps?: any[];
     selectedAssets?: any;
     generatedCampaignId?: string;
+    publishRequested?: boolean;
+    publishMode?: 'DRAFT_ONLY' | 'PUBLISH_IMMEDIATELY';
+    publishResult?: any;
     error?: string;
   }) {
     try {
@@ -340,6 +347,9 @@ export class DraftAutomationScheduler implements OnModuleInit {
           folderId: input.folderId || input.automation?.folderId,
           status: input.status,
           reason: input.reason,
+          publishRequested: input.publishRequested || false,
+          publishMode: input.publishMode || 'DRAFT_ONLY',
+          publishResult: input.publishResult || undefined,
           conditionSummary: input.conditionSummary || undefined,
           steps: input.steps || [],
           selectedAssets: input.selectedAssets || undefined,
@@ -355,6 +365,15 @@ export class DraftAutomationScheduler implements OnModuleInit {
         this.formatError(err),
       );
     }
+  }
+
+  private shouldPublishImmediately(automation: any) {
+    return (
+      automation?.publishToMeta === true ||
+      automation?.autoPublish === true ||
+      automation?.publishImmediately === true ||
+      automation?.publishMode === 'PUBLISH_IMMEDIATELY'
+    );
   }
 
   async processAutomation() {
@@ -392,8 +411,13 @@ export class DraftAutomationScheduler implements OnModuleInit {
       let automation: any;
       let creator: any;
       let conditionSummary: any;
+      let generatedCampaignId: string | undefined;
+      let publishRequested = false;
+      let publishMode: 'DRAFT_ONLY' | 'PUBLISH_IMMEDIATELY' = 'DRAFT_ONLY';
       try {
         automation = (template.data as any).automation;
+        publishRequested = this.shouldPublishImmediately(automation);
+        publishMode = publishRequested ? 'PUBLISH_IMMEDIATELY' : 'DRAFT_ONLY';
         const creatorId = template.createdById;
         if (!creatorId) {
           this.logger.warn(
@@ -406,6 +430,8 @@ export class DraftAutomationScheduler implements OnModuleInit {
             reason: 'Template has no creator ID.',
             automation,
             folderId: automation.folderId,
+            publishRequested,
+            publishMode,
             steps: [
               {
                 key: 'creator',
@@ -436,6 +462,8 @@ export class DraftAutomationScheduler implements OnModuleInit {
             automation,
             creator,
             folderId: automation.folderId,
+            publishRequested,
+            publishMode,
             steps: [
               {
                 key: 'creator',
@@ -541,6 +569,8 @@ export class DraftAutomationScheduler implements OnModuleInit {
             nameRule: automation.nameRule || null,
             requiredVideos,
             requiredImages,
+            publishToMeta: publishRequested,
+            publishMode,
           },
           creator: {
             id: creator.id,
@@ -616,6 +646,8 @@ export class DraftAutomationScheduler implements OnModuleInit {
             automation,
             creator,
             folderId: automation.folderId,
+            publishRequested,
+            publishMode,
             conditionSummary: {
               ...conditionSummary,
               checks: [
@@ -710,7 +742,7 @@ export class DraftAutomationScheduler implements OnModuleInit {
         ];
 
         // 5. Save draft campaign via a transaction mimicking front-end payload logic
-        const generatedCampaignId = await this.prisma.$transaction(async (tx) => {
+        generatedCampaignId = await this.prisma.$transaction(async (tx) => {
           const campaign = await tx.systemCampaign.create({
             data: {
               accountId: substitutedValues.ad_account_id,
@@ -719,6 +751,7 @@ export class DraftAutomationScheduler implements OnModuleInit {
               createdByAutomation: true,
               automationTemplateId: template.id,
               automationTemplateName: template.name,
+              automationPublishMode: publishMode,
               cid: substitutedValues.cid,
               data: substitutedValues as any,
               campaign_bidAmount:
@@ -781,14 +814,64 @@ export class DraftAutomationScheduler implements OnModuleInit {
           return campaign.id;
         });
 
+        let publishResult: any;
+        const successSteps: any[] = [
+          {
+            key: 'scan_assets',
+            label: 'Scan and filter creative assets',
+            status: 'success',
+          },
+          {
+            key: 'select_assets',
+            label: 'Select oldest eligible assets',
+            status: 'success',
+            videos: selectedVideos.map(summarizeAsset),
+            images: selectedImages.map(summarizeAsset),
+          },
+          {
+            key: 'create_draft',
+            label: 'Create draft campaign',
+            status: 'success',
+            campaignId: generatedCampaignId,
+          },
+        ];
+
+        if (publishRequested) {
+          successSteps.push({
+            key: 'publish_meta',
+            label: 'Publish draft campaign to Meta',
+            status: 'processing',
+          });
+
+          publishResult =
+            await this.metaPublisher.publishDraftCampaign(generatedCampaignId);
+
+          successSteps[successSteps.length - 1] = {
+            key: 'publish_meta',
+            label: 'Publish draft campaign to Meta',
+            status: 'success',
+            metaCampaignId: publishResult.campaignId,
+            publishHistoryId: publishResult.publishHistoryId,
+          };
+
+          for (const asset of [...selectedVideos, ...selectedImages]) {
+            publishedAssetIds.add(asset.id);
+          }
+        }
+
         await this.recordAutomationHistory({
           template,
           startedAt,
           status: 'SUCCESS',
-          reason: 'Automated draft campaign created.',
+          reason: publishRequested
+            ? 'Automated draft campaign created and published to Meta.'
+            : 'Automated draft campaign created.',
           automation,
           creator,
           folderId: automation.folderId,
+          publishRequested,
+          publishMode,
+          publishResult,
           conditionSummary: {
             ...conditionSummary,
             checks: [
@@ -809,49 +892,57 @@ export class DraftAutomationScheduler implements OnModuleInit {
             images: selectedImages.map(summarizeAsset),
           },
           generatedCampaignId,
-          steps: [
-            {
-              key: 'scan_assets',
-              label: 'Scan and filter creative assets',
-              status: 'success',
-            },
-            {
-              key: 'select_assets',
-              label: 'Select oldest eligible assets',
-              status: 'success',
-              videos: selectedVideos.map(summarizeAsset),
-              images: selectedImages.map(summarizeAsset),
-            },
-            {
-              key: 'create_draft',
-              label: 'Create draft campaign',
-              status: 'success',
-              campaignId: generatedCampaignId,
-            },
-          ],
+          steps: successSteps,
         });
 
         this.logger.log(
-          `Successfully created automated draft campaign for template "${template.name}".`,
+          publishRequested
+            ? `Successfully created and published automated campaign for template "${template.name}".`
+            : `Successfully created automated draft campaign for template "${template.name}".`,
         );
       } catch (err: any) {
+        const failureSteps =
+          publishRequested && generatedCampaignId
+            ? [
+                {
+                  key: 'create_draft',
+                  label: 'Create draft campaign',
+                  status: 'success',
+                  campaignId: generatedCampaignId,
+                },
+                {
+                  key: 'publish_meta',
+                  label: 'Publish draft campaign to Meta',
+                  status: 'failed',
+                  error: err?.metaError?.message || err?.message || String(err),
+                },
+              ]
+            : [
+                {
+                  key: 'process_template',
+                  label: 'Process automation template',
+                  status: 'failed',
+                  error: err?.message || String(err),
+                },
+              ];
+
         await this.recordAutomationHistory({
           template,
           startedAt,
           status: 'FAILED',
-          reason: 'Unexpected error while processing template.',
+          reason:
+            publishRequested && generatedCampaignId
+              ? 'Draft campaign was created but publish to Meta failed.'
+              : 'Unexpected error while processing template.',
           automation,
           creator,
           folderId: automation?.folderId,
+          publishRequested,
+          publishMode,
           conditionSummary,
-          steps: [
-            {
-              key: 'process_template',
-              label: 'Process automation template',
-              status: 'failed',
-              error: err?.message || String(err),
-            },
-          ],
+          steps: failureSteps,
+          generatedCampaignId,
+          publishResult: err?.metaError ? { error: err.metaError } : undefined,
           error: this.formatError(err),
         });
         this.logger.error(

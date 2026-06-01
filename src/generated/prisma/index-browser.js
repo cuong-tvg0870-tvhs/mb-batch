@@ -938,6 +938,9 @@ exports.Prisma.DraftAutomationHistoryScalarFieldEnum = {
   folderId: 'folderId',
   status: 'status',
   reason: 'reason',
+  publishRequested: 'publishRequested',
+  publishMode: 'publishMode',
+  publishResult: 'publishResult',
   conditionSummary: 'conditionSummary',
   steps: 'steps',
   selectedAssets: 'selectedAssets',
@@ -963,6 +966,7 @@ exports.Prisma.SystemCampaignScalarFieldEnum = {
   createdByAutomation: 'createdByAutomation',
   automationTemplateId: 'automationTemplateId',
   automationTemplateName: 'automationTemplateName',
+  automationPublishMode: 'automationPublishMode',
   campaign_name: 'campaign_name',
   campaign_objective: 'campaign_objective',
   campaign_budgetType: 'campaign_budgetType',
@@ -1507,6 +1511,11 @@ exports.DraftAutomationRunStatus = exports.$Enums.DraftAutomationRunStatus = {
   SUCCESS: 'SUCCESS',
   SKIPPED: 'SKIPPED',
   FAILED: 'FAILED'
+};
+
+exports.DraftAutomationPublishMode = exports.$Enums.DraftAutomationPublishMode = {
+  DRAFT_ONLY: 'DRAFT_ONLY',
+  PUBLISH_IMMEDIATELY: 'PUBLISH_IMMEDIATELY'
 };
 
 exports.Status = exports.$Enums.Status = {

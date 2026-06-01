@@ -1570,6 +1570,11 @@ enum DraftAutomationRunStatus {
   FAILED
 }
 
+enum DraftAutomationPublishMode {
+  DRAFT_ONLY
+  PUBLISH_IMMEDIATELY
+}
+
 model DraftAutomationHistory {
   id String @id @default(cuid())
 
@@ -1585,6 +1590,10 @@ model DraftAutomationHistory {
   status DraftAutomationRunStatus
   reason String?
 
+  publishRequested Boolean                    @default(false)
+  publishMode      DraftAutomationPublishMode @default(DRAFT_ONLY)
+  publishResult    Json?
+
   conditionSummary    Json?
   steps               Json?
   selectedAssets      Json?
@@ -1598,6 +1607,7 @@ model DraftAutomationHistory {
   @@index([templateId, createdAt(sort: Desc)])
   @@index([creatorId, createdAt(sort: Desc)])
   @@index([status, createdAt(sort: Desc)])
+  @@index([publishRequested, createdAt(sort: Desc)])
 }
 
 model SystemCampaign {
@@ -1619,9 +1629,10 @@ model SystemCampaign {
 
   is_template Boolean? @default(false)
 
-  createdByAutomation    Boolean @default(false)
+  createdByAutomation    Boolean                    @default(false)
   automationTemplateId   String?
   automationTemplateName String?
+  automationPublishMode  DraftAutomationPublishMode @default(DRAFT_ONLY)
 
   campaign_name        String?
   campaign_objective   String?
@@ -1642,6 +1653,7 @@ model SystemCampaign {
   @@index([createdById, createdAt(sort: Desc)])
   @@index([createdByAutomation, createdAt(sort: Desc)])
   @@index([automationTemplateId, createdAt(sort: Desc)])
+  @@index([automationPublishMode, createdAt(sort: Desc)])
 }
 
 model SystemAdSet {
