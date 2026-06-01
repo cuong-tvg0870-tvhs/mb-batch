@@ -383,12 +383,24 @@ export async function fetchAll(
       } catch (err) {
         const metaErr = normalizeMetaError(err);
 
-        // Xử lý Rate Limit (Lỗi 4 hoặc 17)
-        if ([4, 17].includes(metaErr.code) && retry < maxRetries) {
+        const isRateLimit = [4, 17].includes(metaErr.code);
+        const isNetworkError =
+          !metaErr.code &&
+          (metaErr.message?.includes('no response was received') ||
+            metaErr.message?.includes('timeout') ||
+            metaErr.message?.includes('Network Error') ||
+            metaErr.message?.includes('ENOTFOUND') ||
+            metaErr.message?.includes('ECONNRESET') ||
+            metaErr.message?.includes('socket hang up'));
+
+        // Xử lý Rate Limit (Lỗi 4 hoặc 17) hoặc lỗi kết nối mạng tạm thời
+        if ((isRateLimit || isNetworkError) && retry < maxRetries) {
           retry++;
-          const waitTime = rateLimitSleepMs * retry;
+          const waitTime = isRateLimit
+            ? rateLimitSleepMs * retry
+            : 10000 * retry; // Lỗi mạng thì chờ 10s, 20s
           console.warn(
-            `[Meta] Rate limit hit. Retrying in ${waitTime}ms... (Attempt ${retry})`,
+            `[Meta] Fetch error (RateLimit: ${isRateLimit}, NetworkError: ${isNetworkError}). Retrying in ${waitTime}ms... (Attempt ${retry}/${maxRetries})`,
           );
           await sleep(waitTime);
           // Quay lại đầu vòng lặp while để thử lại page.next()

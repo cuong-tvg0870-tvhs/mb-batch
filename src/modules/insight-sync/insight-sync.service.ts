@@ -1,5 +1,5 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { CreativeStatus, InsightRange, LevelInsight } from '@prisma/client';
+import { CreativeStatus, InsightRange, LevelInsight, Prisma } from '@prisma/client';
 import dayjs from 'dayjs';
 import { PrismaBatchHelper } from '../../common/helpers/prisma-batch.helper';
 import { chunk, extractCampaignMetrics } from '../../common/utils';
@@ -114,7 +114,7 @@ export class InsightSyncService implements OnModuleInit {
         chunkSize = maxMap[level] || 100;
       } else {
         // Short-term ranges can handle larger chunks
-        if (level === InsightSyncLevel.AD) chunkSize = 100;
+        if (level === InsightSyncLevel.AD) chunkSize = 50;
         else if (level === InsightSyncLevel.ADSET) chunkSize = 300;
         else chunkSize = 500; // Campaign today/3d/7d is very light
       }
@@ -373,12 +373,25 @@ export class InsightSyncService implements OnModuleInit {
     // Update in chunks
     for (const insightChunk of chunk(createdInsights, 100)) {
       await Promise.all(
-        insightChunk.map((insight) =>
-          (this.prisma[parentModel] as any).update({
-            where: { id: insight[relationFieldId] },
-            data: { [parentInsightIdField]: insight.id },
-          }),
-        ),
+        insightChunk.map(async (insight) => {
+          try {
+            await (this.prisma[parentModel] as any).update({
+              where: { id: insight[relationFieldId] },
+              data: { [parentInsightIdField]: insight.id },
+            });
+          } catch (err: any) {
+            if (
+              err instanceof Prisma.PrismaClientKnownRequestError &&
+              err.code === 'P2003'
+            ) {
+              this.logger.warn(
+                `[updateParentRelations] ⚠️ Foreign key constraint violation on ${parentModel} ${insight[relationFieldId]} update. Skipping...`,
+              );
+            } else {
+              throw err;
+            }
+          }
+        }),
       );
     }
   }
@@ -665,18 +678,31 @@ export class InsightSyncService implements OnModuleInit {
       }
 
       // 7. Update Creative performance status and insight IDs
-      await prismaHelper.upsertMany(creativeUpdates, (item) => {
+      await prismaHelper.upsertMany(creativeUpdates, async (item) => {
         const ref = insightMapByCreative.get(item.id);
-        return this.prisma.creative.update({
-          where: { id: item.id },
-          data: {
-            ...item.data,
-            insightMaxId: ref?.max,
-            insight7dId: ref?.d7,
-            insight3dId: ref?.d3,
-            insightTodayId: ref?.today,
-          },
-        });
+        try {
+          await this.prisma.creative.update({
+            where: { id: item.id },
+            data: {
+              ...item.data,
+              insightMaxId: ref?.max,
+              insight7dId: ref?.d7,
+              insight3dId: ref?.d3,
+              insightTodayId: ref?.today,
+            },
+          });
+        } catch (err: any) {
+          if (
+            err instanceof Prisma.PrismaClientKnownRequestError &&
+            err.code === 'P2003'
+          ) {
+            this.logger.warn(
+              `[${accountId}] ⚠️ Foreign key constraint violation on creative ${item.id} update. Skipping...`,
+            );
+          } else {
+            throw err;
+          }
+        }
       });
     }
 
