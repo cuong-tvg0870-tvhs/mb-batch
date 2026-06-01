@@ -5,6 +5,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { DraftAutomationScheduler } from './draft-automation.scheduler';
 
 const JOB_PREFIX = 'draft-automation-template';
+const SCHEDULE_SCAN_CRON = '*/30 * * * *';
+const NEXT_RUN_DELAY_MINUTES = 30;
 
 function parseValidDate(value: any): Date | undefined {
   if (!value) return undefined;
@@ -28,7 +30,7 @@ export class DraftAutomationCronScheduler implements OnModuleInit {
     await this.reconcileAutomationSchedules();
   }
 
-  @Cron('* * * * *')
+  @Cron(SCHEDULE_SCAN_CRON)
   async reconcileAutomationSchedules() {
     const templates = await this.prisma.templateCampaign.findMany({
       where: { deletedAt: null },
@@ -52,12 +54,11 @@ export class DraftAutomationCronScheduler implements OnModuleInit {
         continue;
       }
 
-      const nextRunAt =
-        parseValidDate(automation.nextRunAt) ||
-        this.getNextRunAt(
-          parseValidDate(automation.lastRunAt) || new Date(),
-          automation.intervalMinutes,
-        );
+      const nextRunAt = parseValidDate(automation.nextRunAt);
+      if (!nextRunAt) {
+        this.unschedule(jobName);
+        continue;
+      }
 
       activeTemplateIds.add(template.id);
       if (
@@ -105,9 +106,8 @@ export class DraftAutomationCronScheduler implements OnModuleInit {
     this.logger.log(`Unscheduled ${jobName}`);
   }
 
-  private getNextRunAt(from: Date, intervalMinutes: number) {
-    const safeInterval = Math.max(1, Number(intervalMinutes) || 30);
-    return new Date(from.getTime() + safeInterval * 60 * 1000);
+  private getNextRunAt(from: Date) {
+    return new Date(from.getTime() + NEXT_RUN_DELAY_MINUTES * 60 * 1000);
   }
 
   private async scheduleTemplate(
@@ -198,7 +198,7 @@ export class DraftAutomationCronScheduler implements OnModuleInit {
 
     await this.scheduleTemplate(
       templateId,
-      this.getNextRunAt(new Date(), refreshedAutomation.intervalMinutes),
+      this.getNextRunAt(new Date()),
       refreshedAutomation,
     );
   }

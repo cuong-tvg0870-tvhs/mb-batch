@@ -369,10 +369,6 @@ export class DraftAutomationScheduler {
   }
 
   normalizeAutomation(automation: any = {}) {
-    const intervalMinutes = Math.max(
-      1,
-      Number(automation.intervalMinutes || automation.scheduleMinutes || 30),
-    );
     const publishMode = this.shouldPublishImmediately(automation)
       ? 'PUBLISH_IMMEDIATELY'
       : 'DRAFT_ONLY';
@@ -380,7 +376,7 @@ export class DraftAutomationScheduler {
 
     return {
       ...automation,
-      intervalMinutes,
+      intervalMinutes: 30,
       publishMode,
       publishToMeta: publishMode === 'PUBLISH_IMMEDIATELY',
       runMode,
@@ -905,7 +901,8 @@ export class DraftAutomationScheduler {
             requiredImages,
             publishToMeta: publishRequested,
             publishMode,
-            intervalMinutes: automation.intervalMinutes,
+            scheduleCheckIntervalMinutes: 30,
+            nextRunAt: automation.nextRunAt || null,
             runMode: automation.runMode,
             assetCreatedAfter: assetCreatedAfter?.toISOString() || null,
           },
