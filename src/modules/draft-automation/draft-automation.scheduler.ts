@@ -1,5 +1,4 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { Cron } from '@nestjs/schedule';
+import { Injectable, Logger } from '@nestjs/common';
 import { AssetType, Status } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { DraftAutomationMetaPublisherService } from './draft-automation-meta-publisher.service';
@@ -73,8 +72,19 @@ function summarizeAsset(asset: any) {
     type: asset.type,
     video_id: asset.video_id,
     imageHash: asset.imageHash,
+    creation_time: asset.creation_time,
     employee_id: asset.larkRecord?.employee_id,
   };
+}
+
+function parseValidDate(value: any): Date | undefined {
+  if (!value) return undefined;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
+function getAssetCreationDate(asset: any): Date | undefined {
+  return parseValidDate(asset?.creation_time || asset?.createdAtLocal);
 }
 
 function getThumbnailList(video: any): any[] {
@@ -289,31 +299,13 @@ function replacePlaceholders(obj: any, videos: any[], images: any[]): any {
 }
 
 @Injectable()
-export class DraftAutomationScheduler implements OnModuleInit {
+export class DraftAutomationScheduler {
   private readonly logger = new Logger(DraftAutomationScheduler.name);
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly metaPublisher: DraftAutomationMetaPublisherService,
   ) {}
-
-  onModuleInit() {
-    this.logger.log('DraftAutomationScheduler initialized.');
-  }
-
-  @Cron('*/5 * * * *')
-  async handleDraftAutomationCron() {
-    this.logger.log('⏰ Starting draft automation cron...');
-    try {
-      await this.processAutomation();
-    } catch (err: any) {
-      this.logger.error(
-        'Error in draft automation cron:',
-        err.stack || err.message || err,
-      );
-    }
-    this.logger.log('⏰ Draft automation cron finished.');
-  }
 
   private formatError(err: any) {
     return err?.stack || err?.message || String(err);
@@ -376,11 +368,274 @@ export class DraftAutomationScheduler implements OnModuleInit {
     );
   }
 
-  async processAutomation() {
+  normalizeAutomation(automation: any = {}) {
+    const intervalMinutes = Math.max(
+      1,
+      Number(automation.intervalMinutes || automation.scheduleMinutes || 30),
+    );
+    const publishMode = this.shouldPublishImmediately(automation)
+      ? 'PUBLISH_IMMEDIATELY'
+      : 'DRAFT_ONLY';
+    const runMode = automation.runMode === 'ONCE' ? 'ONCE' : 'LOOP';
+
+    return {
+      ...automation,
+      intervalMinutes,
+      publishMode,
+      publishToMeta: publishMode === 'PUBLISH_IMMEDIATELY',
+      runMode,
+    };
+  }
+
+  private async updateTemplateAutomationState(template: any, patch: any) {
+    const currentData = ((template.data || {}) as any) || {};
+    const currentAutomation = currentData.automation || {};
+    const nextAutomation = {
+      ...currentAutomation,
+      ...patch,
+    };
+
+    template.data = {
+      ...currentData,
+      automation: nextAutomation,
+    };
+
+    await this.prisma.templateCampaign.update({
+      where: { id: template.id },
+      data: { data: template.data as any },
+    });
+  }
+
+  private async getAssetsByIds(ids: string[]) {
+    const uniqueIds = [...new Set(ids.filter(Boolean))];
+    if (uniqueIds.length === 0) return [];
+
+    const assets = await this.prisma.creativeAsset.findMany({
+      where: { id: { in: uniqueIds } },
+      include: { larkRecord: true },
+    });
+    const assetById = new Map(assets.map((asset) => [asset.id, asset]));
+    return uniqueIds.map((id) => assetById.get(id)).filter(Boolean);
+  }
+
+  private splitAssetsByType(assets: any[]) {
+    return {
+      videos: assets.filter((asset) => asset.type === AssetType.VIDEO),
+      images: assets.filter((asset) => asset.type === AssetType.IMAGE),
+    };
+  }
+
+  private async getInProgressDraft(
+    template: any,
+    creatorId: string,
+    automation: any,
+  ) {
+    const inProgressDraftId = automation?.inProgressDraftId;
+    if (!inProgressDraftId) return null;
+
+    return this.prisma.systemCampaign.findFirst({
+      where: {
+        id: inProgressDraftId,
+        createdById: creatorId,
+        createdByAutomation: true,
+        automationTemplateId: template.id,
+        status: Status.DRAFT,
+        deletedAt: null,
+        meta_id: null,
+      },
+      include: {
+        ad_sets: {
+          orderBy: { createdAt: 'asc' },
+          include: {
+            ads: { orderBy: { createdAt: 'asc' } },
+          },
+        },
+      },
+    });
+  }
+
+  private buildSubstitutedValues(input: {
+    template: any;
+    creator: any;
+    videos: any[];
+    images: any[];
+    publishMode: 'DRAFT_ONLY' | 'PUBLISH_IMMEDIATELY';
+    requiredVideos: number;
+    requiredImages: number;
+    isComplete: boolean;
+    automation: any;
+  }) {
+    const {
+      template,
+      creator,
+      videos,
+      images,
+      publishMode,
+      requiredVideos,
+      requiredImages,
+      isComplete,
+      automation,
+    } = input;
+    const templateData = template.data as any;
+    const substitutedValues = replacePlaceholders(templateData, videos, images);
+
+    const employeeId = creator.employee_id;
+    const employeeName = creator.name;
+
+    if (substitutedValues.campaign?.name) {
+      substitutedValues.campaign.name = updateName(
+        substitutedValues.campaign.name,
+        employeeId,
+        employeeName,
+      );
+    }
+
+    if (Array.isArray(substitutedValues.ad_sets)) {
+      substitutedValues.ad_sets = substitutedValues.ad_sets.map(
+        (adset: any) => {
+          if (adset.name) {
+            adset.name = updateName(adset.name, employeeId, employeeName);
+          }
+          if (Array.isArray(adset.ads)) {
+            adset.ads = adset.ads.map((ad: any) => {
+              if (ad.name) {
+                ad.name = updateName(ad.name, employeeId, employeeName);
+              }
+              return ad;
+            });
+          }
+          return adset;
+        },
+      );
+    }
+
+    substitutedValues.automation_used_assets = [
+      ...videos.map((v) => v.id),
+      ...images.map((i) => i.id),
+    ];
+    substitutedValues.automation_progress = {
+      templateId: template.id,
+      templateName: template.name,
+      requiredVideos,
+      requiredImages,
+      currentVideos: videos.length,
+      currentImages: images.length,
+      isComplete,
+      runMode: automation.runMode,
+      publishMode,
+      updatedAt: new Date().toISOString(),
+    };
+
+    return substitutedValues;
+  }
+
+  private async saveAutomationDraft(input: {
+    existingDraft?: any;
+    substitutedValues: any;
+    template: any;
+    creator: any;
+    publishMode: 'DRAFT_ONLY' | 'PUBLISH_IMMEDIATELY';
+  }) {
+    const { existingDraft, substitutedValues, template, creator, publishMode } =
+      input;
+
+    return this.prisma.$transaction(async (tx) => {
+      const campaignData = {
+        accountId: substitutedValues.ad_account_id,
+        createdById: creator.id,
+        status: Status.DRAFT,
+        createdByAutomation: true,
+        automationTemplateId: template.id,
+        automationTemplateName: template.name,
+        automationPublishMode: publishMode,
+        cid: substitutedValues.cid,
+        data: substitutedValues as any,
+        campaign_bidAmount:
+          Number(substitutedValues.campaign?.bid_amount) || undefined,
+        campaign_bidStrategy:
+          substitutedValues.campaign?.bid_strategy || undefined,
+        campaign_budget:
+          Number(
+            substitutedValues.campaign?.daily_budget ||
+              substitutedValues.campaign?.lifetime_budget,
+          ) || undefined,
+        campaign_budgetType:
+          (substitutedValues.campaign?.daily_budget && 'DAILY') ||
+          (substitutedValues.campaign?.lifetime_budget && 'LIFETIME') ||
+          'undefined',
+        campaign_CBO:
+          !!substitutedValues.campaign?.daily_budget ||
+          !!substitutedValues.campaign?.lifetime_budget ||
+          false,
+        campaign_name: substitutedValues.campaign?.name,
+        campaign_objective: substitutedValues.campaign?.objective,
+      };
+
+      const campaign = existingDraft
+        ? await tx.systemCampaign.update({
+            where: { id: existingDraft.id },
+            data: campaignData,
+          })
+        : await tx.systemCampaign.create({
+            data: campaignData,
+          });
+
+      if (existingDraft) {
+        const adSetIds = existingDraft.ad_sets.map((adset: any) => adset.id);
+        if (adSetIds.length > 0) {
+          await tx.systemAd.deleteMany({
+            where: { adSetId: { in: adSetIds } },
+          });
+          await tx.systemAdSet.deleteMany({
+            where: { id: { in: adSetIds } },
+          });
+        }
+      }
+
+      for (const adset of substitutedValues.ad_sets || []) {
+        const createdAdSet = await tx.systemAdSet.create({
+          data: {
+            accountId: substitutedValues.ad_account_id,
+            campaignId: campaign.id,
+            createdById: creator.id,
+            status: Status.DRAFT,
+            data: adset as any,
+            adset_bidAmount: Number(adset.bid_amount) || undefined,
+            adset_bidStrategy: adset.bid_strategy || undefined,
+            adset_budget:
+              Number(adset.daily_budget || adset.lifetime_budget) || undefined,
+            adset_budgetType:
+              (adset.daily_budget && 'DAILY') ||
+              (adset.lifetime_budget && 'LIFETIME') ||
+              'undefined',
+            adset_name: adset.name,
+            adset_optimization: adset.optimization_goal,
+          },
+        });
+
+        if (Array.isArray(adset.ads)) {
+          await tx.systemAd.createMany({
+            data: adset.ads.map((ad: any) => ({
+              accountId: substitutedValues.ad_account_id,
+              createdById: creator.id,
+              data: ad,
+              status: Status.DRAFT,
+              adSetId: createdAdSet.id,
+            })),
+          });
+        }
+      }
+
+      return campaign.id;
+    });
+  }
+
+  async processAutomation(templateId?: string) {
     // 1. Fetch all templates with automation configured
     const templates = await this.prisma.templateCampaign.findMany({
       where: {
         deletedAt: null,
+        ...(templateId ? { id: templateId } : {}),
       },
     });
 
@@ -398,14 +653,6 @@ export class DraftAutomationScheduler implements OnModuleInit {
       `Found ${activeTemplates.length} templates with active automation rules.`,
     );
 
-    // Pre-fetch published asset mappings to minimize DB queries in loops
-    const assetMappings = await this.prisma.creativeAssetMapping.findMany({
-      select: { creativeAssetId: true },
-    });
-    const publishedAssetIds = new Set(
-      assetMappings.map((m) => m.creativeAssetId),
-    );
-
     for (const template of activeTemplates) {
       const startedAt = new Date();
       let automation: any;
@@ -415,7 +662,16 @@ export class DraftAutomationScheduler implements OnModuleInit {
       let publishRequested = false;
       let publishMode: 'DRAFT_ONLY' | 'PUBLISH_IMMEDIATELY' = 'DRAFT_ONLY';
       try {
-        automation = (template.data as any).automation;
+        automation = this.normalizeAutomation(
+          (template.data as any).automation,
+        );
+        if (
+          automation.enabled !== true ||
+          automation.status === 'PAUSED' ||
+          automation.status === 'DISABLED'
+        ) {
+          continue;
+        }
         publishRequested = this.shouldPublishImmediately(automation);
         publishMode = publishRequested ? 'PUBLISH_IMMEDIATELY' : 'DRAFT_ONLY';
         const creatorId = template.createdById;
@@ -427,7 +683,7 @@ export class DraftAutomationScheduler implements OnModuleInit {
             template,
             startedAt,
             status: 'SKIPPED',
-            reason: 'Template has no creator ID.',
+            reason: 'Mẫu chưa có ID người tạo.',
             automation,
             folderId: automation.folderId,
             publishRequested,
@@ -435,9 +691,9 @@ export class DraftAutomationScheduler implements OnModuleInit {
             steps: [
               {
                 key: 'creator',
-                label: 'Check template creator',
+                label: 'Kiểm tra người tạo mẫu',
                 status: 'skipped',
-                reason: 'createdById is empty',
+                reason: 'ID người tạo đang trống',
               },
             ],
           });
@@ -457,8 +713,8 @@ export class DraftAutomationScheduler implements OnModuleInit {
             startedAt,
             status: 'SKIPPED',
             reason: !creator
-              ? 'Template creator was not found.'
-              : 'Template creator has no employee ID.',
+              ? 'Không tìm thấy người tạo mẫu.'
+              : 'Người tạo template chưa có employee ID.',
             automation,
             creator,
             folderId: automation.folderId,
@@ -467,12 +723,12 @@ export class DraftAutomationScheduler implements OnModuleInit {
             steps: [
               {
                 key: 'creator',
-                label: 'Check template creator',
+                label: 'Kiểm tra người tạo mẫu',
                 status: 'skipped',
                 creatorId,
                 reason: !creator
-                  ? 'Creator record was not found'
-                  : 'creator.employee_id is empty',
+                  ? 'Không tìm thấy bản ghi người tạo'
+                  : 'creator.employee_id đang trống',
               },
             ],
           });
@@ -484,7 +740,7 @@ export class DraftAutomationScheduler implements OnModuleInit {
         );
 
         // 2. Fetch all assets in the target folder
-        const folderAssets = await this.prisma.creativeAsset.findMany({
+        const allFolderAssets = await this.prisma.creativeAsset.findMany({
           where: {
             folderId: automation.folderId,
           },
@@ -495,6 +751,20 @@ export class DraftAutomationScheduler implements OnModuleInit {
             createdAtLocal: 'asc', // Oldest first
           },
         });
+        const assetCreatedAfter = parseValidDate(
+          automation.assetCreatedAfter ||
+            automation.assetCreationTimeFrom ||
+            automation.creationTimeFrom,
+        );
+        const folderAssets = assetCreatedAfter
+          ? allFolderAssets.filter((asset) => {
+              const assetCreationDate = getAssetCreationDate(asset);
+              return (
+                assetCreationDate &&
+                assetCreationDate.getTime() >= assetCreatedAfter.getTime()
+              );
+            })
+          : allFolderAssets;
 
         // 3. Query all active drafts of this creator to extract used assets
         const activeDrafts = await this.prisma.systemCampaign.findMany({
@@ -524,33 +794,72 @@ export class DraftAutomationScheduler implements OnModuleInit {
           }
         }
 
-        // 4. Filter assets based on ownership, publish state, draft state, and naming rules
+        const inProgressDraft = await this.getInProgressDraft(
+          template,
+          creator.id,
+          automation,
+        );
+        const existingAssetIds = Array.isArray(
+          (inProgressDraft?.data as any)?.automation_used_assets,
+        )
+          ? ((inProgressDraft?.data as any).automation_used_assets as string[])
+          : [];
+        const existingAssets = await this.getAssetsByIds(existingAssetIds);
+        const existingAssetsByType = this.splitAssetsByType(existingAssets);
+
+        const creatorSystemCampaignAssetMappings =
+          await this.prisma.creativeAssetMapping.findMany({
+            where: {
+              creative: {
+                ads: {
+                  some: {
+                    campaign: {
+                      systemCampaign: {
+                        createdById: creator.id,
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            select: { creativeAssetId: true },
+          });
+        const usedByCreatorInSystemCampaignAssetIds = new Set(
+          creatorSystemCampaignAssetMappings.map((m) => m.creativeAssetId),
+        );
+
+        // 4. Filter assets based on creator system-campaign usage, draft state,
+        // and naming rules. This is scoped by system user ID, not Lark metadata.
         const exclusionCounts = {
-          ownerMismatch: 0,
-          alreadyPublished: 0,
+          alreadyUsedByCreatorInSystemCampaign: 0,
           usedInDraft: 0,
           nameRuleMismatch: 0,
         };
 
         const eligibleAssets = folderAssets.filter((asset) => {
-          const isOwner = asset.larkRecord?.employee_id === creator.employee_id;
           const isUsedInDraft =
             usedDraftIdentifiers.has(asset.id) ||
             (asset.video_id && usedDraftIdentifiers.has(asset.video_id)) ||
             (asset.imageHash && usedDraftIdentifiers.has(asset.imageHash));
-          const isPublished = publishedAssetIds.has(asset.id);
+          const isUsedByCreatorInSystemCampaign =
+            usedByCreatorInSystemCampaignAssetIds.has(asset.id);
           const matchesNameRule =
             !automation.nameRule ||
             (asset.name || '')
               .toLowerCase()
               .includes(automation.nameRule.toLowerCase());
 
-          if (!isOwner) exclusionCounts.ownerMismatch += 1;
-          if (isPublished) exclusionCounts.alreadyPublished += 1;
+          if (isUsedByCreatorInSystemCampaign) {
+            exclusionCounts.alreadyUsedByCreatorInSystemCampaign += 1;
+          }
           if (isUsedInDraft) exclusionCounts.usedInDraft += 1;
           if (!matchesNameRule) exclusionCounts.nameRuleMismatch += 1;
 
-          return isOwner && !isPublished && !isUsedInDraft && matchesNameRule;
+          return (
+            !isUsedByCreatorInSystemCampaign &&
+            !isUsedInDraft &&
+            matchesNameRule
+          );
         });
 
         const eligibleVideos = eligibleAssets.filter(
@@ -562,6 +871,31 @@ export class DraftAutomationScheduler implements OnModuleInit {
 
         const requiredVideos = Number(automation.videoCount) || 0;
         const requiredImages = Number(automation.imageCount) || 0;
+        const remainingVideos = Math.max(
+          0,
+          requiredVideos - existingAssetsByType.videos.length,
+        );
+        const remainingImages = Math.max(
+          0,
+          requiredImages - existingAssetsByType.images.length,
+        );
+        const selectedNewVideos = eligibleVideos.slice(0, remainingVideos);
+        const selectedNewImages = eligibleImages.slice(0, remainingImages);
+        const selectedVideos = [
+          ...existingAssetsByType.videos,
+          ...selectedNewVideos,
+        ].slice(0, requiredVideos);
+        const selectedImages = [
+          ...existingAssetsByType.images,
+          ...selectedNewImages,
+        ].slice(0, requiredImages);
+        const isComplete =
+          selectedVideos.length >= requiredVideos &&
+          selectedImages.length >= requiredImages;
+        const hasNewAssets =
+          selectedNewVideos.length > 0 || selectedNewImages.length > 0;
+        const shouldCreateEmptyDraft =
+          !inProgressDraft && requiredVideos === 0 && requiredImages === 0;
         conditionSummary = {
           automation: {
             enabled: automation.enabled,
@@ -571,17 +905,35 @@ export class DraftAutomationScheduler implements OnModuleInit {
             requiredImages,
             publishToMeta: publishRequested,
             publishMode,
+            intervalMinutes: automation.intervalMinutes,
+            runMode: automation.runMode,
+            assetCreatedAfter: assetCreatedAfter?.toISOString() || null,
           },
           creator: {
             id: creator.id,
             name: creator.name,
             employee_id: creator.employee_id,
           },
+          draft: {
+            inProgressDraftId: inProgressDraft?.id || null,
+            existingAssetIds,
+            currentVideos: existingAssetsByType.videos.length,
+            currentImages: existingAssetsByType.images.length,
+            remainingVideos,
+            remainingImages,
+            selectedNewVideos: selectedNewVideos.length,
+            selectedNewImages: selectedNewImages.length,
+            totalSelectedVideos: selectedVideos.length,
+            totalSelectedImages: selectedImages.length,
+            isComplete,
+          },
           counts: {
-            folderAssets: folderAssets.length,
+            folderAssets: allFolderAssets.length,
+            folderAssetsAfterCreationTime: folderAssets.length,
             activeDrafts: activeDrafts.length,
             usedDraftIdentifiers: usedDraftIdentifiers.size,
-            publishedAssetsKnown: publishedAssetIds.size,
+            creatorSystemCampaignUsedAssetsKnown:
+              usedByCreatorInSystemCampaignAssetIds.size,
             eligibleAssets: eligibleAssets.length,
             eligibleVideos: eligibleVideos.length,
             eligibleImages: eligibleImages.length,
@@ -590,36 +942,39 @@ export class DraftAutomationScheduler implements OnModuleInit {
           checks: [
             {
               key: 'creator',
-              label: 'Creator has employee ID',
+              label: 'Người tạo có employee ID',
               status: 'passed',
             },
             {
               key: 'folder_assets',
-              label: 'Load assets from automation folder',
+              label: 'Tải asset từ thư mục tự động hóa',
               status: 'passed',
-              count: folderAssets.length,
+              count: allFolderAssets.length,
             },
             {
-              key: 'asset_owner',
-              label: 'Asset belongs to creator employee ID',
-              status: 'passed',
-              excluded: exclusionCounts.ownerMismatch,
+              key: 'asset_creation_time',
+              label:
+                'Asset có creation_time nằm trong khoảng thời gian automation',
+              status: assetCreatedAfter ? 'passed' : 'not_configured',
+              from: assetCreatedAfter?.toISOString() || null,
+              excluded: allFolderAssets.length - folderAssets.length,
             },
             {
-              key: 'not_published',
-              label: 'Asset has not been published',
+              key: 'not_used_by_creator_in_system_campaign',
+              label:
+                'Asset chưa được người tạo này dùng trong campaign tạo từ hệ thống',
               status: 'passed',
-              excluded: exclusionCounts.alreadyPublished,
+              excluded: exclusionCounts.alreadyUsedByCreatorInSystemCampaign,
             },
             {
               key: 'not_used_in_active_draft',
-              label: 'Asset is not used in active draft',
+              label: 'Asset chưa được dùng trong bản nháp đang hoạt động',
               status: 'passed',
               excluded: exclusionCounts.usedInDraft,
             },
             {
               key: 'name_rule',
-              label: 'Asset name matches automation name rule',
+              label: 'Tên asset khớp quy tắc tên của tự động hóa',
               status: automation.nameRule ? 'passed' : 'not_configured',
               rule: automation.nameRule || null,
               excluded: exclusionCounts.nameRuleMismatch,
@@ -631,18 +986,17 @@ export class DraftAutomationScheduler implements OnModuleInit {
           `Template "${template.name}": eligible videos: ${eligibleVideos.length}/${requiredVideos}, eligible images: ${eligibleImages.length}/${requiredImages}`,
         );
 
-        if (
-          eligibleVideos.length < requiredVideos ||
-          eligibleImages.length < requiredImages
-        ) {
+        if (!hasNewAssets && !isComplete && !shouldCreateEmptyDraft) {
           this.logger.log(
-            `Insufficient eligible assets for template "${template.name}". Skipping.`,
+            `No new eligible assets for template "${template.name}". Skipping this run.`,
           );
           await this.recordAutomationHistory({
             template,
             startedAt,
             status: 'SKIPPED',
-            reason: 'Insufficient eligible assets.',
+            reason: inProgressDraft
+              ? 'Chưa có asset mới đủ điều kiện cho bản nháp tự động hóa đang xử lý.'
+              : 'Chưa có asset đủ điều kiện để bắt đầu bản nháp tự động hóa.',
             automation,
             creator,
             folderId: automation.folderId,
@@ -654,192 +1008,98 @@ export class DraftAutomationScheduler implements OnModuleInit {
                 ...conditionSummary.checks,
                 {
                   key: 'required_assets',
-                  label: 'Enough eligible assets for template placeholders',
-                  status: 'failed',
+                  label: 'Đủ asset đã chọn cho placeholder của mẫu',
+                  status: 'pending',
                   requiredVideos,
                   requiredImages,
-                  eligibleVideos: eligibleVideos.length,
-                  eligibleImages: eligibleImages.length,
+                  selectedVideos: selectedVideos.length,
+                  selectedImages: selectedImages.length,
                 },
               ],
             },
             steps: [
               {
                 key: 'scan_assets',
-                label: 'Scan and filter creative assets',
+                label: 'Quét và lọc creative asset',
                 status: 'success',
               },
               {
-                key: 'required_assets',
-                label: 'Check required video/image counts',
+                key: 'select_assets',
+                label: 'Chọn asset mới đủ điều kiện',
                 status: 'skipped',
-                reason: 'Not enough eligible assets',
-                requiredVideos,
-                requiredImages,
-                eligibleVideos: eligibleVideos.length,
-                eligibleImages: eligibleImages.length,
+                reason: 'Chưa có asset mới đủ điều kiện',
               },
             ],
+          });
+          await this.updateTemplateAutomationState(template, {
+            ...automation,
+            status: 'WAITING_ASSETS',
+            lastRunAt: new Date().toISOString(),
           });
           continue;
         }
 
-        // Pick oldest matching assets
-        const selectedVideos = eligibleVideos.slice(0, requiredVideos);
-        const selectedImages = eligibleImages.slice(0, requiredImages);
-
         this.logger.log(
-          `Generating draft campaign for template "${template.name}" using videos: [${selectedVideos
+          `Generating/updating draft campaign for template "${template.name}" using videos: [${selectedVideos
             .map((v) => v.name)
             .join(
               ', ',
             )}], images: [${selectedImages.map((i) => i.name).join(', ')}]`,
         );
 
-        // Substitute placeholders in template data
-        const templateData = template.data as any;
-        const substitutedValues = replacePlaceholders(
-          templateData,
-          selectedVideos,
-          selectedImages,
-        );
+        const substitutedValues = this.buildSubstitutedValues({
+          template,
+          creator,
+          videos: selectedVideos,
+          images: selectedImages,
+          publishMode,
+          requiredVideos,
+          requiredImages,
+          isComplete,
+          automation,
+        });
 
-        // Format names
-        const employeeId = creator.employee_id;
-        const employeeName = creator.name;
-
-        if (substitutedValues.campaign?.name) {
-          substitutedValues.campaign.name = updateName(
-            substitutedValues.campaign.name,
-            employeeId,
-            employeeName,
-          );
-        }
-
-        if (Array.isArray(substitutedValues.ad_sets)) {
-          substitutedValues.ad_sets = substitutedValues.ad_sets.map(
-            (adset: any) => {
-              if (adset.name) {
-                adset.name = updateName(adset.name, employeeId, employeeName);
-              }
-              if (Array.isArray(adset.ads)) {
-                adset.ads = adset.ads.map((ad: any) => {
-                  if (ad.name) {
-                    ad.name = updateName(ad.name, employeeId, employeeName);
-                  }
-                  return ad;
-                });
-              }
-              return adset;
-            },
-          );
-        }
-
-        // Store automation metadata
-        substitutedValues.automation_used_assets = [
-          ...selectedVideos.map((v) => v.id),
-          ...selectedImages.map((i) => i.id),
-        ];
-
-        // 5. Save draft campaign via a transaction mimicking front-end payload logic
-        generatedCampaignId = await this.prisma.$transaction(async (tx) => {
-          const campaign = await tx.systemCampaign.create({
-            data: {
-              accountId: substitutedValues.ad_account_id,
-              createdById: creator.id,
-              status: Status.DRAFT,
-              createdByAutomation: true,
-              automationTemplateId: template.id,
-              automationTemplateName: template.name,
-              automationPublishMode: publishMode,
-              cid: substitutedValues.cid,
-              data: substitutedValues as any,
-              campaign_bidAmount:
-                Number(substitutedValues.campaign?.bid_amount) || undefined,
-              campaign_bidStrategy:
-                substitutedValues.campaign?.bid_strategy || undefined,
-              campaign_budget:
-                Number(
-                  substitutedValues.campaign?.daily_budget ||
-                    substitutedValues.campaign?.lifetime_budget,
-                ) || undefined,
-              campaign_budgetType:
-                (substitutedValues.campaign?.daily_budget && 'DAILY') ||
-                (substitutedValues.campaign?.lifetime_budget && 'LIFETIME') ||
-                'undefined',
-              campaign_CBO:
-                !!substitutedValues.campaign?.daily_budget ||
-                !!substitutedValues.campaign?.lifetime_budget ||
-                false,
-              campaign_name: substitutedValues.campaign?.name,
-              campaign_objective: substitutedValues.campaign?.objective,
-            },
-          });
-
-          for (const adset of substitutedValues.ad_sets || []) {
-            const createdAdSet = await tx.systemAdSet.create({
-              data: {
-                accountId: substitutedValues.ad_account_id,
-                campaignId: campaign.id,
-                createdById: creator.id,
-                status: Status.DRAFT,
-                data: adset as any,
-                adset_bidAmount: Number(adset.bid_amount) || undefined,
-                adset_bidStrategy: adset.bid_strategy || undefined,
-                adset_budget:
-                  Number(adset.daily_budget || adset.lifetime_budget) ||
-                  undefined,
-                adset_budgetType:
-                  (adset.daily_budget && 'DAILY') ||
-                  (adset.lifetime_budget && 'LIFETIME') ||
-                  'undefined',
-                adset_name: adset.name,
-                adset_optimization: adset.optimization_goal,
-              },
-            });
-
-            if (Array.isArray(adset.ads)) {
-              await tx.systemAd.createMany({
-                data: adset.ads.map((ad: any) => ({
-                  accountId: substitutedValues.ad_account_id,
-                  createdById: creator.id,
-                  data: ad,
-                  status: Status.DRAFT,
-                  adSetId: createdAdSet.id,
-                })),
-              });
-            }
-          }
-
-          return campaign.id;
+        generatedCampaignId = await this.saveAutomationDraft({
+          existingDraft: inProgressDraft,
+          substitutedValues,
+          template,
+          creator,
+          publishMode,
         });
 
         let publishResult: any;
         const successSteps: any[] = [
           {
             key: 'scan_assets',
-            label: 'Scan and filter creative assets',
+            label: 'Quét và lọc creative asset',
             status: 'success',
           },
           {
             key: 'select_assets',
-            label: 'Select oldest eligible assets',
+            label: 'Chọn asset đủ điều kiện cũ nhất',
             status: 'success',
+            existingVideos: existingAssetsByType.videos.map(summarizeAsset),
+            existingImages: existingAssetsByType.images.map(summarizeAsset),
+            newVideos: selectedNewVideos.map(summarizeAsset),
+            newImages: selectedNewImages.map(summarizeAsset),
             videos: selectedVideos.map(summarizeAsset),
             images: selectedImages.map(summarizeAsset),
           },
           {
-            key: 'create_draft',
-            label: 'Create draft campaign',
+            key: inProgressDraft ? 'update_draft' : 'create_draft',
+            label: inProgressDraft
+              ? 'Cập nhật bản nháp chiến dịch tự động'
+              : 'Tạo bản nháp chiến dịch',
             status: 'success',
             campaignId: generatedCampaignId,
+            isComplete,
           },
         ];
 
-        if (publishRequested) {
+        if (publishRequested && isComplete) {
           successSteps.push({
             key: 'publish_meta',
-            label: 'Publish draft campaign to Meta',
+            label: 'Đăng bản nháp chiến dịch lên Meta',
             status: 'processing',
           });
 
@@ -848,24 +1108,61 @@ export class DraftAutomationScheduler implements OnModuleInit {
 
           successSteps[successSteps.length - 1] = {
             key: 'publish_meta',
-            label: 'Publish draft campaign to Meta',
+            label: 'Đăng bản nháp chiến dịch lên Meta',
             status: 'success',
             metaCampaignId: publishResult.campaignId,
             publishHistoryId: publishResult.publishHistoryId,
           };
 
           for (const asset of [...selectedVideos, ...selectedImages]) {
-            publishedAssetIds.add(asset.id);
+            usedByCreatorInSystemCampaignAssetIds.add(asset.id);
           }
+        } else if (publishRequested && !isComplete) {
+          successSteps.push({
+            key: 'publish_meta',
+            label: 'Đăng bản nháp chiến dịch lên Meta',
+            status: 'skipped',
+            reason: 'Bản nháp chưa đủ dữ liệu',
+          });
         }
+
+        await this.updateTemplateAutomationState(template, {
+          ...automation,
+          status:
+            automation.runMode === 'ONCE' && isComplete
+              ? 'COMPLETED'
+              : isComplete
+                ? 'READY_FOR_NEXT_RUN'
+                : 'WAITING_ASSETS',
+          enabled:
+            automation.runMode === 'ONCE' && isComplete
+              ? false
+              : automation.enabled,
+          lastRunAt: new Date().toISOString(),
+          completedAt:
+            automation.runMode === 'ONCE' && isComplete
+              ? new Date().toISOString()
+              : automation.completedAt || null,
+          completedDraftId:
+            automation.runMode === 'ONCE' && isComplete
+              ? generatedCampaignId
+              : automation.completedDraftId || null,
+          inProgressDraftId: isComplete ? null : generatedCampaignId,
+          lastGeneratedDraftId: generatedCampaignId,
+        });
 
         await this.recordAutomationHistory({
           template,
           startedAt,
           status: 'SUCCESS',
-          reason: publishRequested
-            ? 'Automated draft campaign created and published to Meta.'
-            : 'Automated draft campaign created.',
+          reason:
+            publishRequested && isComplete
+              ? 'Đã tạo bản nháp chiến dịch tự động và đăng lên Meta.'
+              : isComplete
+                ? 'Bản nháp chiến dịch tự động đã hoàn tất.'
+                : inProgressDraft
+                  ? 'Đã cập nhật bản nháp chiến dịch tự động với asset mới đủ điều kiện.'
+                  : 'Đã tạo bản nháp chiến dịch tự động với một phần asset đủ điều kiện.',
           automation,
           creator,
           folderId: automation.folderId,
@@ -878,12 +1175,12 @@ export class DraftAutomationScheduler implements OnModuleInit {
               ...conditionSummary.checks,
               {
                 key: 'required_assets',
-                label: 'Enough eligible assets for template placeholders',
-                status: 'passed',
+                label: 'Đủ asset đã chọn cho placeholder của mẫu',
+                status: isComplete ? 'passed' : 'pending',
                 requiredVideos,
                 requiredImages,
-                eligibleVideos: eligibleVideos.length,
-                eligibleImages: eligibleImages.length,
+                selectedVideos: selectedVideos.length,
+                selectedImages: selectedImages.length,
               },
             ],
           },
@@ -896,9 +1193,9 @@ export class DraftAutomationScheduler implements OnModuleInit {
         });
 
         this.logger.log(
-          publishRequested
+          publishRequested && isComplete
             ? `Successfully created and published automated campaign for template "${template.name}".`
-            : `Successfully created automated draft campaign for template "${template.name}".`,
+            : `Successfully created/updated automated draft campaign for template "${template.name}". Complete: ${isComplete}`,
         );
       } catch (err: any) {
         const failureSteps =
@@ -906,13 +1203,13 @@ export class DraftAutomationScheduler implements OnModuleInit {
             ? [
                 {
                   key: 'create_draft',
-                  label: 'Create draft campaign',
+                  label: 'Tạo bản nháp chiến dịch',
                   status: 'success',
                   campaignId: generatedCampaignId,
                 },
                 {
                   key: 'publish_meta',
-                  label: 'Publish draft campaign to Meta',
+                  label: 'Đăng bản nháp chiến dịch lên Meta',
                   status: 'failed',
                   error: err?.metaError?.message || err?.message || String(err),
                 },
@@ -920,7 +1217,7 @@ export class DraftAutomationScheduler implements OnModuleInit {
             : [
                 {
                   key: 'process_template',
-                  label: 'Process automation template',
+                  label: 'Xử lý mẫu tự động hóa',
                   status: 'failed',
                   error: err?.message || String(err),
                 },
@@ -932,8 +1229,8 @@ export class DraftAutomationScheduler implements OnModuleInit {
           status: 'FAILED',
           reason:
             publishRequested && generatedCampaignId
-              ? 'Draft campaign was created but publish to Meta failed.'
-              : 'Unexpected error while processing template.',
+              ? 'Đã tạo bản nháp chiến dịch nhưng đăng lên Meta thất bại.'
+              : 'Có lỗi không mong muốn khi xử lý mẫu.',
           automation,
           creator,
           folderId: automation?.folderId,
