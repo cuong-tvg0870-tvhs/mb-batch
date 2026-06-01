@@ -209,6 +209,7 @@ model UserProductCatalog {
 model Fanpage {
   id              String           @id
   name            String?
+  rawPayload      Json?
   userFanpages    UserFanpage[]
   projectFanpages ProjectFanpage[]
   creatives       Creative[]
@@ -1556,9 +1557,47 @@ model TemplateCampaign {
   updatedAt   DateTime  @updatedAt
   deletedAt   DateTime?
 
+  automationHistories DraftAutomationHistory[]
+
   @@index([name])
   @@index([reference_id])
   @@index([createdById, createdAt(sort: Desc)])
+}
+
+enum DraftAutomationRunStatus {
+  SUCCESS
+  SKIPPED
+  FAILED
+}
+
+model DraftAutomationHistory {
+  id String @id @default(cuid())
+
+  templateId String
+  template   TemplateCampaign @relation(fields: [templateId], references: [id], onDelete: Cascade)
+
+  templateName      String
+  creatorId         String?
+  creatorName       String?
+  creatorEmployeeId String?
+  folderId          String?
+
+  status DraftAutomationRunStatus
+  reason String?
+
+  conditionSummary  Json?
+  steps             Json?
+  selectedAssets    Json?
+  generatedCampaignId String?
+  error             String?
+
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([templateId, createdAt(sort: Desc)])
+  @@index([creatorId, createdAt(sort: Desc)])
+  @@index([status, createdAt(sort: Desc)])
 }
 
 model SystemCampaign {
@@ -1580,6 +1619,10 @@ model SystemCampaign {
 
   is_template Boolean? @default(false)
 
+  createdByAutomation  Boolean @default(false)
+  automationTemplateId String?
+  automationTemplateName String?
+
   campaign_name        String?
   campaign_objective   String?
   campaign_budgetType  String?
@@ -1597,6 +1640,8 @@ model SystemCampaign {
 
   @@index([status])
   @@index([createdById, createdAt(sort: Desc)])
+  @@index([createdByAutomation, createdAt(sort: Desc)])
+  @@index([automationTemplateId, createdAt(sort: Desc)])
 }
 
 model SystemAdSet {
@@ -2087,8 +2132,10 @@ model AutomationCategory {
   name     String
   position Int    @default(0)
 
-  folders AutomationFolder[]
-  rules   AutomationRule[]
+  folders          AutomationFolder[]
+  rules            AutomationRule[]
+  customMetrics    CustomMetric[]
+  customTimeframes AutomationCustomTimeframe[]
 
   createdById String?
   createdAt   DateTime  @default(now())
@@ -2176,19 +2223,60 @@ model AutomationRuleAdAccount {
 /// Lưu offsets thay vì absolute timestamps — runner resolve relative tới `now`
 /// theo ad account timezone qua `resolveCustomTimeframeWindow`.
 /// Rule reference qua chuỗi `"custom:<id>"` trong AutomationTaskCondition.params.timeframe.
-/// `accountId` là scalar FK (không @relation back-ref, theo pattern AutomationRuleAdAccount).
+/// Scope theo `AutomationCategory` — mọi rule trong category đó share & edit
+/// được. Cascade delete khi xoá category.
 model AutomationCustomTimeframe {
-  id          String   @id @default(uuid())
+  id          String             @id @default(uuid())
   name        String
   kind        String // "days" | "hours" — validate ở zod
   fromOffset  Int // L position; 0 = today/current hour
   toOffset    Int // R position; fromOffset <= toOffset; max 90 (days) hoặc 24 (hours)
-  accountId   String
+  categoryId  String
+  category    AutomationCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
   createdById String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  @@index([categoryId])
+}
+
+enum CustomMetricScope {
+  GLOBAL
+  AD_ACCOUNT
+  CATEGORY
+}
+
+enum CustomMetricFormat {
+  numeric
+  currency
+  percentage
+}
+
+/// User-defined custom metric: a formula combining native Meta metrics + numbers
+/// + arithmetic operators (vd ROAS = action_values / spend). `formula` lưu token
+/// array JSON (mirror Bir.ch): [{ type, value, key }] với type ∈ variable|number|operator.
+/// Rule reference qua chuỗi `"custom_metric:<id>"` trong AutomationTaskCondition.params.metric.
+/// Scope GLOBAL → accountId/categoryId null (mọi user thấy);
+/// AD_ACCOUNT → accountId bắt buộc; CATEGORY → categoryId bắt buộc (toàn rule trong category đó thấy).
+/// `accountId`/`createdById` là scalar FK (không @relation back-ref, theo pattern AutomationCustomTimeframe).
+model CustomMetric {
+  id          String              @id @default(uuid())
+  name        String // min(1) max(50)
+  description String? // max(200)
+  format      CustomMetricFormat  @default(numeric)
+  scope       CustomMetricScope
+  formula     Json // FormulaToken[]
+  accountId   String? // bắt buộc khi scope=AD_ACCOUNT, null khi khác
+  categoryId  String? // bắt buộc khi scope=CATEGORY, null khi khác
+  category    AutomationCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  createdById String?
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
 
   @@index([accountId])
+  @@index([categoryId])
+  @@index([scope])
+  @@map("custom_metrics")
 }
 
 // Junction tới legacy User: scalar FK only.
@@ -2395,7 +2483,6 @@ model AutomationRuleRunItem {
   @@index([taskId])
   @@index([status, createdAt(sort: Desc)])
 }
-
 
 enum MetaConnectionStatus {
   ACTIVE

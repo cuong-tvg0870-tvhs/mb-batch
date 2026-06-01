@@ -65,6 +65,17 @@ function parseJsonValue(value: any) {
   }
 }
 
+function summarizeAsset(asset: any) {
+  return {
+    id: asset.id,
+    name: asset.name,
+    type: asset.type,
+    video_id: asset.video_id,
+    imageHash: asset.imageHash,
+    employee_id: asset.larkRecord?.employee_id,
+  };
+}
+
 function getThumbnailList(video: any): any[] {
   const thumbnails = parseJsonValue(video?.video_thumbnails);
   if (Array.isArray(thumbnails)) return thumbnails;
@@ -300,6 +311,52 @@ export class DraftAutomationScheduler implements OnModuleInit {
     this.logger.log('⏰ Draft automation cron finished.');
   }
 
+  private formatError(err: any) {
+    return err?.stack || err?.message || String(err);
+  }
+
+  private async recordAutomationHistory(input: {
+    template: any;
+    startedAt: Date;
+    status: 'SUCCESS' | 'SKIPPED' | 'FAILED';
+    reason?: string;
+    automation?: any;
+    creator?: any;
+    folderId?: string;
+    conditionSummary?: any;
+    steps?: any[];
+    selectedAssets?: any;
+    generatedCampaignId?: string;
+    error?: string;
+  }) {
+    try {
+      await this.prisma.draftAutomationHistory.create({
+        data: {
+          templateId: input.template.id,
+          templateName: input.template.name,
+          creatorId: input.creator?.id || input.template.createdById,
+          creatorName: input.creator?.name,
+          creatorEmployeeId: input.creator?.employee_id,
+          folderId: input.folderId || input.automation?.folderId,
+          status: input.status,
+          reason: input.reason,
+          conditionSummary: input.conditionSummary || undefined,
+          steps: input.steps || [],
+          selectedAssets: input.selectedAssets || undefined,
+          generatedCampaignId: input.generatedCampaignId,
+          error: input.error,
+          startedAt: input.startedAt,
+          finishedAt: new Date(),
+        },
+      });
+    } catch (err: any) {
+      this.logger.error(
+        `Failed to save draft automation history for template "${input.template.name}":`,
+        this.formatError(err),
+      );
+    }
+  }
+
   async processAutomation() {
     // 1. Fetch all templates with automation configured
     const templates = await this.prisma.templateCampaign.findMany({
@@ -331,17 +388,37 @@ export class DraftAutomationScheduler implements OnModuleInit {
     );
 
     for (const template of activeTemplates) {
+      const startedAt = new Date();
+      let automation: any;
+      let creator: any;
+      let conditionSummary: any;
       try {
-        const automation = (template.data as any).automation;
+        automation = (template.data as any).automation;
         const creatorId = template.createdById;
         if (!creatorId) {
           this.logger.warn(
             `Template ${template.name} (${template.id}) has no creator ID. Skipping.`,
           );
+          await this.recordAutomationHistory({
+            template,
+            startedAt,
+            status: 'SKIPPED',
+            reason: 'Template has no creator ID.',
+            automation,
+            folderId: automation.folderId,
+            steps: [
+              {
+                key: 'creator',
+                label: 'Check template creator',
+                status: 'skipped',
+                reason: 'createdById is empty',
+              },
+            ],
+          });
           continue;
         }
 
-        const creator = await this.prisma.user.findUnique({
+        creator = await this.prisma.user.findUnique({
           where: { id: creatorId },
         });
 
@@ -349,6 +426,28 @@ export class DraftAutomationScheduler implements OnModuleInit {
           this.logger.warn(
             `Creator of template ${template.name} has no employee ID. Skipping.`,
           );
+          await this.recordAutomationHistory({
+            template,
+            startedAt,
+            status: 'SKIPPED',
+            reason: !creator
+              ? 'Template creator was not found.'
+              : 'Template creator has no employee ID.',
+            automation,
+            creator,
+            folderId: automation.folderId,
+            steps: [
+              {
+                key: 'creator',
+                label: 'Check template creator',
+                status: 'skipped',
+                creatorId,
+                reason: !creator
+                  ? 'Creator record was not found'
+                  : 'creator.employee_id is empty',
+              },
+            ],
+          });
           continue;
         }
 
@@ -398,29 +497,33 @@ export class DraftAutomationScheduler implements OnModuleInit {
         }
 
         // 4. Filter assets based on ownership, publish state, draft state, and naming rules
-        let eligibleAssets = folderAssets.filter((asset) => {
-          return asset.larkRecord?.employee_id === creator.employee_id;
-        });
+        const exclusionCounts = {
+          ownerMismatch: 0,
+          alreadyPublished: 0,
+          usedInDraft: 0,
+          nameRuleMismatch: 0,
+        };
 
-        eligibleAssets = eligibleAssets.filter((asset) => {
-          return !publishedAssetIds.has(asset.id);
-        });
-
-        eligibleAssets = eligibleAssets.filter((asset) => {
+        const eligibleAssets = folderAssets.filter((asset) => {
+          const isOwner = asset.larkRecord?.employee_id === creator.employee_id;
           const isUsedInDraft =
             usedDraftIdentifiers.has(asset.id) ||
             (asset.video_id && usedDraftIdentifiers.has(asset.video_id)) ||
             (asset.imageHash && usedDraftIdentifiers.has(asset.imageHash));
-          return !isUsedInDraft;
-        });
-
-        if (automation.nameRule) {
-          eligibleAssets = eligibleAssets.filter((asset) => {
-            return (asset.name || '')
+          const isPublished = publishedAssetIds.has(asset.id);
+          const matchesNameRule =
+            !automation.nameRule ||
+            (asset.name || '')
               .toLowerCase()
               .includes(automation.nameRule.toLowerCase());
-          });
-        }
+
+          if (!isOwner) exclusionCounts.ownerMismatch += 1;
+          if (isPublished) exclusionCounts.alreadyPublished += 1;
+          if (isUsedInDraft) exclusionCounts.usedInDraft += 1;
+          if (!matchesNameRule) exclusionCounts.nameRuleMismatch += 1;
+
+          return isOwner && !isPublished && !isUsedInDraft && matchesNameRule;
+        });
 
         const eligibleVideos = eligibleAssets.filter(
           (a) => a.type === AssetType.VIDEO,
@@ -431,6 +534,68 @@ export class DraftAutomationScheduler implements OnModuleInit {
 
         const requiredVideos = Number(automation.videoCount) || 0;
         const requiredImages = Number(automation.imageCount) || 0;
+        conditionSummary = {
+          automation: {
+            enabled: automation.enabled,
+            folderId: automation.folderId,
+            nameRule: automation.nameRule || null,
+            requiredVideos,
+            requiredImages,
+          },
+          creator: {
+            id: creator.id,
+            name: creator.name,
+            employee_id: creator.employee_id,
+          },
+          counts: {
+            folderAssets: folderAssets.length,
+            activeDrafts: activeDrafts.length,
+            usedDraftIdentifiers: usedDraftIdentifiers.size,
+            publishedAssetsKnown: publishedAssetIds.size,
+            eligibleAssets: eligibleAssets.length,
+            eligibleVideos: eligibleVideos.length,
+            eligibleImages: eligibleImages.length,
+          },
+          exclusions: exclusionCounts,
+          checks: [
+            {
+              key: 'creator',
+              label: 'Creator has employee ID',
+              status: 'passed',
+            },
+            {
+              key: 'folder_assets',
+              label: 'Load assets from automation folder',
+              status: 'passed',
+              count: folderAssets.length,
+            },
+            {
+              key: 'asset_owner',
+              label: 'Asset belongs to creator employee ID',
+              status: 'passed',
+              excluded: exclusionCounts.ownerMismatch,
+            },
+            {
+              key: 'not_published',
+              label: 'Asset has not been published',
+              status: 'passed',
+              excluded: exclusionCounts.alreadyPublished,
+            },
+            {
+              key: 'not_used_in_active_draft',
+              label: 'Asset is not used in active draft',
+              status: 'passed',
+              excluded: exclusionCounts.usedInDraft,
+            },
+            {
+              key: 'name_rule',
+              label: 'Asset name matches automation name rule',
+              status: automation.nameRule ? 'passed' : 'not_configured',
+              rule: automation.nameRule || null,
+              excluded: exclusionCounts.nameRuleMismatch,
+            },
+          ],
+        };
 
         this.logger.log(
           `Template "${template.name}": eligible videos: ${eligibleVideos.length}/${requiredVideos}, eligible images: ${eligibleImages.length}/${requiredImages}`,
@@ -443,6 +608,47 @@ export class DraftAutomationScheduler implements OnModuleInit {
           this.logger.log(
             `Insufficient eligible assets for template "${template.name}". Skipping.`,
           );
+          await this.recordAutomationHistory({
+            template,
+            startedAt,
+            status: 'SKIPPED',
+            reason: 'Insufficient eligible assets.',
+            automation,
+            creator,
+            folderId: automation.folderId,
+            conditionSummary: {
+              ...conditionSummary,
+              checks: [
+                ...conditionSummary.checks,
+                {
+                  key: 'required_assets',
+                  label: 'Enough eligible assets for template placeholders',
+                  status: 'failed',
+                  requiredVideos,
+                  requiredImages,
+                  eligibleVideos: eligibleVideos.length,
+                  eligibleImages: eligibleImages.length,
+                },
+              ],
+            },
+            steps: [
+              {
+                key: 'scan_assets',
+                label: 'Scan and filter creative assets',
+                status: 'success',
+              },
+              {
+                key: 'required_assets',
+                label: 'Check required video/image counts',
+                status: 'skipped',
+                reason: 'Not enough eligible assets',
+                requiredVideos,
+                requiredImages,
+                eligibleVideos: eligibleVideos.length,
+                eligibleImages: eligibleImages.length,
+              },
+            ],
+          });
           continue;
         }
 
@@ -504,7 +710,7 @@ export class DraftAutomationScheduler implements OnModuleInit {
         ];
 
         // 5. Save draft campaign via a transaction mimicking front-end payload logic
-        await this.prisma.$transaction(async (tx) => {
+        const generatedCampaignId = await this.prisma.$transaction(async (tx) => {
           const campaign = await tx.systemCampaign.create({
             data: {
               accountId: substitutedValues.ad_account_id,
@@ -568,15 +774,86 @@ export class DraftAutomationScheduler implements OnModuleInit {
               });
             }
           }
+
+          return campaign.id;
+        });
+
+        await this.recordAutomationHistory({
+          template,
+          startedAt,
+          status: 'SUCCESS',
+          reason: 'Automated draft campaign created.',
+          automation,
+          creator,
+          folderId: automation.folderId,
+          conditionSummary: {
+            ...conditionSummary,
+            checks: [
+              ...conditionSummary.checks,
+              {
+                key: 'required_assets',
+                label: 'Enough eligible assets for template placeholders',
+                status: 'passed',
+                requiredVideos,
+                requiredImages,
+                eligibleVideos: eligibleVideos.length,
+                eligibleImages: eligibleImages.length,
+              },
+            ],
+          },
+          selectedAssets: {
+            videos: selectedVideos.map(summarizeAsset),
+            images: selectedImages.map(summarizeAsset),
+          },
+          generatedCampaignId,
+          steps: [
+            {
+              key: 'scan_assets',
+              label: 'Scan and filter creative assets',
+              status: 'success',
+            },
+            {
+              key: 'select_assets',
+              label: 'Select oldest eligible assets',
+              status: 'success',
+              videos: selectedVideos.map(summarizeAsset),
+              images: selectedImages.map(summarizeAsset),
+            },
+            {
+              key: 'create_draft',
+              label: 'Create draft campaign',
+              status: 'success',
+              campaignId: generatedCampaignId,
+            },
+          ],
         });
 
         this.logger.log(
           `Successfully created automated draft campaign for template "${template.name}".`,
         );
       } catch (err: any) {
+        await this.recordAutomationHistory({
+          template,
+          startedAt,
+          status: 'FAILED',
+          reason: 'Unexpected error while processing template.',
+          automation,
+          creator,
+          folderId: automation?.folderId,
+          conditionSummary,
+          steps: [
+            {
+              key: 'process_template',
+              label: 'Process automation template',
+              status: 'failed',
+              error: err?.message || String(err),
+            },
+          ],
+          error: this.formatError(err),
+        });
         this.logger.error(
           `Error processing template "${template.name}":`,
-          err.stack || err.message || err,
+          this.formatError(err),
         );
       }
     }

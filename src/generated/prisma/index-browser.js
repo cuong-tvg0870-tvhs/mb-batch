@@ -214,7 +214,8 @@ exports.Prisma.UserProductCatalogScalarFieldEnum = {
 
 exports.Prisma.FanpageScalarFieldEnum = {
   id: 'id',
-  name: 'name'
+  name: 'name',
+  rawPayload: 'rawPayload'
 };
 
 exports.Prisma.AccountScalarFieldEnum = {
@@ -1251,7 +1252,21 @@ exports.Prisma.AutomationCustomTimeframeScalarFieldEnum = {
   kind: 'kind',
   fromOffset: 'fromOffset',
   toOffset: 'toOffset',
+  categoryId: 'categoryId',
+  createdById: 'createdById',
+  createdAt: 'createdAt',
+  updatedAt: 'updatedAt'
+};
+
+exports.Prisma.CustomMetricScalarFieldEnum = {
+  id: 'id',
+  name: 'name',
+  description: 'description',
+  format: 'format',
+  scope: 'scope',
+  formula: 'formula',
   accountId: 'accountId',
+  categoryId: 'categoryId',
   createdById: 'createdById',
   createdAt: 'createdAt',
   updatedAt: 'updatedAt'
@@ -1512,6 +1527,18 @@ exports.AutomationGroupOperator = exports.$Enums.AutomationGroupOperator = {
   OR: 'OR'
 };
 
+exports.CustomMetricFormat = exports.$Enums.CustomMetricFormat = {
+  numeric: 'numeric',
+  currency: 'currency',
+  percentage: 'percentage'
+};
+
+exports.CustomMetricScope = exports.$Enums.CustomMetricScope = {
+  GLOBAL: 'GLOBAL',
+  AD_ACCOUNT: 'AD_ACCOUNT',
+  CATEGORY: 'CATEGORY'
+};
+
 exports.AutomationScheduleType = exports.$Enums.AutomationScheduleType = {
   INTERVAL: 'INTERVAL',
   SPECIFIC: 'SPECIFIC'
@@ -1620,6 +1647,7 @@ exports.Prisma.ModelName = {
   AutomationRule: 'AutomationRule',
   AutomationRuleAdAccount: 'AutomationRuleAdAccount',
   AutomationCustomTimeframe: 'AutomationCustomTimeframe',
+  CustomMetric: 'CustomMetric',
   AutomationRuleNotifyUser: 'AutomationRuleNotifyUser',
   AutomationSchedule: 'AutomationSchedule',
   AutomationFilterGroup: 'AutomationFilterGroup',
