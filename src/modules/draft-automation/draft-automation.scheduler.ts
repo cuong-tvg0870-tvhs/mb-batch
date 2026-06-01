@@ -35,24 +35,25 @@ function updateName(
   return updatedParts.join('|');
 }
 
-function extractMediaIdentifiers(
-  obj: any,
+function extractMediaIdentifiersFromString(
+  jsonString: string,
   keys: Set<string> = new Set(),
+  scopedIds: string[] = [],
 ): Set<string> {
-  if (!obj) return keys;
-  if (typeof obj === 'string') {
-    if (obj.match(/^\d+$/) || obj.match(/^[a-fA-F0-9]{32}$/)) {
-      keys.add(obj);
-    }
-  } else if (Array.isArray(obj)) {
-    for (const item of obj) {
-      extractMediaIdentifiers(item, keys);
-    }
-  } else if (typeof obj === 'object') {
-    for (const key of Object.keys(obj)) {
-      extractMediaIdentifiers(obj[key], keys);
+  if (!jsonString) return keys;
+
+  const identifierRegex = /"([a-fA-F0-9]{32}|\d+)"/g;
+  let match: RegExpExecArray | null;
+  while ((match = identifierRegex.exec(jsonString)) !== null) {
+    keys.add(match[1]);
+  }
+
+  for (const id of scopedIds) {
+    if (id && jsonString.includes(id)) {
+      keys.add(id);
     }
   }
+
   return keys;
 }
 
@@ -740,9 +741,6 @@ export class DraftAutomationScheduler {
           where: {
             folderId: automation.folderId,
           },
-          include: {
-            larkRecord: true,
-          },
           orderBy: {
             createdAtLocal: 'asc', // Oldest first
           },
@@ -761,6 +759,7 @@ export class DraftAutomationScheduler {
               );
             })
           : allFolderAssets;
+        const folderAssetIds = folderAssets.map((asset) => asset.id);
 
         // 3. Query all active drafts of this creator to extract used assets
         const activeDrafts = await this.prisma.systemCampaign.findMany({
@@ -769,10 +768,16 @@ export class DraftAutomationScheduler {
             status: Status.DRAFT,
             deletedAt: null,
           },
-          include: {
+          select: {
+            data: true,
             ad_sets: {
-              include: {
-                ads: true,
+              select: {
+                data: true,
+                ads: {
+                  select: {
+                    data: true,
+                  },
+                },
               },
             },
           },
@@ -780,14 +785,11 @@ export class DraftAutomationScheduler {
 
         const usedDraftIdentifiers = new Set<string>();
         for (const draft of activeDrafts) {
-          // Extract from campaign data
-          extractMediaIdentifiers(draft.data, usedDraftIdentifiers);
-          for (const adset of draft.ad_sets) {
-            extractMediaIdentifiers(adset.data, usedDraftIdentifiers);
-            for (const ad of adset.ads) {
-              extractMediaIdentifiers(ad.data, usedDraftIdentifiers);
-            }
-          }
+          extractMediaIdentifiersFromString(
+            JSON.stringify(draft),
+            usedDraftIdentifiers,
+            folderAssetIds,
+          );
         }
 
         const inProgressDraft = await this.getInProgressDraft(
@@ -803,23 +805,25 @@ export class DraftAutomationScheduler {
         const existingAssets = await this.getAssetsByIds(existingAssetIds);
         const existingAssetsByType = this.splitAssetsByType(existingAssets);
 
-        const creatorSystemCampaignAssetMappings =
-          await this.prisma.creativeAssetMapping.findMany({
-            where: {
-              creative: {
-                ads: {
-                  some: {
-                    campaign: {
-                      systemCampaign: {
-                        createdById: creator.id,
+        const creatorSystemCampaignAssetMappings = folderAssetIds.length
+          ? await this.prisma.creativeAssetMapping.findMany({
+              where: {
+                creativeAssetId: { in: folderAssetIds },
+                creative: {
+                  ads: {
+                    some: {
+                      campaign: {
+                        systemCampaign: {
+                          createdById: creator.id,
+                        },
                       },
                     },
                   },
                 },
               },
-            },
-            select: { creativeAssetId: true },
-          });
+              select: { creativeAssetId: true },
+            })
+          : [];
         const usedByCreatorInSystemCampaignAssetIds = new Set(
           creatorSystemCampaignAssetMappings.map((m) => m.creativeAssetId),
         );
@@ -884,6 +888,27 @@ export class DraftAutomationScheduler {
         const selectedImages = [
           ...existingAssetsByType.images,
           ...selectedNewImages,
+        ].slice(0, requiredImages);
+        const selectedNewAssetsWithLark = await this.getAssetsByIds([
+          ...selectedNewVideos.map((asset) => asset.id),
+          ...selectedNewImages.map((asset) => asset.id),
+        ]);
+        const selectedNewAssetWithLarkById = new Map(
+          selectedNewAssetsWithLark.map((asset) => [asset.id, asset]),
+        );
+        const selectedNewVideosForHistory = selectedNewVideos.map(
+          (asset) => selectedNewAssetWithLarkById.get(asset.id) || asset,
+        );
+        const selectedNewImagesForHistory = selectedNewImages.map(
+          (asset) => selectedNewAssetWithLarkById.get(asset.id) || asset,
+        );
+        const selectedVideosForHistory = [
+          ...existingAssetsByType.videos,
+          ...selectedNewVideosForHistory,
+        ].slice(0, requiredVideos);
+        const selectedImagesForHistory = [
+          ...existingAssetsByType.images,
+          ...selectedNewImagesForHistory,
         ].slice(0, requiredImages);
         const isComplete =
           selectedVideos.length >= requiredVideos &&
@@ -1077,10 +1102,10 @@ export class DraftAutomationScheduler {
             status: 'success',
             existingVideos: existingAssetsByType.videos.map(summarizeAsset),
             existingImages: existingAssetsByType.images.map(summarizeAsset),
-            newVideos: selectedNewVideos.map(summarizeAsset),
-            newImages: selectedNewImages.map(summarizeAsset),
-            videos: selectedVideos.map(summarizeAsset),
-            images: selectedImages.map(summarizeAsset),
+            newVideos: selectedNewVideosForHistory.map(summarizeAsset),
+            newImages: selectedNewImagesForHistory.map(summarizeAsset),
+            videos: selectedVideosForHistory.map(summarizeAsset),
+            images: selectedImagesForHistory.map(summarizeAsset),
           },
           {
             key: inProgressDraft ? 'update_draft' : 'create_draft',
@@ -1182,8 +1207,8 @@ export class DraftAutomationScheduler {
             ],
           },
           selectedAssets: {
-            videos: selectedVideos.map(summarizeAsset),
-            images: selectedImages.map(summarizeAsset),
+            videos: selectedVideosForHistory.map(summarizeAsset),
+            images: selectedImagesForHistory.map(summarizeAsset),
           },
           generatedCampaignId,
           steps: successSteps,
