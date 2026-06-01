@@ -225,6 +225,7 @@ export class MediaSyncService implements OnModuleInit {
 
         if (data.length === 0) break;
 
+        const candidateAssets: any[] = [];
         for (const asset of data) {
           // Parse thời gian tạo của asset
           if (asset.creation_time) {
@@ -240,29 +241,64 @@ export class MediaSyncService implements OnModuleInit {
             }
           }
 
-          const exists = await this.prisma.creativeAsset.findUnique({
-            where: { id: asset.id },
-          });
+          candidateAssets.push(asset);
+        }
 
-          // Nếu asset đã tồn tại, BỎ QUA và check tiếp, KHÔNG DỪNG lại
-          if (exists) {
+        if (candidateAssets.length) {
+          const existingIds = new Set(
+            (
+              await this.prisma.creativeAsset.findMany({
+                where: { id: { in: candidateAssets.map((asset) => asset.id) } },
+                select: { id: true },
+              })
+            ).map((item) => item.id),
+          );
+
+          const newAssets = candidateAssets.filter(
+            (asset) => !existingIds.has(asset.id),
+          );
+          if (!newAssets.length) {
+            nextUrl = response.paging?.next;
+            if (data.length < 50) nextUrl = null;
+            if (nextUrl && !shouldStop) {
+              await sleep(Number(process.env.META_ASSET_PAGE_SLEEP_MS || 5000));
+            }
             continue;
           }
 
-          if (asset.parent_folder_id) {
-            await this.prisma.creativeFolder.upsert({
-              where: { id: asset.parent_folder_id },
-              update: {},
-              create: {
-                id: asset.parent_folder_id,
-                name: 'Unknown Folder (Synced)',
-                status: FolderStatus.ACTIVE,
-              },
-            });
+          const folderIds = [
+            ...new Set(
+              newAssets.map((asset) => asset.parent_folder_id).filter(Boolean),
+            ),
+          ];
+
+          if (folderIds.length) {
+            const existingFolderIds = new Set(
+              (
+                await this.prisma.creativeFolder.findMany({
+                  where: { id: { in: folderIds } },
+                  select: { id: true },
+                })
+              ).map((folder) => folder.id),
+            );
+
+            const missingFolders = folderIds.filter(
+              (id) => !existingFolderIds.has(id),
+            );
+            if (missingFolders.length) {
+              await this.prisma.creativeFolder.createMany({
+                data: missingFolders.map((id) => ({
+                  id,
+                  name: 'Unknown Folder (Synced)',
+                  status: FolderStatus.ACTIVE,
+                })),
+                skipDuplicates: true,
+              });
+            }
           }
 
-          await this.prisma.creativeAsset.create({
-            data: {
+          await this.prisma.creativeAsset.createMany({
+            data: newAssets.map((asset) => ({
               id: asset.id,
               name: asset.name,
               type: asset.video_id ? AssetType.VIDEO : AssetType.IMAGE,
@@ -272,26 +308,35 @@ export class MediaSyncService implements OnModuleInit {
               imageUrl: asset.url,
               imageHash: asset.hash,
               video_id: asset.video_id,
-              duration: asset.duration,
+              video_source: asset.video?.source,
+              video_thumbnails: asset.video?.thumbnails,
+              duration: asset.duration || asset.video?.length,
               creation_time: asset.creation_time,
               folderId: asset.parent_folder_id,
               urlExpiredAt: parseMetaUrlExpireTime([
                 asset.thumbnail,
                 asset.url,
+                asset.video?.source,
+                ...(asset.video?.thumbnails?.data?.map((t: any) => t.uri) ||
+                  []),
               ]),
-            },
+            })),
+            skipDuplicates: true,
           });
-          totalSynced++;
-          this.logger.debug(
-            `syncMetaAssets: Saved new asset ${asset.id} (${asset.name})`,
-          );
+
+          totalSynced += newAssets.length;
+          if (newAssets.length) {
+            this.logger.debug(
+              `syncMetaAssets: Saved ${newAssets.length} new assets on page ${pageCount}`,
+            );
+          }
         }
 
         nextUrl = response.paging?.next;
         if (data.length < 50) nextUrl = null;
 
         if (nextUrl && !shouldStop) {
-          await sleep(3 * 60 * 1000);
+          await sleep(Number(process.env.META_ASSET_PAGE_SLEEP_MS || 5000));
         }
       } catch (err: any) {
         this.logger.error(
@@ -325,69 +370,66 @@ export class MediaSyncService implements OnModuleInit {
     const chunkSize = 20;
     let totalUpdated = 0;
 
-    const fields = [
-      'id',
-      'name',
-      'last_updated_time',
-      'parent_folder_id',
-      'video{id,source,length,thumbnails}',
-    ];
-
     for (let i = 0; i < videos.length; i += chunkSize) {
       const chunk = videos.slice(i, i + chunkSize);
       this.logger.debug(
         `syncVideoSources: Processing chunk ${i / chunkSize + 1} (${chunk.length} videos)`,
       );
 
-      await Promise.all(
-        chunk.map(async (v) => {
-          try {
-            this.logger.debug(
-              `syncVideoSources: Fetching source for video ID: ${v.id}`,
+      const videoIds = chunk.map((v) => v.video_id).filter(Boolean) as string[];
+      if (!videoIds.length) continue;
+
+      try {
+        const response = await this.metaApi.request(
+          'get',
+          'https://graph.facebook.com/v24.0/',
+          {
+            ids: videoIds.join(','),
+            fields: 'id,source,length,thumbnails',
+          },
+        );
+        const videosById = response || {};
+
+        await Promise.all(
+          chunk.map(async (v) => {
+            const res = videosById[v.video_id!];
+            if (!res?.id) return;
+
+            const thumbnail = res?.thumbnails?.data?.find(
+              (d: any) => d?.is_preferred,
             );
-            const res = await this.metaApi.request('get', v.video_id!, {
-              fields: 'id,source,length,thumbnails',
+            await this.prisma.creativeAsset.update({
+              where: { video_id: res.id },
+              data: {
+                thumbnail: thumbnail?.uri,
+                height: thumbnail?.height,
+                width: thumbnail?.width,
+                duration: res?.length,
+                video_source: res?.source,
+                video_thumbnails: res?.thumbnails,
+                urlExpiredAt: parseMetaUrlExpireTime([
+                  res?.source,
+                  ...(res?.thumbnails?.data?.map((t: any) => t.uri) || []),
+                ]),
+              },
             });
-            if (res.id) {
-              const thumbnail = res?.thumbnails?.data?.find(
-                (d: any) => d?.is_preferred,
-              );
-              await this.prisma.creativeAsset.update({
-                where: { video_id: res.id },
-                data: {
-                  // name: res.name,
-                  // creation_time: res.last_updated_time,
-                  // folderId: res.parent_folder_id,
-                  // video_id: res.video.id,
-                  thumbnail: thumbnail?.uri,
-                  height: thumbnail?.height,
-                  width: thumbnail?.width,
-                  duration: res?.length,
-                  video_source: res?.source,
-                  video_thumbnails: res?.thumbnails,
-                  urlExpiredAt: parseMetaUrlExpireTime([
-                    res?.source,
-                    ...(res?.thumbnails?.data?.map((t: any) => t.uri) || []),
-                  ]),
-                },
-              });
-              totalUpdated++;
-            }
-          } catch (err: any) {
-            this.logger.error(
-              `Failed to sync source for video ${v.video_id || v.id}: ${err.message}`,
-            );
-          }
-        }),
-      );
+            totalUpdated++;
+          }),
+        );
+      } catch (err: any) {
+        this.logger.error(
+          `Failed to sync source chunk ${i / chunkSize + 1}: ${err.message}`,
+        );
+      }
 
       this.logger.log(
         `Synced ${Math.min(i + chunkSize, videos.length)}/${videos.length} videos...`,
       );
 
       if (i + chunkSize < videos.length) {
-        // Sleep 30 seconds between batches of 20 to avoid rate limits
-        await sleep(100000);
+        await sleep(
+          Number(process.env.META_VIDEO_SOURCE_CHUNK_SLEEP_MS || 5000),
+        );
       }
     }
 

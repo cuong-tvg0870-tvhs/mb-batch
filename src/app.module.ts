@@ -8,6 +8,7 @@ import { LarkSyncModule } from './modules/lark-sync/lark-sync.module';
 import { MediaSyncModule } from './modules/media-sync/media-sync.module';
 import { MetaApiModule } from './modules/meta-api/meta-api.module';
 import { MetaSyncModule } from './modules/meta-sync/meta-sync.module';
+import { DraftAutomationModule } from './modules/draft-automation/draft-automation.module';
 
 export const global_modules = [
   ScheduleModule.forRoot(),
@@ -37,6 +38,7 @@ export const global_modules = [
     MetaSyncModule,
     LarkSyncModule,
     MediaSyncModule,
+    DraftAutomationModule,
   ],
 })
 export class AppModule implements OnModuleInit {

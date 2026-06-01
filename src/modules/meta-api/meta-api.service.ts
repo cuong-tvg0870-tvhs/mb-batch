@@ -1,4 +1,9 @@
-import { BadRequestException, Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  OnModuleInit,
+} from '@nestjs/common';
 import axios from 'axios';
 import { AdAccount, FacebookAdsApi } from 'facebook-nodejs-business-sdk';
 import { PrismaService } from '../prisma/prisma.service';
@@ -8,12 +13,12 @@ import { AD_INSIGHT_FIELDS } from '../../common/utils/meta-field';
 @Injectable()
 export class MetaApiService implements OnModuleInit {
   private readonly logger = new Logger(MetaApiService.name);
-  public readonly businessId = process.env.SDK_FACEBOOK_BUSINESS || '1916878948527753';
+  public readonly businessId =
+    process.env.SDK_FACEBOOK_BUSINESS || '1916878948527753';
   private initialized = false;
+  private metaAuthConfigCache: { value: any; expiresAt: number } | null = null;
 
-  constructor(
-    private readonly prisma: PrismaService,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
   onModuleInit() {
     this.initSdk();
@@ -40,13 +45,15 @@ export class MetaApiService implements OnModuleInit {
       'content-type': 'application/x-www-form-urlencoded',
       origin: 'https://business.facebook.com',
       referer: 'https://business.facebook.com/',
-      'sec-ch-ua': '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
+      'sec-ch-ua':
+        '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
       'sec-ch-ua-mobile': '?0',
       'sec-ch-ua-platform': '"macOS"',
       'sec-fetch-dest': 'empty',
       'sec-fetch-mode': 'cors',
       'sec-fetch-site': 'same-site',
-      'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'user-agent':
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
       Cookie: authConfig?.cookie || '',
     };
   }
@@ -59,11 +66,16 @@ export class MetaApiService implements OnModuleInit {
     const code = error.code;
     const type = error.type;
 
-    const isAuthError = type === 'OAuthException' || code === 190 || code === 102;
-    const isLimitError = code === 17 || code === 4 || code === 32 || code === 613;
+    const isAuthError =
+      type === 'OAuthException' || code === 190 || code === 102;
+    const isLimitError =
+      code === 17 || code === 4 || code === 32 || code === 613;
 
     if (isAuthError || isLimitError) {
-      this.logger.warn(`Meta API Error [${code}]: ${error.message}. Clearing META_AUTH_CONFIG.`);
+      this.logger.warn(
+        `Meta API Error [${code}]: ${error.message}. Clearing META_AUTH_CONFIG.`,
+      );
+      this.metaAuthConfigCache = null;
       await this.prisma.systemConfig.deleteMany({
         where: { key: 'META_AUTH_CONFIG' },
       });
@@ -81,14 +93,19 @@ export class MetaApiService implements OnModuleInit {
         });
         if (response.data.error) {
           await this.handleMetaError(response.data);
-          throw new Error(response.data.error.message || 'Meta API Error in fetchAllPages');
+          throw new Error(
+            response.data.error.message || 'Meta API Error in fetchAllPages',
+          );
         }
         const data = response.data.data || [];
         results = results.concat(data);
         nextUrl = response.data.paging?.next;
       } catch (err: any) {
         await this.handleMetaError(err.response?.data);
-        this.logger.error('Fetch All Pages Error:', err.response?.data || err.message);
+        this.logger.error(
+          'Fetch All Pages Error:',
+          err.response?.data || err.message,
+        );
         throw err;
       }
     }
@@ -96,10 +113,22 @@ export class MetaApiService implements OnModuleInit {
   }
 
   public async getMetaAuthConfig() {
+    if (
+      this.metaAuthConfigCache &&
+      this.metaAuthConfigCache.expiresAt > Date.now()
+    ) {
+      return this.metaAuthConfigCache.value;
+    }
+
     const config = await this.prisma.systemConfig.findUnique({
       where: { key: 'META_AUTH_CONFIG' },
     });
-    return (config?.value as any) || {};
+    const value = (config?.value as any) || {};
+    this.metaAuthConfigCache = {
+      value,
+      expiresAt: Date.now() + 30_000,
+    };
+    return value;
   }
 
   public async getFacebookToken(userId: string) {
@@ -145,7 +174,9 @@ export class MetaApiService implements OnModuleInit {
 
       if (response.data?.error) {
         await this.handleMetaError(response.data);
-        const ex = new BadRequestException(response.data.error.message || 'Meta API Error');
+        const ex = new BadRequestException(
+          response.data.error.message || 'Meta API Error',
+        );
         (ex as any).metaError = response.data.error;
         throw ex;
       }
@@ -153,7 +184,7 @@ export class MetaApiService implements OnModuleInit {
     } catch (err: any) {
       await this.handleMetaError(err.response?.data || err);
       if (err.response?.data?.error) {
-         (err as any).metaError = err.response.data.error;
+        (err as any).metaError = err.response.data.error;
       }
       throw err;
     }

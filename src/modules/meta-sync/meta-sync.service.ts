@@ -33,24 +33,92 @@ export class MetaSyncService {
 
   constructor(private readonly prisma: PrismaService) {}
 
+  private readonly hydrationMaxAgeMs = 6 * 60 * 60 * 1000;
+
+  private async findIdsNeedingHydration(
+    model: 'campaign' | 'adSet',
+    ids: string[],
+  ) {
+    if (!ids.length) return [];
+
+    const rows = (await (this.prisma[model] as any).findMany({
+      where: { id: { in: ids } },
+      select: { id: true, lastFetchedAt: true },
+    })) as Array<{ id: string; lastFetchedAt: Date | null }>;
+
+    const freshCutoff = Date.now() - this.hydrationMaxAgeMs;
+    const rowMap = new Map(rows.map((row) => [row.id, row]));
+
+    return ids.filter((id) => {
+      const row = rowMap.get(id);
+      if (!row?.lastFetchedAt) return true;
+      return row.lastFetchedAt.getTime() < freshCutoff;
+    });
+  }
+
+  private async splitChangedRows<
+    T extends { id: string; remoteUpdatedAt?: Date | null },
+  >(model: 'campaign' | 'adSet' | 'ad' | 'creative', rows: T[]) {
+    if (!rows.length) return { creates: [] as T[], updates: [] as T[] };
+
+    const existing = (await (this.prisma[model] as any).findMany({
+      where: { id: { in: rows.map((row) => row.id) } },
+      select: { id: true, remoteUpdatedAt: true },
+    })) as Array<{ id: string; remoteUpdatedAt: Date | null }>;
+
+    const existingMap = new Map(existing.map((row) => [row.id, row]));
+    const creates: T[] = [];
+    const updates: T[] = [];
+
+    for (const row of rows) {
+      const current = existingMap.get(row.id);
+      if (!current) {
+        creates.push(row);
+        continue;
+      }
+
+      if (
+        row.remoteUpdatedAt &&
+        current.remoteUpdatedAt &&
+        current.remoteUpdatedAt.getTime() >= row.remoteUpdatedAt.getTime()
+      ) {
+        continue;
+      }
+
+      updates.push(row);
+    }
+
+    return { creates, updates };
+  }
+
   async syncCampaignData() {
     this.logger.log('⏰ Starting Batch Sync Campaign Data...');
 
-
     try {
       const accounts = await this.prisma.account.findMany({
-        where: { needsReauth: false },
+        where: { needsReauth: false, accountType: 'AD_ACCOUNT' as any },
+        select: { id: true, lastFetchedAt: true },
       });
 
-      const limit = pLimit(10); // Reduced parallel accounts for safety
+      const limit = pLimit(4);
 
       const syncTasks = accounts.map((account) => {
         return limit(async () => {
           try {
             const adAccount = new AdAccount(account.id);
-            const lastSyncUnix = Math.floor(
-              (Date.now() - 5 * 24 * 60 * 60 * 1000) / 1000,
+            const lookbackDays = Number(
+              process.env.META_CORE_SYNC_LOOKBACK_DAYS || 14,
             );
+            const overlapHours = Number(
+              process.env.META_CORE_SYNC_OVERLAP_HOURS || 6,
+            );
+            const syncFrom = account.lastFetchedAt
+              ? new Date(
+                  account.lastFetchedAt.getTime() -
+                    overlapHours * 60 * 60 * 1000,
+                )
+              : new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000);
+            const lastSyncUnix = Math.floor(syncFrom.getTime() / 1000);
 
             this.logger.log(
               `🔄 [${account.id}] Syncing data updated since ${dayjs.unix(lastSyncUnix).format('YYYY-MM-DD HH:mm:ss')}`,
@@ -67,16 +135,37 @@ export class MetaSyncService {
               ],
             };
 
-            const campaignsCursor = await executeMetaApiWithRetry(
-              () => adAccount.getCampaigns(CAMPAIGN_FIELDS, baseFilter, true),
-              { logger: this.logger },
-            );
-            const allCampaigns = await fetchAll(campaignsCursor);
+            const adFields = [
+              ...AD_FIELDS.filter((f) => f !== 'creative'),
+              `creative{${CREATIVE_FIELDS.join(',')}}`,
+            ];
+
+            const [campaignsCursor, changedAdsetsCursor, changedAdsCursor] =
+              await Promise.all([
+                executeMetaApiWithRetry(
+                  () =>
+                    adAccount.getCampaigns(CAMPAIGN_FIELDS, baseFilter, true),
+                  { logger: this.logger },
+                ),
+                executeMetaApiWithRetry(
+                  () => adAccount.getAdSets(ADSET_FIELDS, baseFilter, true),
+                  { logger: this.logger },
+                ),
+                executeMetaApiWithRetry(
+                  () => adAccount.getAds(adFields, baseFilter, true),
+                  { logger: this.logger },
+                ),
+              ]);
+
+            const [allCampaigns, allAdSets, allAds] = await Promise.all([
+              fetchAll(campaignsCursor),
+              fetchAll(changedAdsetsCursor),
+              fetchAll(changedAdsCursor),
+            ]);
             const campaignIds = allCampaigns.map((c) => c.id);
 
-            const allAdSets: any[] = [];
-            const allAds: any[] = [];
-
+            // If a campaign itself changed, hydrate its children so draft-copy UI
+            // has a complete tree without waiting for child updated_time changes.
             if (campaignIds.length > 0) {
               for (const chunkIds of chunk(campaignIds, 50)) {
                 const [asCursor, aCursor] = await Promise.all([
@@ -99,12 +188,8 @@ export class MetaSyncService {
                     { logger: this.logger },
                   ),
                   executeMetaApiWithRetry(
-                    () => {
-                      const adFields = [
-                        ...AD_FIELDS.filter((f) => f !== 'creative'),
-                        `creative{${CREATIVE_FIELDS.join(',')}}`,
-                      ];
-                      return adAccount.getAds(
+                    () =>
+                      adAccount.getAds(
                         adFields,
                         {
                           limit: 50,
@@ -117,8 +202,7 @@ export class MetaSyncService {
                           ],
                         },
                         true,
-                      );
-                    },
+                      ),
                     { logger: this.logger },
                   ),
                 ]);
@@ -132,38 +216,6 @@ export class MetaSyncService {
               }
             }
 
-            const [extraAdsetsCursor, extraAdsCursor] = await Promise.all([
-              executeMetaApiWithRetry(
-                () => adAccount.getAdSets(ADSET_FIELDS, baseFilter, true),
-                { logger: this.logger },
-              ),
-              executeMetaApiWithRetry(
-                () => {
-                  const adFields = [
-                    ...AD_FIELDS.filter((f) => f !== 'creative'),
-                    `creative{${CREATIVE_FIELDS.join(',')}}`,
-                  ];
-                  return adAccount.getAds(adFields, baseFilter, true);
-                },
-                { logger: this.logger },
-              ),
-            ]);
-
-            const [extraAdsets, extraAds] = await Promise.all([
-              fetchAll(extraAdsetsCursor),
-              fetchAll(extraAdsCursor),
-            ]);
-
-            const adsetIds = new Set(allAdSets.map((as) => as.id));
-            for (const as of extraAdsets) {
-              if (!adsetIds.has(as.id)) allAdSets.push(as);
-            }
-
-            const adIds = new Set(allAds.map((ad) => ad.id));
-            for (const ad of extraAds) {
-              if (!adIds.has(ad.id)) allAds.push(ad);
-            }
-
             // Missing parent fetching logic
             const fetchedCampaignIds = new Set(allCampaigns.map((c) => c.id));
             const requiredCampaignIds = [
@@ -174,15 +226,9 @@ export class MetaSyncService {
             ].filter((id) => id && !fetchedCampaignIds.has(id));
 
             if (requiredCampaignIds.length > 0) {
-              const existingInDb = await this.prisma.campaign
-                .findMany({
-                  where: { id: { in: requiredCampaignIds } },
-                  select: { id: true },
-                })
-                .then((r) => new Set(r.map((x) => x.id)));
-
-              const missingCampaignIds = requiredCampaignIds.filter(
-                (id) => !existingInDb.has(id),
+              const missingCampaignIds = await this.findIdsNeedingHydration(
+                'campaign',
+                requiredCampaignIds,
               );
 
               if (missingCampaignIds.length > 0) {
@@ -210,15 +256,9 @@ export class MetaSyncService {
             ].filter((id) => id && !fetchedAdSetIds.has(id));
 
             if (requiredAdSetIds.length > 0) {
-              const existingInDb = await this.prisma.adSet
-                .findMany({
-                  where: { id: { in: requiredAdSetIds } },
-                  select: { id: true },
-                })
-                .then((r) => new Set(r.map((x) => x.id)));
-
-              const missingAdSetIds = requiredAdSetIds.filter(
-                (id) => !existingInDb.has(id),
+              const missingAdSetIds = await this.findIdsNeedingHydration(
+                'adSet',
+                requiredAdSetIds,
               );
 
               if (missingAdSetIds.length > 0) {
@@ -307,6 +347,14 @@ export class MetaSyncService {
       new Map(creativeData.map((c) => [c.id, c])).values(),
     );
 
+    const [campaignChanges, adsetChanges, creativeChanges, adChanges] =
+      await Promise.all([
+        this.splitChangedRows('campaign', campaignData),
+        this.splitChangedRows('adSet', adsetData),
+        this.splitChangedRows('creative', uniqueCreatives),
+        this.splitChangedRows('ad', adData),
+      ]);
+
     const pageIds = [
       ...new Set(uniqueCreatives.map((c) => c.pageId).filter(Boolean)),
     ];
@@ -356,53 +404,40 @@ export class MetaSyncService {
     await prismaHelper.createManySafe(this.prisma.adImage, newImages, 20);
     await prismaHelper.createManySafe(this.prisma.adVideo, newVideos, 20);
 
-    await prismaHelper.upsertMany(
-      campaignData,
-      (item) =>
-        this.prisma.campaign.upsert({
-          where: { id: item.id },
-          update: item,
-          create: item,
-        }),
-      20,
+    await prismaHelper.createManySafe(
+      this.prisma.campaign,
+      campaignChanges.creates,
+      100,
+    );
+    await prismaHelper.updateManyById(campaignChanges.updates, (item) =>
+      this.prisma.campaign.update({ where: { id: item.id }, data: item }),
     );
 
-    await prismaHelper.upsertMany(
-      adsetData,
-      (item) =>
-        this.prisma.adSet.upsert({
-          where: { id: item.id },
-          update: item,
-          create: item,
-        }),
-      20,
+    await prismaHelper.createManySafe(
+      this.prisma.adSet,
+      adsetChanges.creates,
+      100,
+    );
+    await prismaHelper.updateManyById(adsetChanges.updates, (item) =>
+      this.prisma.adSet.update({ where: { id: item.id }, data: item }),
     );
 
-    await prismaHelper.upsertMany(
-      uniqueCreatives,
-      (item) =>
-        this.prisma.creative.upsert({
-          where: { id: item.id },
-          update: item,
-          create: item,
-        }),
-      20,
+    await prismaHelper.createManySafe(
+      this.prisma.creative,
+      creativeChanges.creates,
+      100,
+    );
+    await prismaHelper.updateManyById(creativeChanges.updates, (item) =>
+      this.prisma.creative.update({ where: { id: item.id }, data: item }),
     );
 
-    await prismaHelper.upsertMany(
-      adData,
-      (item) =>
-        this.prisma.ad.upsert({
-          where: { id: item.id },
-          update: item,
-          create: item,
-        }),
-      20,
+    await prismaHelper.createManySafe(this.prisma.ad, adChanges.creates, 100);
+    await prismaHelper.updateManyById(adChanges.updates, (item) =>
+      this.prisma.ad.update({ where: { id: item.id }, data: item }),
     );
   }
   async syncVideo(limit: number = 50) {
     this.logger.log('🔄 Sync Ad Video (fully optimized)');
-
 
     try {
       const where: Prisma.AdVideoWhereInput = {
@@ -446,7 +481,6 @@ export class MetaSyncService {
           );
 
           const videos = await fetchAll(cursor);
-          console.log(videos);
           const returnedIds = new Set(videos.map((v) => v.id));
           const missingIds = videoIds.filter((id) => !returnedIds.has(id));
 
@@ -477,7 +511,8 @@ export class MetaSyncService {
                   source: videoData.source || null,
                   urlExpiredAt: parseMetaUrlExpireTime([
                     videoData.source,
-                    ...(videoData.thumbnails?.data?.map((t: any) => t.uri) || []),
+                    ...(videoData.thumbnails?.data?.map((t: any) => t.uri) ||
+                      []),
                   ]),
                   status: 'READY',
                   updatedAt: new Date(),
@@ -635,7 +670,6 @@ export class MetaSyncService {
   }
 
   async syncFolderVideo(limit: number = 50) {
-
     try {
       const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
 
@@ -725,7 +759,6 @@ export class MetaSyncService {
   }
 
   async syncFolderImage(limit: number = 50) {
-
     try {
       const api = new FacebookAdsApi(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
 

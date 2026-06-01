@@ -19,15 +19,17 @@ export class MetaSyncScheduler implements OnModuleInit {
   }
 
   /**
-   * 🔹 CORE DATA (1 lần / ngày lúc 00:05)
+   * 🔹 CORE DATA (incremental, hourly)
    */
-  @Cron('5 0 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('5 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async scheduleCampaignCoreSync() {
     this.logger.log('📅 Scheduling Campaign Core Sync...');
+    const bucket = new Date().toISOString().slice(0, 13);
     await this.metaSyncQueue.add(
       META_SYNC_JOBS.SYNC_CAMPAIGN_CORE,
       {},
       {
+        jobId: `${META_SYNC_JOBS.SYNC_CAMPAIGN_CORE}:${bucket}`,
         removeOnComplete: true,
         attempts: 3,
         backoff: { type: 'exponential', delay: 60000 },
@@ -41,10 +43,12 @@ export class MetaSyncScheduler implements OnModuleInit {
   @Cron('5 19,20,21 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async scheduleImageDataSync() {
     this.logger.log('📅 Scheduling Image Data Sync...');
+    const bucket = new Date().toISOString().slice(0, 13);
     await this.metaSyncQueue.add(
       META_SYNC_JOBS.SYNC_IMAGE_DATA,
       {},
       {
+        jobId: `${META_SYNC_JOBS.SYNC_IMAGE_DATA}:${bucket}`,
         removeOnComplete: true,
         attempts: 3,
         backoff: { type: 'exponential', delay: 60000 },
@@ -58,10 +62,12 @@ export class MetaSyncScheduler implements OnModuleInit {
   @Cron('5 20,21,22 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async scheduleVideoDataSync() {
     this.logger.log('📅 Scheduling Video Data Sync...');
+    const bucket = new Date().toISOString().slice(0, 13);
     await this.metaSyncQueue.add(
       META_SYNC_JOBS.SYNC_VIDEO_DATA,
       {},
       {
+        jobId: `${META_SYNC_JOBS.SYNC_VIDEO_DATA}:${bucket}`,
         removeOnComplete: true,
         attempts: 3,
         backoff: { type: 'exponential', delay: 60000 },
@@ -75,10 +81,12 @@ export class MetaSyncScheduler implements OnModuleInit {
   @Cron('20 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async scheduleFolderVideoSync() {
     this.logger.log('📅 Scheduling Folder Video Sync...');
+    const bucket = new Date().toISOString().slice(0, 13);
     await this.metaSyncQueue.add(
       META_SYNC_JOBS.SYNC_FOLDER_VIDEO_DATA,
       {},
       {
+        jobId: `${META_SYNC_JOBS.SYNC_FOLDER_VIDEO_DATA}:${bucket}`,
         removeOnComplete: true,
         attempts: 3,
         backoff: { type: 'exponential', delay: 60000 },
@@ -92,10 +100,12 @@ export class MetaSyncScheduler implements OnModuleInit {
   @Cron('40 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async scheduleFolderImageSync() {
     this.logger.log('📅 Scheduling Folder Image Sync...');
+    const bucket = new Date().toISOString().slice(0, 13);
     await this.metaSyncQueue.add(
       META_SYNC_JOBS.SYNC_FOLDER_IMAGE_DATA,
       {},
       {
+        jobId: `${META_SYNC_JOBS.SYNC_FOLDER_IMAGE_DATA}:${bucket}`,
         removeOnComplete: true,
         attempts: 3,
         backoff: { type: 'exponential', delay: 60000 },

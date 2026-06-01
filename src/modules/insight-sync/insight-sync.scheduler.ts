@@ -76,11 +76,11 @@ export class InsightSyncScheduler implements OnModuleInit {
 
   /**
    * 🔴 MAX SYNC
-   * Runs every 3 hours
+   * Runs once a day. MAX is expensive and should not compete with near-real-time ranges.
    */
-  @Cron('0 */3 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('15 2 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async scheduleMaxSync() {
-    this.logger.log('📅 Scheduling Max Insights Sync (3h)...');
+    this.logger.log('📅 Scheduling Max Insights Sync (daily)...');
     await this.queueSyncForAllAccounts(
       [InsightSyncLevel.CAMPAIGN, InsightSyncLevel.ADSET, InsightSyncLevel.AD],
       [InsightSyncRange.MAX],
@@ -114,11 +114,12 @@ export class InsightSyncScheduler implements OnModuleInit {
     ranges: InsightSyncRange[],
   ) {
     const accounts = await this.prisma.account.findMany({
-      where: { needsReauth: false },
+      where: { needsReauth: false, accountType: 'AD_ACCOUNT' as any },
       select: { id: true },
     });
 
     this.logger.log(`Found ${accounts.length} accounts to sync insights.`);
+    const bucket = new Date().toISOString().slice(0, 13);
 
     for (const account of accounts) {
       const jobData: SyncAccountJobData = {
@@ -128,6 +129,13 @@ export class InsightSyncScheduler implements OnModuleInit {
       };
 
       await this.syncQueue.add(INSIGHT_SYNC_JOBS.SYNC_ACCOUNT, jobData, {
+        jobId: [
+          INSIGHT_SYNC_JOBS.SYNC_ACCOUNT,
+          account.id,
+          levels.join('-'),
+          ranges.join('-'),
+          bucket,
+        ].join(':'),
         attempts: 3, // Retry up to 3 times
         backoff: {
           type: 'exponential',
@@ -145,17 +153,19 @@ export class InsightSyncScheduler implements OnModuleInit {
 
   private async queueMissingDailySyncForAllAccounts() {
     const accounts = await this.prisma.account.findMany({
-      where: { needsReauth: false },
+      where: { needsReauth: false, accountType: 'AD_ACCOUNT' as any },
       select: { id: true },
     });
 
     this.logger.log(`Found ${accounts.length} accounts to sync missing daily.`);
+    const bucket = new Date().toISOString().slice(0, 10);
 
     for (const account of accounts) {
       await this.syncQueue.add(
         INSIGHT_SYNC_JOBS.SYNC_MISSING_DAILY,
         { accountId: account.id },
         {
+          jobId: `${INSIGHT_SYNC_JOBS.SYNC_MISSING_DAILY}:${account.id}:${bucket}`,
           attempts: 2,
           backoff: { type: 'exponential', delay: 0 }, // 5 mins
           removeOnComplete: true,
@@ -171,17 +181,19 @@ export class InsightSyncScheduler implements OnModuleInit {
 
   private async queueAudienceSyncForAllAccounts() {
     const accounts = await this.prisma.account.findMany({
-      where: { needsReauth: false },
+      where: { needsReauth: false, accountType: 'AD_ACCOUNT' as any },
       select: { id: true },
     });
 
     this.logger.log(`Found ${accounts.length} accounts to sync audience.`);
+    const bucket = new Date().toISOString().slice(0, 10);
 
     for (const account of accounts) {
       await this.syncQueue.add(
         INSIGHT_SYNC_JOBS.SYNC_AUDIENCE,
         { accountId: account.id },
         {
+          jobId: `${INSIGHT_SYNC_JOBS.SYNC_AUDIENCE}:${account.id}:${bucket}`,
           attempts: 3,
           backoff: { type: 'exponential', delay: 60000 },
           removeOnComplete: true,

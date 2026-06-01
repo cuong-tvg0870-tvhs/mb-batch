@@ -63,8 +63,7 @@ export function isNotFound(e: any) {
 }
 
 export const parseMetaError = (err: any) => {
-  const e = err?.response;
-  console.log(err);
+  const e = err?.response?.error || err?.response || err?.error || err;
   return {
     message: e?.error_user_msg || e?.message || 'Meta API error',
     title: e?.error_user_title,
@@ -690,7 +689,9 @@ export function flattenFolders(
   return result;
 }
 
-export function parseMetaUrlExpireTime(url?: string | (string | undefined)[]): Date | null {
+export function parseMetaUrlExpireTime(
+  url?: string | (string | undefined)[],
+): Date | null {
   if (!url) return null;
 
   const urls = Array.isArray(url) ? url : [url];

@@ -17,21 +17,20 @@ export class InsightSyncService implements OnModuleInit {
   ) {}
 
   async onModuleInit() {
-    // Trigger immediate sync in development mode for testing
-    this.logger.log('🚀 Triggering immediate sync for development...');
-    // Wait a bit for everything to be ready
+    if (process.env.INSIGHT_AGGREGATE_ON_BOOT !== 'true') return;
+
     setTimeout(async () => {
       try {
         const accounts = await this.prisma.account.findMany({
-          where: { needsReauth: false },
+          where: { needsReauth: false, accountType: 'AD_ACCOUNT' as any },
           select: { id: true },
         });
         for (const account of accounts) {
           await this.aggregateCreativeInsights(account.id);
         }
-        this.logger.log('✅ Triggered local aggregation successfully.');
+        this.logger.log('✅ Triggered boot aggregation successfully.');
       } catch (err: any) {
-        this.logger.error(`Failed to trigger immediate sync: ${err.message}`);
+        this.logger.error(`Failed to trigger boot aggregation: ${err.message}`);
       }
     }, 5000);
   }
@@ -44,20 +43,15 @@ export class InsightSyncService implements OnModuleInit {
     levels: InsightSyncLevel[],
     ranges: InsightSyncRange[],
   ) {
-    // Process levels in parallel to speed up account sync
-    await Promise.all(
-      levels.map(async (level) => {
-        // Keep ranges sequential within a level to be safe with Meta rate limits
-        for (const range of ranges) {
-          await this.syncLevelRange(accountId, level, range);
-        }
+    for (const level of levels) {
+      for (const range of ranges) {
+        await this.syncLevelRange(accountId, level, range);
+      }
 
-        // After all AD ranges are synced, aggregate Creative insights
-        if (level === InsightSyncLevel.AD) {
-          await this.aggregateCreativeInsights(accountId);
-        }
-      }),
-    );
+      if (level === InsightSyncLevel.AD) {
+        await this.aggregateCreativeInsights(accountId);
+      }
+    }
   }
 
   private async syncLevelRange(
@@ -480,8 +474,10 @@ export class InsightSyncService implements OnModuleInit {
         target.costPerResult = results > 0 ? spend / results : 0;
         target.aov = results > 0 ? purchaseValue / results : 0;
         target.adsCostRatio = target.roas > 0 ? 1 / target.roas : 0;
-        target.hookRate = videoPlay > 0 ? +(video3s / videoPlay * 100).toFixed(2) : 0;
-        target.holdRate = video3s > 0 ? +(video100 / video3s * 100).toFixed(2) : 0;
+        target.hookRate =
+          videoPlay > 0 ? +((video3s / videoPlay) * 100).toFixed(2) : 0;
+        target.holdRate =
+          video3s > 0 ? +((video100 / video3s) * 100).toFixed(2) : 0;
         target.uniqueCtr = reach > 0 ? (uniqueClicks / reach) * 100 : 0;
         target.results = results;
       };
@@ -507,7 +503,8 @@ export class InsightSyncService implements OnModuleInit {
               sumMetrics(bucket.last3d, ins);
             if (ins.range === InsightRange.TODAY) sumMetrics(bucket.today, ins);
             if (ins.range === InsightRange.DAILY) {
-              if (!bucket.daily[ins.dateStart]) bucket.daily[ins.dateStart] = {};
+              if (!bucket.daily[ins.dateStart])
+                bucket.daily[ins.dateStart] = {};
               sumMetrics(bucket.daily[ins.dateStart], ins);
             }
           }

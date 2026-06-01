@@ -42,4 +42,12 @@ export class PrismaBatchHelper {
       await Promise.all(chunk.map((item) => handler(item)));
     }
   }
+
+  async updateManyById<T>(
+    items: T[],
+    handler: (item: T) => Promise<any>,
+    chunkSize = 20,
+  ) {
+    return this.upsertMany(items, handler, chunkSize);
+  }
 }
