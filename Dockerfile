@@ -34,7 +34,7 @@ RUN --mount=type=cache,target=/root/.yarn \
                  --network-timeout 600000
 
 # copy Prisma client đã generate
-COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=builder /app/src/generated/prisma ./node_modules/.prisma/client
 
 
 # ========================
