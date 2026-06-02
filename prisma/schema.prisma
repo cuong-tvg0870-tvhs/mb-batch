@@ -1810,7 +1810,7 @@ model CreativeAsset {
 
   videoSource Json?
 
-  larkRecord LarkRecord?
+  larkRecords LarkRecord[]
 
   assetMappings CreativeAssetMapping[]
 
@@ -1856,7 +1856,7 @@ model LarkRecord {
   drive_id String?
   drive    DriveFile? @relation(fields: [drive_id], references: [id])
 
-  creative_asset_id String?        @unique
+  creative_asset_id String?
   creative_asset    CreativeAsset? @relation(fields: [creative_asset_id], references: [id])
 
   production_date DateTime?
