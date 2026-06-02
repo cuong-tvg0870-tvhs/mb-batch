@@ -14,7 +14,6 @@ export class LarkSyncScheduler implements OnModuleInit {
 
   async onModuleInit() {
     this.logger.log('🚀 LarkSyncScheduler Initialized');
-    // await this.scheduleSyncWorkflow();
   }
 
   /**
@@ -30,7 +29,7 @@ export class LarkSyncScheduler implements OnModuleInit {
       {
         removeOnComplete: true,
         attempts: 3,
-        backoff: { type: 'exponential', delay: 60000 },
+        backoff: { type: 'exponential' },
       },
     );
   }

@@ -118,18 +118,26 @@ export class LarkSyncService {
         }
       }
 
-      // 3. Xử lý song song cho các record còn sót chưa có quyền đọc hoặc chưa map Meta
-      this.logger.log('🔍 [STEP 3] Starting parallel check for pending/unverified records...');
+      // 3. Xử lý song song cho các record còn sót chưa có quyền đọc hoặc chưa map Meta (chỉ quét 14 ngày gần đây)
+      const fourteenDaysAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
+      this.logger.log('🔍 [STEP 3] Starting parallel check for pending/unverified records (recent 14 days)...');
       let totalChecked = 0;
       while (true) {
         const pendingRecords = await this.prisma.larkRecord.findMany({
           where: {
+            production_date: { gte: fourteenDaysAgo },
             OR: [
               { creative_asset_id: null },
               { drive_id: null },
               { drive: { drive_permission: { not: true } } },
               { drive: null },
             ],
+            NOT: {
+              raw: {
+                path: ['permission_status'],
+                equals: 'FAILED',
+              },
+            },
           },
           select: { id: true },
           take: 50,
@@ -159,6 +167,7 @@ export class LarkSyncService {
   async checkPermissions(larkRecordIds: string[]) {
     const records = await this.prisma.larkRecord.findMany({
       where: { id: { in: larkRecordIds } },
+      include: { drive: true },
     });
 
     // 1. Cập nhật trạng thái CHECKING cho toàn bộ records trước
@@ -178,150 +187,156 @@ export class LarkSyncService {
     );
 
     const now = new Date();
-    const results = await Promise.all(
-      records.map(async (record) => {
-        let drive_permission = false;
-        let driveFileResponse: any = null;
-        const driveId = extractDriveId(record.drive_url);
+    const results: Array<{ id: string; success: boolean; drive_permission: boolean; creative_asset_id: string | null }> = [];
 
-        // 1. Kiểm tra quyền Drive
-        if (driveId) {
-          try {
-            driveFileResponse = await this.driveSA.files.get({
-              fileId: driveId,
-              fields: 'id,name,mimeType,webViewLink,webContentLink,size',
-              supportsAllDrives: true,
-            });
+    // Chạy từng cụm 10 bản ghi song song để tránh Rate Limit API của Google
+    const chunks = chunk(records, 10);
+    for (const recordChunk of chunks) {
+      const chunkResults = await Promise.all(
+        recordChunk.map(async (record) => {
+          let drive_permission = false;
+          let driveFileResponse: any = null;
+          let permission_error: string | null = null;
+          let driveId = extractDriveId(record.drive_url);
+
+          const alreadyVerified = !!(record.drive_id && record.drive?.drive_permission === true);
+
+          if (alreadyVerified) {
             drive_permission = true;
-          } catch (e: any) {
-            drive_permission = false;
-            // Cập nhật lỗi cụ thể vào DB
-            await this.prisma.larkRecord.update({
-              where: { id: record.id },
+            driveId = record.drive_id;
+            driveFileResponse = {
               data: {
-                raw: {
-                  ...(record.raw as any),
-                  permission_status: 'FAILED',
-                  permission_error: e.message || String(e),
-                },
+                id: record.drive_id,
+                name: record.drive?.name,
+                mimeType: record.drive?.mimeType,
+                webViewLink: record.drive?.webViewLink,
+                webContentLink: record.drive?.webContentLink,
+                size: record.drive?.size,
               },
-            });
+            };
+          } else if (driveId) {
+            try {
+              driveFileResponse = await this.driveSA.files.get({
+                fileId: driveId,
+                fields: 'id,name,mimeType,webViewLink,webContentLink,size',
+                supportsAllDrives: true,
+              });
+              drive_permission = true;
+            } catch (e: any) {
+              drive_permission = false;
+              permission_error = e.message || String(e);
+            }
+          } else {
+            permission_error = 'Không tìm thấy Google Drive ID từ đường dẫn';
           }
-        } else {
-          await this.prisma.larkRecord.update({
-            where: { id: record.id },
-            data: {
-              raw: {
-                ...(record.raw as any),
-                permission_status: 'FAILED',
-                permission_error: 'Không tìm thấy Google Drive ID từ đường dẫn',
-              },
-            },
-          });
-        }
 
-        // 2. Cập nhật trạng thái Drive trong DB & liên kết drive_id vào larkRecord
-        if (driveId) {
-          // Upsert DriveFile
-          await this.prisma.driveFile.upsert({
-            where: { id: driveId },
-            update: {
-              name: driveFileResponse?.data?.name || undefined, // Giữ tên cũ nếu không lấy được
-              drive_permission,
-              mimeType: driveFileResponse?.data?.mimeType || undefined,
-              webViewLink: driveFileResponse?.data?.webViewLink || undefined,
-              webContentLink: driveFileResponse?.data?.webContentLink || undefined,
-              size: driveFileResponse?.data?.size || undefined,
-              raw: driveFileResponse?.data ? JSON.stringify(driveFileResponse.data) : undefined,
-              last_seen_at: now,
-            },
-            create: {
-              id: driveId,
-              name: driveFileResponse?.data?.name || record.drive_url || 'Unknown',
-              drive_permission,
-              mimeType: driveFileResponse?.data?.mimeType || null,
-              webViewLink: driveFileResponse?.data?.webViewLink || null,
-              webContentLink: driveFileResponse?.data?.webContentLink || null,
-              size: driveFileResponse?.data?.size || null,
-              raw: JSON.stringify(driveFileResponse?.data || {}),
-              last_seen_at: now,
-            },
-          });
-
-          // Cập nhật drive_id & permission_status cho LarkRecord
-          const isSuccess = drive_permission;
-          await this.prisma.larkRecord.update({
-            where: { id: record.id },
-            data: {
-              drive_id: driveId,
-              raw: {
-                ...(record.raw as any),
-                permission_status: isSuccess ? 'SUCCESS' : 'FAILED',
-                permission_error: isSuccess ? null : 'Lỗi quyền truy cập Drive hoặc file không tồn tại',
-              },
-            },
-          });
-        }
-
-        // 3. Tự động map nếu đã tồn tại trên Meta (theo path và tên file)
-        let creative_asset_id = record.creative_asset_id;
-        if (
-          !creative_asset_id &&
-          record.project_name &&
-          record.brand_name &&
-          record.product_code
-        ) {
-          // Lấy tên từ drive response vừa fetched được, hoặc từ DB cũ, hoặc fallback
-          let targetName = driveFileResponse?.data?.name;
-          if (!targetName && driveId) {
-            const dbFile = await this.prisma.driveFile.findUnique({
+          if (driveId && !alreadyVerified) {
+            const file = driveFileResponse?.data;
+            await this.prisma.driveFile.upsert({
               where: { id: driveId },
-              select: { name: true },
+              update: {
+                name: file?.name || undefined,
+                drive_permission,
+                mimeType: file?.mimeType || undefined,
+                webViewLink: file?.webViewLink || undefined,
+                webContentLink: file?.webContentLink || undefined,
+                size: file?.size || undefined,
+                raw: file ? JSON.stringify(file) : undefined,
+                last_seen_at: now,
+              },
+              create: {
+                id: driveId,
+                name: file?.name || record.drive_url || 'Unknown File',
+                drive_permission,
+                mimeType: file?.mimeType || null,
+                webViewLink: file?.webViewLink || null,
+                webContentLink: file?.webContentLink || null,
+                size: file?.size || null,
+                raw: JSON.stringify(file || {}),
+                last_seen_at: now,
+              },
             });
-            targetName = dbFile?.name;
-          }
-          if (!targetName) {
-            targetName = record.project_name; // Fallback
           }
 
-          const extIndex = targetName.lastIndexOf('.');
-          const targetNameWithoutExt = extIndex > 0 ? targetName.substring(0, extIndex) : targetName;
+          // Cập nhật trạng thái Drive trong DB & liên kết drive_id vào larkRecord
+          const updatedRaw = {
+            ...(record.raw as any),
+            permission_status: drive_permission ? 'SUCCESS' : 'FAILED',
+            permission_error: permission_error,
+          };
 
-          const asset = await this.prisma.creativeAsset.findFirst({
-            where: {
-              OR: [
-                { name: targetName },
-                { name: targetNameWithoutExt },
-                { name: { startsWith: targetNameWithoutExt } }
-              ],
-              folder: {
-                name: record.product_code,
-                parent: {
-                  name: record.brand_name,
+          const updateData: any = {
+            raw: updatedRaw,
+          };
+
+          if (driveId) {
+            updateData.drive_id = driveId;
+          }
+
+          // Tự động map nếu đã tồn tại trên Meta (theo path và tên file)
+          let creative_asset_id = record.creative_asset_id;
+          if (
+            !creative_asset_id &&
+            record.project_name &&
+            record.brand_name &&
+            record.product_code
+          ) {
+            let targetName = driveFileResponse?.data?.name;
+            if (!targetName && driveId) {
+              const dbFile = await this.prisma.driveFile.findUnique({
+                where: { id: driveId },
+                select: { name: true },
+              });
+              targetName = dbFile?.name;
+            }
+            if (!targetName) {
+              targetName = record.project_name;
+            }
+
+            const extIndex = targetName.lastIndexOf('.');
+            const targetNameWithoutExt = extIndex > 0 ? targetName.substring(0, extIndex) : targetName;
+
+            const asset = await this.prisma.creativeAsset.findFirst({
+              where: {
+                OR: [
+                  { name: targetName },
+                  { name: targetNameWithoutExt },
+                  { name: { startsWith: targetNameWithoutExt } }
+                ],
+                folder: {
+                  name: record.product_code,
                   parent: {
-                    name: record.project_name,
+                    name: record.brand_name,
+                    parent: {
+                      name: record.project_name,
+                    },
                   },
                 },
               },
-            },
+            });
+
+            if (asset) {
+              creative_asset_id = asset.id;
+              updateData.creative_asset_id = creative_asset_id;
+            }
+          }
+
+          await this.prisma.larkRecord.update({
+            where: { id: record.id },
+            data: updateData,
           });
 
-          if (asset) {
-            creative_asset_id = asset.id;
-            await this.prisma.larkRecord.update({
-              where: { id: record.id },
-              data: { creative_asset_id },
-            });
-          }
-        }
+          return {
+            id: record.id,
+            success: drive_permission,
+            drive_permission,
+            creative_asset_id,
+          };
+        }),
+      );
 
-        return {
-          id: record.id,
-          drive_permission,
-          creative_asset_id,
-        };
-      })
-    );
+      results.push(...chunkResults);
+    }
 
     return results;
   }
@@ -345,37 +360,91 @@ export class LarkSyncService {
 
       const files = res.data.files || [];
 
-      const driveOps = files.map((file) => {
-        const id = file.id || '';
-        return this.prisma.driveFile.upsert({
-          where: { id },
-          update: {
-            name: file.name || 'Untitled',
-            last_seen_at: now,
-            webViewLink: file.webViewLink || null,
-            webContentLink: file.webContentLink || null,
-            mimeType: file.mimeType || null,
-            size: file.size || null,
-            drive_permission: true,
-          },
-          create: {
-            id,
-            raw: JSON.stringify(file),
-            name: file.name || 'Untitled',
-            mimeType: file.mimeType || null,
-            last_seen_at: now,
-            webViewLink: file.webViewLink || null,
-            webContentLink: file.webContentLink || null,
-            size: file.size || null,
+      if (files.length > 0) {
+        const fileIds = files.map((f) => f.id).filter(Boolean) as string[];
+
+        // 1. Lấy thông tin các file đã tồn tại trong DB để so sánh
+        const existingDriveFiles = await this.prisma.driveFile.findMany({
+          where: { id: { in: fileIds } },
+          select: {
+            id: true,
+            name: true,
+            mimeType: true,
+            webViewLink: true,
+            size: true,
             drive_permission: true,
           },
         });
-      });
 
-      if (driveOps.length > 0) {
-        const batches = chunk(driveOps, 200);
-        for (const batchOps of batches) {
-          await this.prisma.$transaction(batchOps);
+        const existingMap = new Map(existingDriveFiles.map((f) => [f.id, f]));
+        const unchangedIds: string[] = [];
+        const filesToUpsert: any[] = [];
+
+        for (const file of files) {
+          const id = file.id;
+          if (!id) continue;
+
+          const existing = existingMap.get(id);
+          if (existing) {
+            // Kiểm tra xem có thay đổi gì quan trọng không
+            const hasChanged =
+              existing.name !== (file.name || 'Untitled') ||
+              existing.mimeType !== (file.mimeType || null) ||
+              existing.webViewLink !== (file.webViewLink || null) ||
+              existing.size !== (file.size || null) ||
+              existing.drive_permission !== true;
+
+            if (hasChanged) {
+              filesToUpsert.push(file);
+            } else {
+              unchangedIds.push(id);
+            }
+          } else {
+            filesToUpsert.push(file);
+          }
+        }
+
+        // 2. Cập nhật last_seen_at hàng loạt cho các file không đổi (chỉ mất 1 query!)
+        if (unchangedIds.length > 0) {
+          await this.prisma.driveFile.updateMany({
+            where: { id: { in: unchangedIds } },
+            data: { last_seen_at: now },
+          });
+        }
+
+        // 3. Chỉ upsert các file mới hoặc có thay đổi (chạy theo chunk 50)
+        if (filesToUpsert.length > 0) {
+          const batches = chunk(filesToUpsert, 50);
+          for (const batch of batches) {
+            await Promise.all(
+              batch.map((file) => {
+                const id = file.id || '';
+                return this.prisma.driveFile.upsert({
+                  where: { id },
+                  update: {
+                    name: file.name || 'Untitled',
+                    last_seen_at: now,
+                    webViewLink: file.webViewLink || null,
+                    webContentLink: file.webContentLink || null,
+                    mimeType: file.mimeType || null,
+                    size: file.size || null,
+                    drive_permission: true,
+                  },
+                  create: {
+                    id,
+                    raw: JSON.stringify(file),
+                    name: file.name || 'Untitled',
+                    mimeType: file.mimeType || null,
+                    last_seen_at: now,
+                    webViewLink: file.webViewLink || null,
+                    webContentLink: file.webContentLink || null,
+                    size: file.size || null,
+                    drive_permission: true,
+                  },
+                });
+              }),
+            );
+          }
         }
       }
 
@@ -587,36 +656,131 @@ export class LarkSyncService {
     const toCreate = validRecords.filter((r) => !existingIds.has(String(r.id)));
     const toUpdate = validRecords.filter((r) => existingIds.has(String(r.id)));
 
-    await this.prisma.$transaction(
-      async (tx) => {
-        if (toCreate.length > 0) {
-          await tx.larkRecord.createMany({
-            data: toCreate as any[],
-            skipDuplicates: true,
-          });
-        }
+    // 1. Thực hiện CreateMany trực tiếp cho LarkRecord
+    if (toCreate.length > 0) {
+      await this.prisma.larkRecord.createMany({
+        data: toCreate as any[],
+        skipDuplicates: true,
+      });
+    }
 
-        if (uniqueDriveIds.length > 0) {
-          const driveData = uniqueDriveIds.map((id) => ({
-            id,
-            name: 'Pending Sync...',
-            raw: '{}',
-            drive_permission: false,
-          }));
+    // 2. Thực hiện CreateMany trực tiếp cho DriveFile
+    if (uniqueDriveIds.length > 0) {
+      const driveData = uniqueDriveIds.map((id) => ({
+        id,
+        name: 'Pending Sync...',
+        raw: '{}',
+        drive_permission: false,
+      }));
 
-          await tx.driveFile.createMany({
-            data: driveData as any[],
-            skipDuplicates: true,
-          });
-        }
-        for (const r of toUpdate) {
-          await tx.larkRecord.update({
-            where: { id: String(r.id) },
-            data: r,
-          });
-        }
+      await this.prisma.driveFile.createMany({
+        data: driveData as any[],
+        skipDuplicates: true,
+      });
+    }
+
+    // 3. Cập nhật các LarkRecord cũ song song theo cụm 50 để tránh quá tải
+    if (toUpdate.length > 0) {
+      const batches = chunk(toUpdate, 50);
+      for (const batch of batches) {
+        await Promise.all(
+          batch.map((r) =>
+            this.prisma.larkRecord.update({
+              where: { id: String(r.id) },
+              data: r,
+            }),
+          ),
+        );
+      }
+    }
+  }
+
+  async checkOnlyMetaUploadStatus() {
+    this.logger.log('🔍 [TEST] Starting upload status check only...');
+
+    // Lấy tất cả records chưa có creative_asset_id
+    const records = await this.prisma.larkRecord.findMany({
+      where: {
+        creative_asset_id: null,
+        project_name: { not: null },
+        brand_name: { not: null },
+        product_code: { not: null },
       },
-      { timeout: 30000 },
-    );
+      select: {
+        id: true,
+        drive_url: true,
+        project_name: true,
+        brand_name: true,
+        product_code: true,
+        drive_id: true,
+        creative_asset_id: true,
+      },
+    });
+
+    this.logger.log(`Found ${records.length} Lark records without creative_asset_id to check.`);
+    let matchedCount = 0;
+
+    const batches = chunk(records, 100);
+    for (const batch of batches) {
+      await Promise.all(
+        batch.map(async (record) => {
+          let driveId = record.drive_id;
+          if (!driveId) {
+            const extractDriveId = (url?: string | null): string | null => {
+              if (!url) return null;
+              const match =
+                url.match(/\/d\/([a-zA-Z0-9_-]+)/) ||
+                url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+              return match ? match[1] : null;
+            };
+            driveId = extractDriveId(record.drive_url);
+          }
+
+          let targetName = null;
+          if (driveId) {
+            const dbFile = await this.prisma.driveFile.findUnique({
+              where: { id: driveId },
+              select: { name: true },
+            });
+            targetName = dbFile?.name;
+          }
+          if (!targetName) {
+            targetName = record.project_name;
+          }
+
+          const extIndex = targetName.lastIndexOf('.');
+          const targetNameWithoutExt = extIndex > 0 ? targetName.substring(0, extIndex) : targetName;
+
+          const asset = await this.prisma.creativeAsset.findFirst({
+            where: {
+              OR: [
+                { name: { equals: targetName, mode: 'insensitive' } },
+                { name: { equals: targetNameWithoutExt, mode: 'insensitive' } },
+                { name: { startsWith: targetNameWithoutExt, mode: 'insensitive' } },
+              ],
+              folder: {
+                name: { equals: record.product_code!, mode: 'insensitive' },
+                parent: {
+                  name: { equals: record.brand_name!, mode: 'insensitive' },
+                  parent: {
+                    name: { equals: record.project_name!, mode: 'insensitive' },
+                  },
+                },
+              },
+            },
+          });
+
+          if (asset) {
+            await this.prisma.larkRecord.update({
+              where: { id: record.id },
+              data: { creative_asset_id: asset.id },
+            });
+            matchedCount++;
+          }
+        }),
+      );
+    }
+
+    this.logger.log(`🔍 [TEST] Upload status check done. Matched and linked: ${matchedCount} items.`);
   }
 }

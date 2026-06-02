@@ -77,7 +77,7 @@ function summarizeAsset(asset: any) {
     video_id: asset.video_id,
     imageHash: asset.imageHash,
     creation_time: asset.creation_time,
-    employee_id: asset.larkRecord?.employee_id,
+    employee_id: asset.larkRecords?.[0]?.employee_id,
   };
 }
 
@@ -423,7 +423,7 @@ export class DraftAutomationScheduler {
 
     const assets = await this.prisma.creativeAsset.findMany({
       where: { id: { in: uniqueIds } },
-      include: { larkRecord: true },
+      include: { larkRecords: true },
     });
     const assetById = new Map(assets.map((asset) => [asset.id, asset]));
     return uniqueIds.map((id) => assetById.get(id)).filter(Boolean);
