@@ -10,7 +10,6 @@ import {
   AD_FIELDS,
   ADSET_FIELDS,
   CAMPAIGN_FIELDS,
-  CREATIVE_FIELDS,
 } from '../../common/utils/meta-field';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -744,6 +743,7 @@ export class DraftAutomationMetaPublisherService {
       );
     }
 
+    this.stripDisabledPromotionalMetadataForMeta(creativeData);
     this.normalizeCreativeMediaForMeta(creativeData);
     if (isCatalogProductCreative) {
       this.normalizeCatalogCreativeForMeta(
@@ -795,12 +795,23 @@ export class DraftAutomationMetaPublisherService {
     return CleanObjectOrArray(creativeData) || {};
   }
 
+  private stripDisabledPromotionalMetadataForMeta(creativeData: any) {
+    if (creativeData?.promotional_metadata?.enabled === false) {
+      delete creativeData.promotional_metadata;
+    }
+
+    const assetFeedPromo = creativeData?.asset_feed_spec?.promotional_metadata;
+    if (assetFeedPromo?.enabled === false) {
+      delete creativeData.asset_feed_spec.promotional_metadata;
+    }
+  }
+
   private async createAdCreativeWithOptionalDestinationFallback(
     adAccount: AdAccount,
     creativeData: any,
   ) {
     try {
-      return await adAccount.createAdCreative(CREATIVE_FIELDS, creativeData);
+      return await adAccount.createAdCreative(['id'], creativeData);
     } catch (error) {
       const fallbackCreativeData = this.clone(creativeData);
       const didStrip =
@@ -813,7 +824,7 @@ export class DraftAutomationMetaPublisherService {
       this.logger.warn(
         'Meta rejected optional personalized destination fields. Retrying creative creation without them.',
       );
-      return adAccount.createAdCreative(CREATIVE_FIELDS, fallbackCreativeData);
+      return adAccount.createAdCreative(['id'], fallbackCreativeData);
     }
   }
 
@@ -1034,22 +1045,41 @@ export class DraftAutomationMetaPublisherService {
     if (!Array.isArray(assetVideos)) return;
 
     for (const video of assetVideos) {
+      video.video_id = video.video_id || video.videoId || video.id;
       video.thumbnail_url =
         video.thumbnail_url ||
         video.image_url ||
         video.preview_url ||
+        video.previewUrl ||
+        video.thumbnail ||
         undefined;
 
-      if (video.image_id) {
-        video.thumbnail_hash = video.image_id;
-        delete video.image_id;
+      const thumbnailHash =
+        video.thumbnail_hash ||
+        video.image_id ||
+        video.imageHash ||
+        video.image_hash ||
+        video.selected_thumbnail_id;
+      if (thumbnailHash) {
+        video.thumbnail_hash = thumbnailHash;
       }
 
+      delete video.id;
+      delete video.name;
+      delete video.url;
+      delete video.videoId;
+      delete video.imageHash;
+      delete video.image_hash;
+      delete video.image_id;
       delete video.image_url;
+      delete video.thumbnail;
       delete video.preview_url;
+      delete video.previewUrl;
+      delete video.video_thumbnails;
       delete video.list_thumbnails;
       delete video.selected_thumbnail_id;
       delete video.source;
+      delete video.video_source;
     }
   }
 
