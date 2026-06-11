@@ -221,7 +221,7 @@ Scheduler (@Cron) → Bull Queue → Processor → Service
 | Cron | Mô tả |
 |---|---|
 | `5 19,20,21 * * *` | Sync ad images (buổi tối) |
-| `5 20,21,22 * * *` | Sync ad videos (buổi tối) |
+| `5 20,21,22 * * *` | Sync ad videos (buổi tối - đồng bộ đầy đủ các trường source, title, length, createdTime, thumbnails, rawPayload) |
 | `0 0 * * *` | Recalculate URL expiry dates |
 
 #### lark-sync (Lark ↔ Google Drive)

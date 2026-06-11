@@ -11,7 +11,10 @@ import {
   sleep,
   toPrismaJson,
 } from '../../common/utils';
-import { AD_IMAGE_FIELDS } from '../../common/utils/meta-field';
+import {
+  AD_IMAGE_FIELDS,
+  AD_VIDEO_FIELDS,
+} from '../../common/utils/meta-field';
 import { MetaApiService } from '../meta-api/meta-api.service';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -67,7 +70,7 @@ export class MetaMediaSyncService {
           const adAccount = new AdAccount(accountId);
           const cursor = await executeMetaApiWithRetry(
             () =>
-              adAccount.getAdVideos(['source', 'thumbnails'], {
+              adAccount.getAdVideos(AD_VIDEO_FIELDS, {
                 filtering: [{ field: 'id', operator: 'IN', value: videoIds }],
                 limit: 50,
               }),
@@ -94,15 +97,23 @@ export class MetaMediaSyncService {
           // Cập nhật các video thành công
           const updatePromises = videos.map(async (videoData) => {
             try {
-              const thumbnail = videoData.thumbnails?.data?.find(
-                (th: any) => !!th?.is_preferred,
-              )?.uri;
+              const thumbnail =
+                videoData.thumbnails?.data?.find(
+                  (th: any) => !!th?.is_preferred,
+                )?.uri || videoData.picture;
 
               await this.prisma.adVideo.update({
                 where: { id: videoData.id },
                 data: {
-                  thumbnailUrl: thumbnail,
+                  thumbnailUrl: thumbnail || null,
                   source: videoData.source || null,
+                  title: videoData.title || null,
+                  description: videoData.description || null,
+                  length: videoData.length || null,
+                  createdTime: videoData.created_time
+                    ? new Date(videoData.created_time)
+                    : null,
+                  rawPayload: toPrismaJson(videoData),
                   urlExpiredAt: parseMetaUrlExpireTime([
                     videoData.source,
                     ...(videoData.thumbnails?.data?.map((t: any) => t.uri) ||
@@ -123,7 +134,7 @@ export class MetaMediaSyncService {
           });
 
           await Promise.all(updatePromises);
-          await sleep(500);
+          await sleep(5000);
         } catch (err: any) {
           this.logger.error(
             `[syncAdVideo] Error processing Account ${accountId}: ${err.message}`,
