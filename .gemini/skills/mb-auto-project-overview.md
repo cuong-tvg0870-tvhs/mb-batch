@@ -158,8 +158,8 @@
 | **saved-filters** | User-saved table filters |
 | **automation-history** | Automation execution logs |
 
-### API Endpoints (68 endpoints)
-Chính gồm: Auth (1), User (11), Account (5), Campaign (6), AdSet (3), Ad (3), Creatives (2), Draft-Campaigns (16 — bao gồm API chạy thử mô phỏng template automation trực tiếp trên DB), Meta (4), Media (11), Dropdown (7), Insights (3), Dashboard (1), Drive (2), CID (2)
+### API Endpoints (70 endpoints)
+Chính gồm: Auth (1), User (11), Account (5), Campaign (6), AdSet (3), Ad (3), Creatives (2), Draft-Campaigns (17 — bao gồm API chạy thử mô phỏng template automation trực tiếp trên DB, và API POST /draft-campaigns/drafts/bulk-delete để xóa nhanh nhiều bản nháp), Meta (4), Media (12 — đã thêm GET /medias/assets/:id/usage để lấy số bản nháp & publish của image/video), Dropdown (7), Insights (3), Dashboard (1), Drive (2), CID (2)
 
 ### Meta Integration Pattern
 1. **Hai cơ chế auth**: SDK token (`SDK_FACEBOOK_ACCESS_TOKEN`) + Per-user `MetaConnection` (AES-256-GCM encrypted)
@@ -230,15 +230,23 @@ Scheduler (@Cron) → Bull Queue → Processor → Service
 | Mỗi 30 phút | Full pipeline: Fetch Lark records → Sync Drive files → Check permissions → Map assets |
 
 #### draft-automation (Campaign Auto-generation)
-| Cron / Trigger | Mô tả |
+| Cron | Mô tả |
 |---|---|
 | `*/30 * * * *` | Reconcile automation schedules — register/unregister dynamic cron jobs |
+| `0 2 * * *` | Tự động dọn dẹp các bản nháp không cập nhật trong 7 ngày gần nhất |
 | Dynamic (per template) | Select unused assets → Replace placeholders (VIDEO_1, IMAGE_1) → Generate drafts → Optional publish |
-| Immediate / Chạy thử | Endpoint kích hoạt chạy thử ngay lập tức: `POST /draft-automation/trigger/:templateId` |
 
 ---
 
 ## 5. Database Schema (Prisma — 2,537 lines, 65+ models)
+
+### Cơ chế đồng bộ Schema (Schema Syncing)
+Prisma schema có thể được chỉnh sửa bởi AI tại bất kỳ repo nào (`mb-ads`, `mb-batch`, hoặc `mb-database`), nhưng **bắt buộc phải đồng bộ sang 2 repo còn lại ngay sau đó**:
+- **Quy tắc Generator Block**:
+  - File schema tại `mb-database` **phải giữ lại** dòng `output = "../src/generated/prisma"` trong block `generator client`.
+  - File schema tại `mb-ads` và `mb-batch` **phải loại bỏ** dòng `output` này.
+- **Auto Generate Client**: AI cần gọi `npx prisma generate` tại các thư mục đích có sẵn `node_modules` để cập nhật Prisma Client cục bộ.
+- **Ràng buộc Migration**: AI **TUYỆT ĐỐI KHÔNG ĐƯỢC tự ý chạy lệnh migration** (`yarn migration:run`, `npx prisma migrate dev`...). Lệnh này chỉ do USER chạy thủ công.
 
 ### Core Domains
 
@@ -317,9 +325,10 @@ AutomationCategory → AutomationFolder → AutomationRule
 4. **Multi-range Insight Snapshots**: 4 pre-computed snapshots (3D, 7D, MAX, TODAY) per entity
 5. **Birch-style Automation**: Full rule engine với filters, conditions, scheduling, confirmation workflow
 6. **Denormalized Metrics**: Insight data stored trên cả insight records VÀ trực tiếp trên Campaign/AdSet/Ad
-7. **Creative Placeholder Substitution**: Templates dùng VIDEO_1, IMAGE_1 → auto-replace với assets từ folders. Nếu ad creative không được chọn slot trước trong template, hệ thống sẽ tự động gán slot tương ứng (VIDEO_x, IMAGE_x) theo mediaType và số lượng yêu cầu để tự động lấp đầy. Hỗ trợ kích hoạt chạy thử thủ công dưới dạng mô phỏng ngay lập tức trực tiếp trên API backend ("Chạy thử ngay").
+7. **Creative Placeholder Substitution**: Templates dùng VIDEO_1, IMAGE_1 → auto-replace với assets từ folders. Nếu ad creative không được chọn slot trước trong template, hệ thống sẽ tự động gán slot tương ứng (VIDEO_x, IMAGE_x) theo mediaType và số lượng yêu cầu để tự động lấp đầy. Hỗ trợ kích hoạt chạy thử dưới dạng mô phỏng trực tiếp trên API backend, và nếu đủ điều kiện, giao diện sẽ hỏi để cho phép tạo bản nháp chiến dịch ngay lập tức ("Chạy thử ngay"). Khi người dùng kích hoạt tạo bản nháp chạy thật, backend `mb-ads` tự xử lý logic mapping và lưu DB song song trực tiếp (in-process) thay vì gọi HTTP sang `mb-batch`.
 8. **Incremental Sync**: `updated_time` filtering + `lastFetchedAt` tracking per account
 9. **Concurrency Control**: `p-limit(4)` cho parallel Meta API calls
+10. **Creative Asset Mapping during Sync**: Khi đồng bộ dữ liệu chiến dịch từ Meta (trong cả `mb-batch` và `mb-ads`), hệ thống tự động tìm kiếm `CreativeAsset` khớp với `imageHash` hoặc `videoId` của creative và tự động chèn các bản ghi `CreativeAssetMapping`. Đồng thời, các chiến dịch được đồng bộ từ Meta cũng được tự động liên kết ngược lại với `SystemCampaign` tương ứng (qua `systemCampaignId`) bằng cách tìm kiếm theo `meta_id`. Điều này đảm bảo tính năng kiểm tra điều kiện/lọc loại trừ của tự động hóa (automation exclusion check) hoạt động chính xác và không bị chọn lại các ảnh/video đã được sử dụng.
 
 ---
 
@@ -352,7 +361,7 @@ AutomationCategory → AutomationFolder → AutomationRule
 ## 10. Lưu Ý Khi Phát Triển
 
 > [!IMPORTANT]
-> - Schema Prisma được **chia sẻ giữa mb-ads và mb-batch** (cùng database) — thay đổi schema phải sync cả 2 repo
+> - Schema Prisma được **chia sẻ giữa 3 repo (đồng bộ hai chiều)** — AI được sửa ở bất kỳ repo nào nhưng phải đồng bộ thủ công sang các repo còn lại (giữ `output` ở `mb-database`, loại bỏ ở `mb-ads` và `mb-batch`). AI tuyệt đối không chạy lệnh migration.
 > - Meta API tokens được mã hóa AES-256-GCM trong `MetaConnection` — không bao giờ log/expose
 > - Draft campaign builder (`draft-campaign.service.ts` 94KB, `create.tsx` 243KB) là phần phức tạp nhất — cần cẩn thận khi sửa đổi
 > - Tất cả batch jobs chạy timezone `Asia/Ho_Chi_Minh`

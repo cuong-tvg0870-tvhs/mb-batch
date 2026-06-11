@@ -2136,6 +2136,7 @@ enum AutomationCompareType {
   VALUE
   METRIC
   RANKING
+  TIME
 }
 
 model AutomationCategory {
@@ -2188,6 +2189,9 @@ model AutomationRule {
   notifyErrorsOnly    Boolean                 @default(false)
   filterGroupOperator AutomationGroupOperator @default(OR)
   position            Int                     @default(0)
+
+  useAdSetAttributionWindow Boolean @default(true)
+  attributionWindow         String?
 
   categoryId String
   category   AutomationCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)

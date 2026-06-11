@@ -322,9 +322,25 @@ export class MetaSyncService {
       new Map(ads.map((ad) => [ad.id, ad])).values(),
     );
 
-    const campaignData = uniqueCampaigns.map((c) =>
-      MetaTransformHelper.campaign(c, accountId),
+    // Link synced campaigns to system campaigns by meta_id
+    const systemCampaigns = uniqueCampaigns.length
+      ? await this.prisma.systemCampaign.findMany({
+          where: { meta_id: { in: uniqueCampaigns.map((c) => c.id) } },
+          select: { id: true, meta_id: true },
+        })
+      : [];
+    const systemCampaignMap = new Map(
+      systemCampaigns.map((sc) => [sc.meta_id, sc.id]),
     );
+
+    const campaignData = uniqueCampaigns.map((c) => {
+      const mapped = MetaTransformHelper.campaign(c, accountId);
+      const systemCampaignId = systemCampaignMap.get(c.id);
+      if (systemCampaignId) {
+        mapped.systemCampaignId = systemCampaignId;
+      }
+      return mapped;
+    });
     const adsetData = uniqueAdSets.map((as) =>
       MetaTransformHelper.adset(as, accountId, as.campaign_id),
     );
@@ -430,5 +446,62 @@ export class MetaSyncService {
     await prismaHelper.updateManyById(adChanges.updates, (item) =>
       this.prisma.ad.update({ where: { id: item.id }, data: item }),
     );
+
+    // Auto-map synced creatives with CreativeAssets (by hash or videoId)
+    const creativesToMap = uniqueCreatives.filter(
+      (c) => c.imageHash || c.videoId,
+    );
+    if (creativesToMap.length > 0) {
+      const imageHashesToFind = creativesToMap
+        .map((c) => c.imageHash)
+        .filter(Boolean) as string[];
+      const videoIdsToFind = creativesToMap
+        .map((c) => c.videoId)
+        .filter(Boolean) as string[];
+
+      const matchedAssets = await this.prisma.creativeAsset.findMany({
+        where: {
+          OR: [
+            imageHashesToFind.length > 0
+              ? { imageHash: { in: imageHashesToFind } }
+              : undefined,
+            videoIdsToFind.length > 0
+              ? { video_id: { in: videoIdsToFind } }
+              : undefined,
+          ].filter(Boolean) as any,
+        },
+        select: { id: true, imageHash: true, video_id: true },
+      });
+
+      if (matchedAssets.length > 0) {
+        const mappingData: Array<{ creativeId: string; creativeAssetId: string }> = [];
+
+        for (const creative of creativesToMap) {
+          for (const asset of matchedAssets) {
+            let isMatch = false;
+            if (creative.imageHash && asset.imageHash === creative.imageHash) {
+              isMatch = true;
+            }
+            if (creative.videoId && asset.video_id === creative.videoId) {
+              isMatch = true;
+            }
+
+            if (isMatch) {
+              mappingData.push({
+                creativeId: creative.id,
+                creativeAssetId: asset.id,
+              });
+            }
+          }
+        }
+
+        if (mappingData.length > 0) {
+          await this.prisma.creativeAssetMapping.createMany({
+            data: mappingData,
+            skipDuplicates: true,
+          });
+        }
+      }
+    }
   }
 }

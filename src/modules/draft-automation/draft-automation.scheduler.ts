@@ -132,6 +132,43 @@ function getVideoThumbnailUrl(video: any) {
   );
 }
 
+function inferMediaType(creative: any): string {
+  if (!creative) return 'NONE';
+  if (creative.mediaType) {
+    return String(creative.mediaType).toUpperCase();
+  }
+
+  const spec = creative.object_story_spec || {};
+
+  // Carousel check
+  if (
+    spec.link_data?.child_attachments?.length > 0 ||
+    creative.carouselCards?.length > 0
+  ) {
+    return 'CAROUSEL';
+  }
+
+  // Video check
+  if (
+    spec.video_data?.video_id ||
+    creative.videoId ||
+    creative.video_id
+  ) {
+    return 'VIDEO';
+  }
+
+  // Image check
+  if (
+    spec.link_data?.image_hash ||
+    creative.imageHash ||
+    creative.image_hash
+  ) {
+    return 'IMAGE';
+  }
+
+  return 'NONE';
+}
+
 function enrichVideoPlaceholderObject(obj: any, video: any) {
   const thumbnailId = getVideoThumbnailId(video);
   const thumbnailUrl = getVideoThumbnailUrl(video);
@@ -139,51 +176,52 @@ function enrichVideoPlaceholderObject(obj: any, video: any) {
 
   const enriched = {
     ...obj,
-    placeholder: undefined,
   };
+  delete enriched.placeholder;
 
-  if ('videoId' in enriched || !('video_id' in enriched)) {
-    enriched.videoId = enriched.videoId || video.video_id;
-  }
-  if ('video_id' in enriched) {
-    enriched.video_id = enriched.video_id || video.video_id;
-  }
-  if ('source' in enriched) {
-    enriched.source = enriched.source || video.video_source;
-  }
-  if ('video_source' in enriched) {
-    enriched.video_source = enriched.video_source || video.video_source;
-  }
-  if ('previewUrl' in enriched || thumbnailUrl) {
-    enriched.previewUrl = enriched.previewUrl || thumbnailUrl;
-  }
-  if ('thumbnail' in enriched || thumbnailUrl) {
-    enriched.thumbnail = enriched.thumbnail || thumbnailUrl;
-  }
-  if ('image_url' in enriched || thumbnailUrl) {
-    enriched.image_url = enriched.image_url || thumbnailUrl;
-  }
-  if ('selected_thumbnail_id' in enriched || thumbnailId) {
-    enriched.selected_thumbnail_id =
-      enriched.selected_thumbnail_id || thumbnailId;
-  }
-  if ('imageHash' in enriched || thumbnailId) {
-    enriched.imageHash = enriched.imageHash || thumbnailId;
-  }
-  if ('image_hash' in enriched || thumbnailId) {
-    enriched.image_hash = enriched.image_hash || thumbnailId;
-  }
-  if ('image_id' in enriched || thumbnailId) {
-    enriched.image_id = enriched.image_id || thumbnailId;
-  }
-  if (thumbnails && !enriched.list_thumbnails) {
+  enriched.videoId = video.video_id;
+  enriched.video_id = video.video_id;
+  enriched.source = video.video_source;
+  enriched.video_source = video.video_source;
+  enriched.previewUrl = thumbnailUrl;
+  enriched.thumbnail = thumbnailUrl;
+  enriched.image_url = thumbnailUrl;
+  enriched.selected_thumbnail_id = thumbnailId;
+  enriched.imageHash = thumbnailId;
+  enriched.image_hash = thumbnailId;
+  enriched.image_id = thumbnailId;
+
+  if (thumbnails) {
     enriched.list_thumbnails = thumbnails;
-  }
-  if (thumbnails && !enriched.video_thumbnails) {
     enriched.video_thumbnails = thumbnails;
   }
 
+  if (enriched.object_story_spec?.video_data) {
+    enriched.object_story_spec.video_data.video_id = video.video_id;
+    enriched.object_story_spec.video_data.image_id = thumbnailId;
+    enriched.object_story_spec.video_data.image_hash = thumbnailId;
+  }
+
+  return enriched;
+}
+
+function enrichImagePlaceholderObject(obj: any, img: any) {
+  const enriched = {
+    ...obj,
+  };
   delete enriched.placeholder;
+
+  const url = img.imageUrl || img.thumbnail;
+  enriched.imageHash = img.imageHash;
+  enriched.image_hash = img.imageHash;
+  enriched.previewUrl = url;
+  enriched.thumbnail = url;
+  enriched.image_url = url;
+
+  if (enriched.object_story_spec?.link_data) {
+    enriched.object_story_spec.link_data.image_hash = img.imageHash;
+  }
+
   return enriched;
 }
 
@@ -280,7 +318,8 @@ function replacePlaceholders(obj: any, videos: any[], images: any[]): any {
       }
       newObj[key] = replacePlaceholders(val, videos, images);
     }
-    if (matchedVideo || obj.placeholder) {
+    const finalMediaType = inferMediaType(newObj);
+    if (matchedVideo || (obj.placeholder && finalMediaType === 'VIDEO')) {
       const video =
         matchedVideo ||
         videos.find(
@@ -293,8 +332,18 @@ function replacePlaceholders(obj: any, videos: any[], images: any[]): any {
         return enrichVideoPlaceholderObject(newObj, video);
       }
     }
-    if (matchedImage) {
-      delete newObj.placeholder;
+    if (matchedImage || (obj.placeholder && finalMediaType === 'IMAGE')) {
+      const img =
+        matchedImage ||
+        images.find(
+          (item) =>
+            item.imageHash === newObj.imageHash ||
+            item.image_hash === newObj.image_hash ||
+            item.id === newObj.id,
+        );
+      if (img) {
+        return enrichImagePlaceholderObject(newObj, img);
+      }
     }
     return newObj;
   }
@@ -578,32 +627,58 @@ export class DraftAutomationScheduler {
     const autoAssignCreativeSlots = (creative: any) => {
       if (!creative) return;
 
-      const mediaType = creative.mediaType;
+      const mediaType = inferMediaType(creative);
+      const spec = creative.object_story_spec || {};
 
       if (mediaType === 'VIDEO') {
-        const hasVideoSlot = isSlotPlaceholder(creative.videoId || creative.video_id);
+        const hasVideoSlot = isSlotPlaceholder(
+          creative.videoId ||
+          creative.video_id ||
+          spec.video_data?.video_id
+        );
         if (!hasVideoSlot) {
           const slot = getNextVideoSlot();
           if (slot) {
-            if ('videoId' in creative) creative.videoId = slot;
-            if ('video_id' in creative) creative.video_id = slot;
-            if ('imageHash' in creative) creative.imageHash = slot;
-            if ('image_hash' in creative) creative.image_hash = slot;
-            if ('selected_thumbnail_id' in creative) creative.selected_thumbnail_id = slot;
+            // Clean format
+            creative.videoId = slot;
+            creative.video_id = slot;
+            creative.imageHash = slot;
+            creative.image_hash = slot;
+            creative.selected_thumbnail_id = slot;
+
+            // Raw Meta spec format support
+            if (spec.video_data) {
+              spec.video_data.video_id = slot;
+              spec.video_data.image_id = slot;
+              spec.video_data.image_hash = slot;
+            }
+
             creative.placeholder = true;
           }
         }
       } else if (mediaType === 'IMAGE') {
-        const hasImageSlot = isSlotPlaceholder(creative.imageHash || creative.image_hash);
+        const hasImageSlot = isSlotPlaceholder(
+          creative.imageHash ||
+          creative.image_hash ||
+          spec.link_data?.image_hash
+        );
         if (!hasImageSlot) {
           const slot = getNextImageSlot();
           if (slot) {
-            if ('imageHash' in creative) creative.imageHash = slot;
-            if ('image_hash' in creative) creative.image_hash = slot;
+            // Clean format
+            creative.imageHash = slot;
+            creative.image_hash = slot;
+
+            // Raw Meta spec format support
+            if (spec.link_data) {
+              spec.link_data.image_hash = slot;
+            }
+
             creative.placeholder = true;
           }
         }
       } else if (mediaType === 'CAROUSEL') {
+        // Clean format cards
         if (Array.isArray(creative.carouselCards)) {
           for (const card of creative.carouselCards) {
             const cardType = String(card.mediaType).toUpperCase();
@@ -630,30 +705,63 @@ export class DraftAutomationScheduler {
             }
           }
         }
+
+        // Raw Meta format attachments
+        if (Array.isArray(spec.link_data?.child_attachments)) {
+          for (const attachment of spec.link_data.child_attachments) {
+            if (attachment.video_id || attachment.videoId) {
+              const hasVideoSlot = isSlotPlaceholder(attachment.video_id || attachment.videoId);
+              if (!hasVideoSlot) {
+                const slot = getNextVideoSlot();
+                if (slot) {
+                  attachment.video_id = slot;
+                  attachment.videoId = slot;
+                  attachment.image_hash = slot;
+                  attachment.imageHash = slot;
+                  attachment.placeholder = true;
+                }
+              }
+            } else {
+              const hasImageSlot = isSlotPlaceholder(attachment.image_hash || attachment.imageHash);
+              if (!hasImageSlot) {
+                const slot = getNextImageSlot();
+                if (slot) {
+                  attachment.image_hash = slot;
+                  attachment.imageHash = slot;
+                  attachment.placeholder = true;
+                }
+              }
+            }
+          }
+        }
       }
 
       if (Array.isArray(creative.dynamicAssets)) {
         for (const asset of creative.dynamicAssets) {
           const assetType = String(asset.type).toUpperCase();
           if (assetType === 'VIDEO') {
-            const hasVideoSlot = isSlotPlaceholder(asset.videoId || asset.video_id);
+            const hasVideoSlot = isSlotPlaceholder(
+              asset.videoId || asset.video_id,
+            );
             if (!hasVideoSlot) {
               const slot = getNextVideoSlot();
               if (slot) {
-                if ('videoId' in asset) asset.videoId = slot;
-                if ('video_id' in asset) asset.video_id = slot;
-                if ('imageHash' in asset) asset.imageHash = slot;
-                if ('image_hash' in asset) asset.image_hash = slot;
+                asset.videoId = slot;
+                asset.video_id = slot;
+                asset.imageHash = slot;
+                asset.image_hash = slot;
                 asset.placeholder = true;
               }
             }
           } else if (assetType === 'IMAGE') {
-            const hasImageSlot = isSlotPlaceholder(asset.imageHash || asset.image_hash);
+            const hasImageSlot = isSlotPlaceholder(
+              asset.imageHash || asset.image_hash,
+            );
             if (!hasImageSlot) {
               const slot = getNextImageSlot();
               if (slot) {
-                if ('imageHash' in asset) asset.imageHash = slot;
-                if ('image_hash' in asset) asset.image_hash = slot;
+                asset.imageHash = slot;
+                asset.image_hash = slot;
                 asset.placeholder = true;
               }
             }
@@ -1069,8 +1177,74 @@ export class DraftAutomationScheduler {
           (a) => a.type === AssetType.IMAGE,
         );
 
-        const requiredVideos = Number(automation.videoCount) || 0;
-        const requiredImages = Number(automation.imageCount) || 0;
+        let requiredVideos = Number(automation.videoCount) || 0;
+        let requiredImages = Number(automation.imageCount) || 0;
+
+        // Count actual video and image slots or hardcoded media in the template
+        let templateVideoCount = 0;
+        let templateImageCount = 0;
+
+        const countCreativeAssets = (creative: any) => {
+          if (!creative) return;
+          const mediaType = inferMediaType(creative);
+          const spec = creative.object_story_spec || {};
+
+          if (mediaType === 'VIDEO') {
+            templateVideoCount++;
+          } else if (mediaType === 'IMAGE') {
+            templateImageCount++;
+          } else if (mediaType === 'CAROUSEL') {
+            if (Array.isArray(creative.carouselCards)) {
+              for (const card of creative.carouselCards) {
+                const cardType = String(card.mediaType || '').toUpperCase();
+                if (cardType === 'VIDEO') {
+                  templateVideoCount++;
+                } else {
+                  templateImageCount++;
+                }
+              }
+            }
+            if (Array.isArray(spec.link_data?.child_attachments)) {
+              for (const attachment of spec.link_data.child_attachments) {
+                if (attachment.video_id || attachment.videoId) {
+                  templateVideoCount++;
+                } else {
+                  templateImageCount++;
+                }
+              }
+            }
+          }
+          if (Array.isArray(creative.dynamicAssets)) {
+            for (const asset of creative.dynamicAssets) {
+              const assetType = String(asset.type || asset.mediaType || '').toUpperCase();
+              if (assetType === 'VIDEO') {
+                templateVideoCount++;
+              } else if (assetType === 'IMAGE') {
+                templateImageCount++;
+              }
+            }
+          }
+        };
+
+        const templateData = template.data as any;
+        if (templateData && Array.isArray(templateData.ad_sets)) {
+          for (const adset of templateData.ad_sets) {
+            if (Array.isArray(adset.ads)) {
+              for (const ad of adset.ads) {
+                if (ad.creative) {
+                  countCreativeAssets(ad.creative);
+                }
+              }
+            }
+          }
+        }
+
+        if (requiredVideos < templateVideoCount) {
+          requiredVideos = templateVideoCount;
+        }
+        if (requiredImages < templateImageCount) {
+          requiredImages = templateImageCount;
+        }
         const remainingVideos = Math.max(
           0,
           requiredVideos - existingAssetsByType.videos.length,

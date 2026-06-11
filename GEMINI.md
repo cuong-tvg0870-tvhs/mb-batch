@@ -49,6 +49,15 @@ cp ".gemini/skills/mb-auto-project-overview.md" "/home/thispc/Documents/thanhvin
 cp ".gemini/skills/mb-auto-project-overview.md" "/home/thispc/Documents/thanhvinh/MB Auto/dev/mb-frontend/.gemini/skills/mb-auto-project-overview.md"
 ```
 
+## Quy Tắc Bắt Buộc: Thay Đổi Database Schema (Prisma)
+
+> [!IMPORTANT]
+> - **AI TUYỆT ĐỐI KHÔNG ĐƯỢC chạy lệnh migration (`yarn migration:run`, `npx prisma migrate dev`, ...)**. Việc chạy migration thật sự trên DB sẽ do USER tự thực hiện thủ công.
+> - **Đồng bộ hóa Schema giữa 3 repo (Đồng bộ hai chiều)**: AI được phép sửa đổi `schema.prisma` ở bất kỳ dự án nào (`mb-ads`, `mb-batch`, hoặc `mb-database`), nhưng sau khi sửa, AI **bắt buộc** phải cập nhật đồng thời file schema ở cả 3 repo để chúng đồng bộ:
+>   - File `mb-database/prisma/schema.prisma` **phải có** cấu hình `output = "../src/generated/prisma"` trong block `generator client`.
+>   - File `mb-ads/prisma/schema.prisma` và `mb-batch/prisma/schema.prisma` **không được có** dòng cấu hình `output` này.
+>   - Sau khi đồng bộ file, AI hãy tự động gọi `npx prisma generate` trong các thư mục đích có sẵn `node_modules` để sinh client code mới.
+
 ## Context
 - Đây là **mb-batch** — NestJS 11 Background Worker cho hệ thống MB Auto (Cron Sync & Draft Automation)
 - Đọc `.gemini/skills/mb-auto-project-overview.md` để hiểu toàn bộ dự án
