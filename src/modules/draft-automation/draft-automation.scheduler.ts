@@ -302,6 +302,36 @@ function replacePlaceholders(obj: any, videos: any[], images: any[]): any {
   return obj;
 }
 
+function findExistingSlots(
+  obj: any,
+  usedVideos: Set<number>,
+  usedImages: Set<number>,
+) {
+  if (!obj) return;
+  if (typeof obj === 'string') {
+    const videoMatch = obj.match(/^VIDEO_(\d+)$/);
+    if (videoMatch) {
+      usedVideos.add(parseInt(videoMatch[1], 10));
+    }
+    const imageMatch = obj.match(/^IMAGE_(\d+)$/);
+    if (imageMatch) {
+      usedImages.add(parseInt(imageMatch[1], 10));
+    }
+    return;
+  }
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      findExistingSlots(item, usedVideos, usedImages);
+    }
+    return;
+  }
+  if (typeof obj === 'object') {
+    for (const key of Object.keys(obj)) {
+      findExistingSlots(obj[key], usedVideos, usedImages);
+    }
+  }
+}
+
 @Injectable()
 export class DraftAutomationScheduler {
   private readonly logger = new Logger(DraftAutomationScheduler.name);
@@ -488,7 +518,163 @@ export class DraftAutomationScheduler {
       automation,
     } = input;
     const templateData = template.data as any;
-    const substitutedValues = replacePlaceholders(templateData, videos, images);
+
+    // Deep clone the template campaign data to avoid mutating database/in-memory template object
+    const clonedTemplateData = JSON.parse(JSON.stringify(templateData));
+
+    // Find all explicitly pre-selected slots in the template
+    const usedVideos = new Set<number>();
+    const usedImages = new Set<number>();
+    findExistingSlots(clonedTemplateData, usedVideos, usedImages);
+
+    // Build lists of available slot indexes within the required range
+    const availableVideoIndexes: number[] = [];
+    for (let i = 1; i <= requiredVideos; i++) {
+      if (!usedVideos.has(i)) {
+        availableVideoIndexes.push(i);
+      }
+    }
+
+    const availableImageIndexes: number[] = [];
+    for (let i = 1; i <= requiredImages; i++) {
+      if (!usedImages.has(i)) {
+        availableImageIndexes.push(i);
+      }
+    }
+
+    let nextVideoPtr = 0;
+    const getNextVideoSlot = (): string => {
+      if (requiredVideos <= 0) return '';
+      if (availableVideoIndexes.length > 0) {
+        const idx = availableVideoIndexes[nextVideoPtr % availableVideoIndexes.length];
+        nextVideoPtr++;
+        return `VIDEO_${idx}`;
+      } else {
+        const idx = (nextVideoPtr % requiredVideos) + 1;
+        nextVideoPtr++;
+        return `VIDEO_${idx}`;
+      }
+    };
+
+    let nextImagePtr = 0;
+    const getNextImageSlot = (): string => {
+      if (requiredImages <= 0) return '';
+      if (availableImageIndexes.length > 0) {
+        const idx = availableImageIndexes[nextImagePtr % availableImageIndexes.length];
+        nextImagePtr++;
+        return `IMAGE_${idx}`;
+      } else {
+        const idx = (nextImagePtr % requiredImages) + 1;
+        nextImagePtr++;
+        return `IMAGE_${idx}`;
+      }
+    };
+
+    const isSlotPlaceholder = (val: any): boolean => {
+      if (typeof val !== 'string') return false;
+      return /^VIDEO_\d+$/.test(val) || /^IMAGE_\d+$/.test(val);
+    };
+
+    const autoAssignCreativeSlots = (creative: any) => {
+      if (!creative) return;
+
+      const mediaType = creative.mediaType;
+
+      if (mediaType === 'VIDEO') {
+        const hasVideoSlot = isSlotPlaceholder(creative.videoId || creative.video_id);
+        if (!hasVideoSlot) {
+          const slot = getNextVideoSlot();
+          if (slot) {
+            if ('videoId' in creative) creative.videoId = slot;
+            if ('video_id' in creative) creative.video_id = slot;
+            if ('imageHash' in creative) creative.imageHash = slot;
+            if ('image_hash' in creative) creative.image_hash = slot;
+            if ('selected_thumbnail_id' in creative) creative.selected_thumbnail_id = slot;
+            creative.placeholder = true;
+          }
+        }
+      } else if (mediaType === 'IMAGE') {
+        const hasImageSlot = isSlotPlaceholder(creative.imageHash || creative.image_hash);
+        if (!hasImageSlot) {
+          const slot = getNextImageSlot();
+          if (slot) {
+            if ('imageHash' in creative) creative.imageHash = slot;
+            if ('image_hash' in creative) creative.image_hash = slot;
+            creative.placeholder = true;
+          }
+        }
+      } else if (mediaType === 'CAROUSEL') {
+        if (Array.isArray(creative.carouselCards)) {
+          for (const card of creative.carouselCards) {
+            const cardType = String(card.mediaType).toUpperCase();
+            if (cardType === 'VIDEO') {
+              const hasVideoSlot = isSlotPlaceholder(card.videoId);
+              if (!hasVideoSlot) {
+                const slot = getNextVideoSlot();
+                if (slot) {
+                  card.videoId = slot;
+                  card.imageHash = slot;
+                  card.selected_thumbnail_id = slot;
+                  card.placeholder = true;
+                }
+              }
+            } else {
+              const hasImageSlot = isSlotPlaceholder(card.imageHash);
+              if (!hasImageSlot) {
+                const slot = getNextImageSlot();
+                if (slot) {
+                  card.imageHash = slot;
+                  card.placeholder = true;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (Array.isArray(creative.dynamicAssets)) {
+        for (const asset of creative.dynamicAssets) {
+          const assetType = String(asset.type).toUpperCase();
+          if (assetType === 'VIDEO') {
+            const hasVideoSlot = isSlotPlaceholder(asset.videoId || asset.video_id);
+            if (!hasVideoSlot) {
+              const slot = getNextVideoSlot();
+              if (slot) {
+                if ('videoId' in asset) asset.videoId = slot;
+                if ('video_id' in asset) asset.video_id = slot;
+                if ('imageHash' in asset) asset.imageHash = slot;
+                if ('image_hash' in asset) asset.image_hash = slot;
+                asset.placeholder = true;
+              }
+            }
+          } else if (assetType === 'IMAGE') {
+            const hasImageSlot = isSlotPlaceholder(asset.imageHash || asset.image_hash);
+            if (!hasImageSlot) {
+              const slot = getNextImageSlot();
+              if (slot) {
+                if ('imageHash' in asset) asset.imageHash = slot;
+                if ('image_hash' in asset) asset.image_hash = slot;
+                asset.placeholder = true;
+              }
+            }
+          }
+        }
+      }
+    };
+
+    if (Array.isArray(clonedTemplateData.ad_sets)) {
+      for (const adset of clonedTemplateData.ad_sets) {
+        if (Array.isArray(adset.ads)) {
+          for (const ad of adset.ads) {
+            if (ad.creative) {
+              autoAssignCreativeSlots(ad.creative);
+            }
+          }
+        }
+      }
+    }
+
+    const substitutedValues = replacePlaceholders(clonedTemplateData, videos, images);
 
     const employeeId = creator.employee_id;
     const employeeName = creator.name;

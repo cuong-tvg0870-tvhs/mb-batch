@@ -6,6 +6,7 @@ import { DraftAutomationScheduler } from './draft-automation.scheduler';
 
 @Module({
   imports: [PrismaModule],
+  controllers: [],
   providers: [
     DraftAutomationCronScheduler,
     DraftAutomationScheduler,

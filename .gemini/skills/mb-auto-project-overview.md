@@ -158,8 +158,8 @@
 | **saved-filters** | User-saved table filters |
 | **automation-history** | Automation execution logs |
 
-### API Endpoints (67 endpoints)
-Chính gồm: Auth (1), User (11), Account (5), Campaign (6), AdSet (3), Ad (3), Creatives (2), Draft-Campaigns (15), Meta (4), Media (11), Dropdown (7), Insights (3), Dashboard (1), Drive (2), CID (2)
+### API Endpoints (68 endpoints)
+Chính gồm: Auth (1), User (11), Account (5), Campaign (6), AdSet (3), Ad (3), Creatives (2), Draft-Campaigns (16 — bao gồm API chạy thử mô phỏng template automation trực tiếp trên DB), Meta (4), Media (11), Dropdown (7), Insights (3), Dashboard (1), Drive (2), CID (2)
 
 ### Meta Integration Pattern
 1. **Hai cơ chế auth**: SDK token (`SDK_FACEBOOK_ACCESS_TOKEN`) + Per-user `MetaConnection` (AES-256-GCM encrypted)
@@ -230,10 +230,11 @@ Scheduler (@Cron) → Bull Queue → Processor → Service
 | Mỗi 30 phút | Full pipeline: Fetch Lark records → Sync Drive files → Check permissions → Map assets |
 
 #### draft-automation (Campaign Auto-generation)
-| Cron | Mô tả |
+| Cron / Trigger | Mô tả |
 |---|---|
 | `*/30 * * * *` | Reconcile automation schedules — register/unregister dynamic cron jobs |
 | Dynamic (per template) | Select unused assets → Replace placeholders (VIDEO_1, IMAGE_1) → Generate drafts → Optional publish |
+| Immediate / Chạy thử | Endpoint kích hoạt chạy thử ngay lập tức: `POST /draft-automation/trigger/:templateId` |
 
 ---
 
@@ -316,7 +317,7 @@ AutomationCategory → AutomationFolder → AutomationRule
 4. **Multi-range Insight Snapshots**: 4 pre-computed snapshots (3D, 7D, MAX, TODAY) per entity
 5. **Birch-style Automation**: Full rule engine với filters, conditions, scheduling, confirmation workflow
 6. **Denormalized Metrics**: Insight data stored trên cả insight records VÀ trực tiếp trên Campaign/AdSet/Ad
-7. **Creative Placeholder Substitution**: Templates dùng VIDEO_1, IMAGE_1 → auto-replace với assets từ folders. Nếu ad creative không được chọn slot trước trong template, hệ thống sẽ tự động gán slot tương ứng (VIDEO_x, IMAGE_x) theo mediaType và số lượng yêu cầu để tự động lấp đầy.
+7. **Creative Placeholder Substitution**: Templates dùng VIDEO_1, IMAGE_1 → auto-replace với assets từ folders. Nếu ad creative không được chọn slot trước trong template, hệ thống sẽ tự động gán slot tương ứng (VIDEO_x, IMAGE_x) theo mediaType và số lượng yêu cầu để tự động lấp đầy. Hỗ trợ kích hoạt chạy thử thủ công dưới dạng mô phỏng ngay lập tức trực tiếp trên API backend ("Chạy thử ngay").
 8. **Incremental Sync**: `updated_time` filtering + `lastFetchedAt` tracking per account
 9. **Concurrency Control**: `p-limit(4)` cho parallel Meta API calls
 
