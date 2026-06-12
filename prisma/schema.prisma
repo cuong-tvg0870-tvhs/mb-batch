@@ -154,6 +154,8 @@ model User {
   deletedById String?
 
   activities UserActivity[]
+  contributions          Contribution[] @relation("UserContributions")
+  processedContributions Contribution[] @relation("ProcessedContributions")
 }
 
 model UserActivity {
@@ -2536,5 +2538,40 @@ model MetaConnection {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@index([status])
+}
+
+enum ContributionType {
+  PRAISE
+  CRITICISM
+  SUGGESTION
+}
+
+enum ContributionStatus {
+  PENDING
+  RECEIVED
+  PROCESSED
+  FEEDBACKED
+  REJECTED
+}
+
+model Contribution {
+  id            String             @id @default(uuid())
+  userId        String
+  user          User               @relation("UserContributions", fields: [userId], references: [id], onDelete: Cascade)
+  type          ContributionType
+  title         String
+  content       String             @db.Text
+  attachments   String[]           @default([])
+  status        ContributionStatus @default(PENDING)
+  adminFeedback String?            @db.Text
+  processedById String?
+  processedBy   User?              @relation("ProcessedContributions", fields: [processedById], references: [id], onDelete: SetNull)
+  processedAt   DateTime?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  @@index([userId])
+  @@index([type])
   @@index([status])
 }
