@@ -2567,8 +2567,10 @@ model Contribution {
   adminFeedback String?            @db.Text
   processedById String?
   processedBy   User?              @relation("ProcessedContributions", fields: [processedById], references: [id], onDelete: SetNull)
-  processedAt   DateTime?
-  createdAt     DateTime           @default(now())
+  processedAt         DateTime?
+  expectedProcessedAt DateTime?
+  userFeedback        Json?
+  createdAt           DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
 
   @@index([userId])
