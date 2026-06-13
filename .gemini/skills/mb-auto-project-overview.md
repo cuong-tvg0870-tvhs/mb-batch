@@ -82,6 +82,11 @@
   /settings + /permissions      → Cài đặt & Phân quyền
   /profile                      → Hồ sơ cá nhân
   /feedbacks + [id]             → Đóng góp ý kiến (Khen/Chê/Đề xuất) & chi tiết đóng góp
+  /insights                     → Quản trị Insight (ADMIN)
+    /campaigns + [id]           → Campaign Insight
+    /ad-sets + [id]             → Adset Insight
+    /ads + [id]                 → Ad Insight
+    /creatives + [id]           → Creative Insight
 ```
 
 ### Zustand Stores
@@ -127,7 +132,7 @@
 | **adsets** | — | Ad Set management |
 | **ads** | — | Ad management |
 | **creatives** | — | Creative management |
-| **insights** | — | Performance analytics |
+| **insights** | — | Performance analytics + Admin Insights raw data endpoints |
 | **dashboard** | — | Dashboard aggregation |
 
 #### Campaign Builder
@@ -160,8 +165,8 @@
 | **automation-history** | Automation execution logs |
 | **contributions** | Ghi nhận & xử lý đóng góp ý kiến (Khen/Chê/Đề xuất) |
 
-### API Endpoints (75 endpoints)
-Chính gồm: Auth (1), User (11), Contributions (7), Account (5), Campaign (6), AdSet (3), Ad (3), Creatives (2), Draft-Campaigns (17 — bao gồm API chạy thử mô phỏng template automation trực tiếp trên DB, và API POST /draft-campaigns/drafts/bulk-delete để xóa nhanh nhiều bản nháp), Meta (4), Media (12 — đã thêm GET /medias/assets/:id/usage để lấy số bản nháp & publish của image/video), Dropdown (7), Insights (3), Dashboard (1), Drive (2), CID (2)
+### API Endpoints (83 endpoints)
+Chính gồm: Auth (1), User (11), Contributions (7), Account (5), Campaign (6), AdSet (3), Ad (3), Creatives (2), Draft-Campaigns (17 — bao gồm API chạy thử mô mỏng template automation trực tiếp trên DB, và API POST /draft-campaigns/drafts/bulk-delete để xóa nhanh nhiều bản nháp), Meta (4), Media (12 — đã thêm GET /medias/assets/:id/usage để lấy số bản nháp & publish của image/video), Dropdown (7), Insights (3 + 8 Admin endpoints), Dashboard (1), Drive (2), CID (2)
 
 ### Meta Integration Pattern
 1. **Hai cơ chế auth**: SDK token (`SDK_FACEBOOK_ACCESS_TOKEN`) + Per-user `MetaConnection` (AES-256-GCM encrypted)
