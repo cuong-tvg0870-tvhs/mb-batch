@@ -43,12 +43,24 @@ export function isRetryableError(e: any) {
   // Transient/Server codes: 1 (API Unknown), 2 (API Service)
   const retryableCodes = [1, 2, 4, 17, 32, 613, 80004];
 
+  const message = (err?.message || e?.message || '').toLowerCase();
+  const isNetworkError =
+    message.includes('no response was received') ||
+    message.includes('timeout') ||
+    message.includes('network error') ||
+    message.includes('enotfound') ||
+    message.includes('econnreset') ||
+    message.includes('etimedout') ||
+    message.includes('econnaborted') ||
+    message.includes('socket hang up');
+
   return (
     retryableCodes.includes(err?.code) ||
     err?.is_transient === true ||
     err?.error_subcode === 2446079 ||
-    err?.message?.includes('reduce the amount of data') ||
-    err?.message?.includes('unexpected error')
+    message.includes('reduce the amount of data') ||
+    message.includes('unexpected error') ||
+    isNetworkError
   );
 }
 
@@ -166,8 +178,11 @@ export async function executeMetaApiWithRetry<T>(
       if (isRetryableError(error) && retry < maxRetries) {
         retry++;
         const sleepTime = initialSleepMs * retry;
+        const errMsg = error?.response?.code
+          ? `Code: ${error.response.code}`
+          : `Msg: ${error?.message || String(error)}`;
         options?.logger?.warn?.(
-          `[Meta API Error] Error hit (Code: ${error?.response?.code}). Retrying ${retry}/${maxRetries} after ${Math.round(sleepTime / 1000)}s...`,
+          `[Meta API Error] Error hit (${errMsg}). Retrying ${retry}/${maxRetries} after ${Math.round(sleepTime / 1000)}s...`,
         );
         await sleep(sleepTime);
       } else {
