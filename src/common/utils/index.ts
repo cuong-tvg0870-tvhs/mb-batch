@@ -499,24 +499,40 @@ export function extractCampaignMetrics(insight: any) {
   const clicks = toNumber(insight?.clicks);
   const spend = toNumber(insight?.spend);
 
+  // ===== EXTRA ACTIONS (MATCH GAS) =====
+  const registrationComplete =
+    getActionValue(insight?.actions, 'complete_registration') +
+    getActionValue(
+      insight?.actions,
+      'offsite_conversion.complete_registration',
+    );
+
+  const registrationCompleteValue =
+    getActionValueFromValues(insight?.action_values, 'complete_registration') +
+    getActionValueFromValues(
+      insight?.action_values,
+      'offsite_conversion.complete_registration',
+    );
+
   // ===== PURCHASE (COUNT) =====
-  const purchases = getActionValue(
-    insight?.actions,
-    'onsite_conversion.purchase',
-  );
+  const purchases =
+    getActionValue(insight?.actions, 'purchase') +
+    getActionValue(insight?.actions, 'onsite_conversion.purchase');
 
   // ===== PURCHASE VALUE (MONEY – đã quy đổi ở tầng fetch) =====
-  const purchaseValue = getActionValueFromValues(
-    insight?.action_values,
-    'onsite_conversion.purchase',
-  );
+  const purchaseValue =
+    getActionValueFromValues(insight?.action_values, 'purchase') +
+    getActionValueFromValues(
+      insight?.action_values,
+      'onsite_conversion.purchase',
+    );
 
   // ===== ROAS (❗ CHUẨN CỦA CTY) =====
   const roasCalculated = spend > 0 ? purchaseValue / spend : 0;
   const roas = roasCalculated;
 
   // ===== DERIVED =====
-  const cvr = clicks > 0 ? purchases / clicks : 0;
+  const cvr = clicks > 0 ? registrationComplete / clicks : 0;
 
   const adsCostRatio = roas > 0 ? 1 / roas : 0;
 
@@ -539,20 +555,6 @@ export function extractCampaignMetrics(insight: any) {
 
   const holdRate = video3s > 0 ? +((video100 / video3s) * 100).toFixed(2) : 0;
 
-  // ===== EXTRA ACTIONS (MATCH GAS) =====
-  const registrationComplete =
-    getActionValue(insight?.actions, 'complete_registration') +
-    getActionValue(
-      insight?.actions,
-      'offsite_conversion.complete_registration',
-    );
-
-  const registrationCompleteValue =
-    getActionValueFromValues(insight?.action_values, 'complete_registration') +
-    getActionValueFromValues(
-      insight?.action_values,
-      'offsite_conversion.complete_registration',
-    );
   const resultsFinal = Math.round(
     Number(purchases) + Number(registrationComplete),
   );

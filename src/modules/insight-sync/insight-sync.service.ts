@@ -518,7 +518,7 @@ export class InsightSyncService {
         target.cpc = clicks > 0 ? spend / clicks : 0;
         target.cpm = impressions > 0 ? (spend / impressions) * 1000 : 0;
         target.roas = spend > 0 ? purchaseValue / spend : 0;
-        target.cvr = clicks > 0 ? purchases / clicks : 0;
+        target.cvr = clicks > 0 ? registrationComplete / clicks : 0;
         target.costPerResult = results > 0 ? spend / results : 0;
         target.aov = results > 0 ? purchaseValue / results : 0;
         target.adsCostRatio = target.roas > 0 ? 1 / target.roas : 0;
