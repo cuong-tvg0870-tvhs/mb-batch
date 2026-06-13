@@ -1,39 +1,29 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { CreativeStatus, InsightRange, LevelInsight, Prisma } from '@prisma/client';
+import { Injectable, Logger } from '@nestjs/common';
+import {
+  CreativeStatus,
+  InsightRange,
+  LevelInsight,
+  Prisma,
+} from '@prisma/client';
 import dayjs from 'dayjs';
 import { PrismaBatchHelper } from '../../common/helpers/prisma-batch.helper';
-import { chunk, extractCampaignMetrics } from '../../common/utils';
+import {
+  chunk,
+  executeDbWithRetry,
+  extractCampaignMetrics,
+} from '../../common/utils';
 import { MetaApiService } from '../meta-api/meta-api.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { InsightSyncLevel, InsightSyncRange } from './insight-sync.constants';
 
 @Injectable()
-export class InsightSyncService implements OnModuleInit {
+export class InsightSyncService {
   private readonly logger = new Logger(InsightSyncService.name);
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly metaApi: MetaApiService,
   ) {}
-
-  async onModuleInit() {
-    if (process.env.INSIGHT_AGGREGATE_ON_BOOT !== 'true') return;
-
-    setTimeout(async () => {
-      try {
-        const accounts = await this.prisma.account.findMany({
-          where: { needsReauth: false, accountType: 'AD_ACCOUNT' as any },
-          select: { id: true },
-        });
-        for (const account of accounts) {
-          await this.aggregateCreativeInsights(account.id);
-        }
-        this.logger.log('✅ Triggered boot aggregation successfully.');
-      } catch (err: any) {
-        this.logger.error(`Failed to trigger boot aggregation: ${err.message}`);
-      }
-    }, 5000);
-  }
 
   /**
    * Main entry point for syncing insights for one account
@@ -101,6 +91,7 @@ export class InsightSyncService implements OnModuleInit {
 
       // 2. Fetch from Meta in chunks to avoid filter limits
       const allInsights: any[] = [];
+      const allDailyInsights: any[] = [];
 
       // Dynamic chunk size to avoid "Too many rows" error from Meta
       let chunkSize = 300;
@@ -138,6 +129,32 @@ export class InsightSyncService implements OnModuleInit {
             `[${accountId}] 📥 Received ${insights.length} insights from Chunk ${i + 1}.`,
           );
           allInsights.push(...insights);
+        }
+
+        // Fetch daily breakdowns for the last 3 days inside the chunk loop to have idChunk in scope
+        if (range === InsightSyncRange.LAST_3D) {
+          this.logger.log(
+            `[${accountId}] ⏳ Fetching 3-day daily breakdowns for ${level}: Chunk ${i + 1}/${idChunks.length}...`,
+          );
+          try {
+            const dailyInsights = await this.metaApi.getAccountInsights(
+              accountId,
+              {
+                level: level as any,
+                date_preset: 'last_3d',
+                time_increment: 1,
+                ids: idChunk,
+                limit: 50,
+              },
+            );
+            if (dailyInsights && dailyInsights.length > 0) {
+              allDailyInsights.push(...dailyInsights);
+            }
+          } catch (err: any) {
+            this.logger.error(
+              `[${accountId}] ❌ Error fetching 3-day daily breakdowns in chunk ${i + 1}: ${err.message}`,
+            );
+          }
         }
       }
 
@@ -178,18 +195,35 @@ export class InsightSyncService implements OnModuleInit {
           };
         });
 
-      // Special handling for TODAY: also insert as DAILY
+      // Special handling for TODAY and LAST_3D
       let dailyData: any[] = [];
       if (range === InsightSyncRange.TODAY) {
         dailyData = mappedData.map((d) => ({
           ...d,
           range: 'DAILY',
         }));
+      } else if (range === InsightSyncRange.LAST_3D) {
+        if (allDailyInsights.length > 0) {
+          dailyData = allDailyInsights
+            .filter((i: any) => i[entityIdField])
+            .map((i: any) => {
+              const metrics = extractCampaignMetrics(i);
+              const { toPrismaJson } = require('../../common/utils');
+              return {
+                [relationFieldId]: i[entityIdField],
+                level: levelEnum,
+                range: 'DAILY',
+                dateStart: i.date_start,
+                dateStop: i.date_stop,
+                ...metrics,
+                rawPayload: toPrismaJson(i),
+              };
+            });
+        }
       }
 
       // 4. Batch Upsert to Database
       const entityIds = mappedData.map((d) => d[relationFieldId]);
-      const dateStarts = [...new Set(mappedData.map((d) => d.dateStart))];
 
       this.logger.log(
         `[${accountId}] 💾 Saving ${mappedData.length} records to DB (${prismaModel})...`,
@@ -204,13 +238,14 @@ export class InsightSyncService implements OnModuleInit {
           },
         });
 
-        // If TODAY, also delete existing DAILY records for the same dates
-        if (range === InsightSyncRange.TODAY) {
+        // If dailyData has records, delete existing DAILY records for those dates
+        if (dailyData.length > 0) {
+          const dailyDates = [...new Set(dailyData.map((d) => d.dateStart))];
           await (this.prisma[prismaModel] as any).deleteMany({
             where: {
               [relationFieldId]: { in: entityIds },
               range: 'DAILY',
-              dateStart: { in: dateStarts },
+              dateStart: { in: dailyDates },
             },
           });
         }
@@ -222,7 +257,7 @@ export class InsightSyncService implements OnModuleInit {
           50,
         );
 
-        // Insert daily data if TODAY
+        // Insert daily data if TODAY or LAST_3D
         if (dailyData.length > 0) {
           await prismaHelper.createManySafe(
             this.prisma[prismaModel] as any,
@@ -884,30 +919,42 @@ export class InsightSyncService implements OnModuleInit {
           `[${accountId}] Checking ${entities.length} ${level}s for missing days based on their MAX records...`,
         );
 
-        // 3. For each entity, find gaps in DAILY insights
+        // 3. Fetch all existing DAILY insights in DB for these entities in bulk
+        const existingInsights = await (
+          this.prisma[prismaModel] as any
+        ).findMany({
+          where: {
+            [relationFieldId]: { in: entities.map((e) => e.id) },
+            range: 'DAILY',
+          },
+          select: { [relationFieldId]: true, dateStart: true },
+        });
+
+        // Group existing dates by entityId
+        const existingDatesMap = new Map<string, Set<string>>();
+        for (const ins of existingInsights) {
+          const entId = ins[relationFieldId];
+          if (!existingDatesMap.has(entId)) {
+            existingDatesMap.set(entId, new Set());
+          }
+          existingDatesMap.get(entId)!.add(ins.dateStart);
+        }
+
+        // 4. Find entities with gaps and aggregate their missing dates
+        const entitiesToSync: Array<{
+          id: string;
+          minDate: string;
+          maxDate: string;
+        }> = [];
         for (const entity of entities) {
           const maxInsight = maxInsightMap.get(entity.insightMaxId);
           if (!maxInsight) continue;
 
           const startDate = maxInsight.dateStart;
           const endDate = maxInsight.dateStop;
+          const existingDates = existingDatesMap.get(entity.id) || new Set();
 
-          const existingInsights = await (
-            this.prisma[prismaModel] as any
-          ).findMany({
-            where: {
-              [relationFieldId]: entity.id,
-              range: 'DAILY',
-              dateStart: { gte: startDate, lte: endDate },
-            },
-            select: { dateStart: true },
-          });
-
-          const existingDates = new Set(
-            existingInsights.map((i: any) => i.dateStart),
-          );
           const missingDates: string[] = [];
-
           let current = dayjs(startDate);
           const end = dayjs(endDate);
 
@@ -920,71 +967,127 @@ export class InsightSyncService implements OnModuleInit {
           }
 
           if (missingDates.length > 0) {
-            this.logger.log(
-              `[${accountId}] ${level} ${entity.id} is missing ${missingDates.length} days. Syncing...`,
-            );
+            entitiesToSync.push({
+              id: entity.id,
+              minDate: missingDates[0],
+              maxDate: missingDates[missingDates.length - 1],
+            });
+          }
+        }
 
-            // Fetch from Meta for this specific entity and date range
-            // Optimization: instead of fetching day-by-day, fetch the whole range from min missing to max missing with time_increment=1
-            // then filter for only missing ones in code.
-            const minDate = missingDates[0];
-            const maxDate = missingDates[missingDates.length - 1];
+        if (entitiesToSync.length === 0) {
+          this.logger.log(
+            `[${accountId}] No missing DAILY records found for ${level}.`,
+          );
+          continue;
+        }
 
+        this.logger.log(
+          `[${accountId}] 🔍 Found ${entitiesToSync.length}/${entities.length} ${level}s with missing days. Syncing in chunks...`,
+        );
+
+        // 5. Fetch from Meta in chunks (bulk fetch)
+        // Group by 50 IDs per chunk to minimize API call limits and payload size
+        const entityChunks = chunk(
+          entitiesToSync,
+          50,
+        ) as (typeof entitiesToSync)[];
+
+        for (let i = 0; i < entityChunks.length; i++) {
+          const entityChunk = entityChunks[i];
+          const chunkIds = entityChunk.map((e) => e.id);
+
+          this.logger.log(
+            `[${accountId}] ⏳ Fetching missing daily for ${level}: Chunk ${i + 1}/${entityChunks.length}...`,
+          );
+
+          try {
+            // Note: Since different entities might have different missing ranges, we use 'maximum' date preset
+            // to fetch all days, and then filter them in code based on what's missing or needs updates.
             const metaInsights = await this.metaApi.getAccountInsights(
               accountId,
               {
                 level: level as any,
                 date_preset: 'maximum',
                 time_increment: 1,
-                ids: [entity.id],
+                ids: chunkIds,
+                limit: 50,
               },
             );
-            if (metaInsights && metaInsights.length > 0) {
-              const mappedData = metaInsights.map((i: any) => {
-                const {
-                  extractCampaignMetrics,
-                  toPrismaJson,
-                } = require('../../common/utils');
-                const metrics = extractCampaignMetrics(i);
 
-                return {
-                  [relationFieldId]: i[entityIdField],
-                  level: this.mapLevelToEnum(level),
-                  range: 'DAILY',
-                  dateStart: i.date_start,
-                  dateStop: i.date_stop,
-                  ...metrics,
-                  rawPayload: toPrismaJson(i),
-                };
+            if (metaInsights && metaInsights.length > 0) {
+              const mappedData = metaInsights
+                .filter((mi: any) => mi[entityIdField])
+                .map((mi: any) => {
+                  const {
+                    extractCampaignMetrics,
+                    toPrismaJson,
+                  } = require('../../common/utils');
+                  const metrics = extractCampaignMetrics(mi);
+
+                  return {
+                    [relationFieldId]: mi[entityIdField],
+                    level: this.mapLevelToEnum(level),
+                    range: 'DAILY',
+                    dateStart: mi.date_start,
+                    dateStop: mi.date_stop,
+                    ...metrics,
+                    rawPayload: toPrismaJson(mi),
+                  };
+                });
+
+              // Filter only records that are actually missing or recent (last 3 days to resolve attribution lag)
+              const todayStr = dayjs().format('YYYY-MM-DD');
+              const threeDaysAgoStr = dayjs()
+                .subtract(2, 'day')
+                .format('YYYY-MM-DD');
+
+              const filteredData = mappedData.filter((item) => {
+                const entId = item[relationFieldId];
+                const existingDates = existingDatesMap.get(entId) || new Set();
+
+                const isMissing = !existingDates.has(item.dateStart);
+                const isRecent =
+                  item.dateStart >= threeDaysAgoStr &&
+                  item.dateStart <= todayStr;
+
+                return isMissing || isRecent;
               });
 
-              if (mappedData.length > 0) {
+              if (filteredData.length > 0) {
                 const prismaHelper = new PrismaBatchHelper(this.prisma);
-                await prismaHelper.upsertMany(mappedData, (item: any) => {
-                  const {
-                    [relationFieldId]: rId,
-                    dateStart,
-                    range,
-                    ...data
-                  } = item;
-                  return (this.prisma[prismaModel] as any).upsert({
-                    where: {
-                      [`${relationFieldId}_dateStart_range`]: {
-                        [relationFieldId]: rId,
-                        dateStart,
-                        range,
+
+                await executeDbWithRetry(async () => {
+                  await prismaHelper.upsertMany(filteredData, (item: any) => {
+                    const {
+                      [relationFieldId]: rId,
+                      dateStart,
+                      range,
+                      ...data
+                    } = item;
+                    return (this.prisma[prismaModel] as any).upsert({
+                      where: {
+                        [`${relationFieldId}_dateStart_range`]: {
+                          [relationFieldId]: rId,
+                          dateStart,
+                          range,
+                        },
                       },
-                    },
-                    update: data,
-                    create: item,
+                      update: data,
+                      create: item,
+                    });
                   });
                 });
 
                 this.logger.log(
-                  `[${accountId}] ✅ Saved ${mappedData.length} missing daily records for ${level} ${entity.id}.`,
+                  `[${accountId}] ✅ Chunk ${i + 1}/${entityChunks.length}: Saved ${filteredData.length} daily records for ${level}.`,
                 );
               }
             }
+          } catch (err: any) {
+            this.logger.error(
+              `[${accountId}] ❌ Error in missing daily chunk ${i + 1}: ${err.message}`,
+            );
           }
         }
       }

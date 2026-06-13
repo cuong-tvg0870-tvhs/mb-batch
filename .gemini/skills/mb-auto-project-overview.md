@@ -210,10 +210,10 @@ Scheduler (@Cron) → Bull Queue → Processor → Service
 | Cron | Job | Mô tả |
 |---|---|---|
 | `0 * * * *` (mỗi giờ) | TODAY sync | Insights hôm nay |
-| `0 */6 * * *` (6h/lần) | DAY_3 sync | 3 ngày gần nhất |
+| `0 */6 * * *` (6h/lần) | DAY_3 sync | 3 ngày gần nhất (bao gồm cập nhật DAILY của 3 ngày để sửa lag attribution) |
 | `0 */8 * * *` (8h/lần) | DAY_7 sync | 7 ngày gần nhất |
 | `15 2 * * *` (2:15 AM) | MAX sync | Lifetime insights |
-| `0 3 * * *` (3:00 AM) | Missing DAILY | Backfill missing daily records |
+| `0 3 * * *` (3:00 AM) | Missing DAILY | Tìm và sync bù các ngày DAILY bị thiếu theo lô 50 IDs (tối ưu hóa API calls) |
 | `35 4 * * *` (4:35 AM) | Audience sync | Age/gender demographic breakdowns |
 
 #### media-sync (Creative Library)

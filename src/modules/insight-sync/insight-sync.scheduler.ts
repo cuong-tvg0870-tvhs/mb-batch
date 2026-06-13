@@ -21,18 +21,48 @@ export class InsightSyncScheduler implements OnModuleInit {
   ) {}
 
   async onModuleInit() {
-    // Trigger immediate sync in development mode for testing
-    // if (process.env.NODE_ENV !== 'production') {
-    //   this.logger.log('🚀 Triggering immediate sync for development...');
-    //   // Wait a bit for everything to be ready
-    //   setTimeout(() => {
-    //     this.scheduleMissingDailySync().catch((err) =>
-    //       this.logger.error(
-    //         `Failed to trigger immediate missing daily sync: ${err.message}`,
-    //       ),
-    //     );
-    //   }, 5000);
-    // }
+    if (process.env.NODE_ENV === 'production' && process.env.DISABLE_STARTUP_SYNC !== 'true') {
+      this.logger.log('🚀 [Deploy Startup] Production environment detected. Preparing to trigger all Insight Syncs...');
+
+      const client = (this.syncQueue as any).client;
+      if (client) {
+        try {
+          const cooldownKey = 'lock:insight-sync:startup-cooldown';
+          const isCooldownActive = await client.get(cooldownKey);
+
+          if (isCooldownActive) {
+            this.logger.warn(
+              '⚠️ Startup Insight Sync skipped due to 5-minute cooldown lock. ' +
+              'This prevents spamming the Meta API if the container restarts frequently.'
+            );
+            return;
+          }
+
+          // Set cooldown lock for 5 minutes (300 seconds)
+          await client.set(cooldownKey, 'true', 'EX', 300);
+          this.logger.log('🔒 Redis cooldown lock set for 5 minutes.');
+        } catch (redisError: any) {
+          this.logger.warn(`Failed to access/set Redis lock: ${redisError.message}. Proceeding without lock.`);
+        }
+      }
+
+      await this.triggerAllSyncsSequentially();
+    }
+  }
+
+  private async triggerAllSyncsSequentially() {
+    this.logger.log('📢 Triggering all insight syncs sequentially (Today, 3D, 7D, Max, Missing Daily, Audience)...');
+    try {
+      await this.scheduleTodaySync();
+      await this.schedule3DSync();
+      await this.schedule7DSync();
+      await this.scheduleMaxSync();
+      await this.scheduleMissingDailySync();
+      await this.scheduleAudienceSync();
+      this.logger.log('✅ All insight syncs successfully queued on startup.');
+    } catch (error: any) {
+      this.logger.error(`❌ Failed to queue startup syncs: ${error.message}`);
+    }
   }
 
   /**

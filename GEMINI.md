@@ -60,6 +60,7 @@ cp ".gemini/skills/mb-auto-project-overview.md" "/home/thispc/Documents/thanhvin
 
 ## Context
 - Đây là **mb-batch** — NestJS 11 Background Worker cho hệ thống MB Auto (Cron Sync & Draft Automation)
-- Đọc `.gemini/skills/mb-auto-project-overview.md` để hiểu toàn bộ dự án
-- Đọc `.gemini/skills/nestjs-meta-backend.md` để hiểu batch scheduling spec
-- Đọc `.gemini/skills/meta-documentation-links.md` để tham khảo Meta API docs
+- Chỉ đọc/tham khảo các file hướng dẫn dưới đây **khi thật sự cần thiết** (ví dụ khi sửa cấu trúc/logic lớn hoặc cần tra cứu API):
+  - `.gemini/skills/mb-auto-project-overview.md` (Tổng quan dự án)
+  - `.gemini/skills/nestjs-meta-backend.md` (Quy chuẩn NestJS Backend)
+  - `.gemini/skills/meta-documentation-links.md` (Tài liệu API Meta)
