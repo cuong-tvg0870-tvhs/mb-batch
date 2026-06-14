@@ -338,6 +338,7 @@ AutomationCategory → AutomationFolder → AutomationRule
 8. **Incremental Sync**: `updated_time` filtering + `lastFetchedAt` tracking per account
 9. **Concurrency Control**: `p-limit(4)` cho parallel Meta API calls
 10. **Creative Asset Mapping during Sync**: Khi đồng bộ dữ liệu chiến dịch từ Meta (trong cả `mb-batch` và `mb-ads`), hệ thống tự động tìm kiếm `CreativeAsset` khớp với `imageHash` hoặc `videoId` của creative và tự động chèn các bản ghi `CreativeAssetMapping`. Đồng thời, các chiến dịch được đồng bộ từ Meta cũng được tự động liên kết ngược lại với `SystemCampaign` tương ứng (qua `systemCampaignId`) bằng cách tìm kiếm theo `meta_id`. Điều này đảm bảo tính năng kiểm tra điều kiện/lọc loại trừ của tự động hóa (automation exclusion check) hoạt động chính xác và không bị chọn lại các ảnh/video đã được sử dụng.
+11. **Optimized Insight Synchronization (Reuse ID & Concurrency)**: Dữ liệu insight theo range tổng hợp (TODAY, 3D, 7D, MAX) sử dụng cơ chế *Tái sử dụng ID (Reuse ID)*. Thay vì xóa-chèn bản ghi mới rồi cập nhật lại bảng cha, worker ghi đè dữ liệu trực tiếp vào ID insight cũ, giúp loại bỏ 99% lệnh ghi vào Campaign/AdSet/Ad/Creative và bảo toàn các trường quan hệ 1-1 cho Prisma sort/filter hoạt động mượt mà. Đồng thời, dữ liệu DAILY được cập nhật bằng lệnh Native `upsert` trên Postgres composite keys `(entityId, dateStart, range)` để tránh phình dung lượng và đảm bảo tính nguyên tử (atomicity). Chunk API calls được thực thi song song giới hạn luồng (concurrency limit = 3) để tối ưu thời gian.
 
 ---
 

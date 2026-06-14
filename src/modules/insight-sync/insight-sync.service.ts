@@ -52,7 +52,7 @@ export class InsightSyncService {
     this.logger.log(`[${accountId}] Syncing ${level} insights for ${range}...`);
 
     try {
-      // 1. Fetch existing IDs from Database first
+      // 1. Fetch existing IDs and relations from Database first
       const parentModel = this.getParentModel(level);
       const { executeDbWithRetry } = require('../../common/utils');
 
@@ -70,12 +70,18 @@ export class InsightSyncService {
         where.OR.push({ [parentInsightIdField]: null });
       }
 
+      // Chỉ chọn id và trường ID liên kết cũ để check trạng thái tồn tại
+      const selectFields: any = { id: true };
+      if (parentInsightIdField) {
+        selectFields[parentInsightIdField] = true;
+      }
+
       const existingEntities = (await executeDbWithRetry(() =>
         (this.prisma[parentModel] as any).findMany({
           where,
-          select: { id: true },
+          select: selectFields,
         }),
-      )) as Array<{ id: string }>;
+      )) as Array<{ id: string } & Record<string, string | null>>;
 
       const allIds = existingEntities.map((e) => e.id);
       if (allIds.length === 0) {
@@ -88,6 +94,12 @@ export class InsightSyncService {
       this.logger.log(
         `[${accountId}] 🔍 Found ${allIds.length} ${level} entities to sync for ${range}.`,
       );
+
+      // Lưu trữ map id thực thể -> id insight cũ để tái sử dụng
+      const entityRelationMap = new Map<string, string | null>();
+      for (const ent of existingEntities) {
+        entityRelationMap.set(ent.id, parentInsightIdField ? ent[parentInsightIdField] : null);
+      }
 
       // 2. Fetch from Meta in chunks to avoid filter limits
       const allInsights: any[] = [];
@@ -112,50 +124,94 @@ export class InsightSyncService {
 
       const idChunks = chunk(allIds, chunkSize) as string[][];
 
-      for (let i = 0; i < idChunks.length; i++) {
-        const idChunk = idChunks[i];
-        this.logger.log(
-          `[${accountId}] ⏳ Fetching ${level} insights: Chunk ${i + 1}/${idChunks.length}...`,
-        );
-
-        const insights = await this.metaApi.getAccountInsights(accountId, {
-          level: level as any,
-          date_preset: range as string,
-          ids: idChunk,
-          limit: 50,
-        });
-        if (insights) {
-          this.logger.log(
-            `[${accountId}] 📥 Received ${insights.length} insights from Chunk ${i + 1}.`,
-          );
-          allInsights.push(...insights);
+      // Bounded concurrency helper to run requests in parallel safely
+      const runWithLimit = async <T, R>(
+        concurrency: number,
+        items: T[],
+        fn: (item: T, index: number) => Promise<R>,
+      ): Promise<R[]> => {
+        const results: Promise<R>[] = [];
+        const executing: Promise<any>[] = [];
+        for (let i = 0; i < items.length; i++) {
+          const item = items[i];
+          const p = Promise.resolve().then(() => fn(item, i));
+          results.push(p);
+          executing.push(p);
+          const clean = () => {
+            const idx = executing.indexOf(p);
+            if (idx !== -1) executing.splice(idx, 1);
+          };
+          p.then(clean, clean);
+          if (executing.length >= concurrency) {
+            await Promise.race(executing);
+          }
         }
+        return Promise.all(results);
+      };
 
-        // Fetch daily breakdowns for the last 3 days inside the chunk loop to have idChunk in scope
-        if (range === InsightSyncRange.LAST_3D) {
+      const chunkTasks = idChunks.map((idChunk, index) => {
+        return async () => {
           this.logger.log(
-            `[${accountId}] ⏳ Fetching 3-day daily breakdowns for ${level}: Chunk ${i + 1}/${idChunks.length}...`,
+            `[${accountId}] ⏳ Fetching ${level} insights: Chunk ${index + 1}/${idChunks.length}...`,
           );
+
+          let insights: any[] = [];
           try {
-            const dailyInsights = await this.metaApi.getAccountInsights(
-              accountId,
-              {
-                level: level as any,
-                date_preset: 'last_3d',
-                time_increment: 1,
-                ids: idChunk,
-                limit: 50,
-              },
-            );
-            if (dailyInsights && dailyInsights.length > 0) {
-              allDailyInsights.push(...dailyInsights);
+            const res = await this.metaApi.getAccountInsights(accountId, {
+              level: level as any,
+              date_preset: range as string,
+              ids: idChunk,
+              limit: 50,
+            });
+            if (res) {
+              this.logger.log(
+                `[${accountId}] 📥 Received ${res.length} insights from Chunk ${index + 1}.`,
+              );
+              insights = res;
             }
           } catch (err: any) {
             this.logger.error(
-              `[${accountId}] ❌ Error fetching 3-day daily breakdowns in chunk ${i + 1}: ${err.message}`,
+              `[${accountId}] ❌ Error fetching insights in chunk ${index + 1}: ${err.message}`,
             );
+            throw err;
           }
-        }
+
+          let dailyInsights: any[] = [];
+          if (range === InsightSyncRange.LAST_3D) {
+            this.logger.log(
+              `[${accountId}] ⏳ Fetching 3-day daily breakdowns for ${level}: Chunk ${index + 1}/${idChunks.length}...`,
+            );
+            try {
+              const res = await this.metaApi.getAccountInsights(
+                accountId,
+                {
+                  level: level as any,
+                  date_preset: 'last_3d',
+                  time_increment: 1,
+                  ids: idChunk,
+                  limit: 50,
+                },
+              );
+              if (res && res.length > 0) {
+                dailyInsights = res;
+              }
+            } catch (err: any) {
+              this.logger.error(
+                `[${accountId}] ❌ Error fetching 3-day daily breakdowns in chunk ${index + 1}: ${err.message}`,
+              );
+            }
+          }
+
+          return { insights, dailyInsights };
+        };
+      });
+
+      // Chạy song song tối đa 3 chunks cùng lúc để tối ưu hóa tốc độ
+      const chunkResults = await runWithLimit(3, chunkTasks, (task) => task());
+
+      for (const res of chunkResults) {
+        allInsights.push(...res.insights);
+        allDailyInsights.push(...res.dailyInsights);
       }
 
       if (allInsights.length === 0) {
@@ -179,13 +235,19 @@ export class InsightSyncService {
         `[${accountId}] 🛠️ Mapping ${insights.length} insights for ${level} ${range}...`,
       );
 
+      const toUpdate: any[] = [];
+      const toCreate: any[] = [];
+
       const mappedData = insights
         .filter((i: any) => i[entityIdField])
         .map((i: any) => {
           const metrics = extractCampaignMetrics(i);
           const { toPrismaJson } = require('../../common/utils');
-          return {
-            [relationFieldId]: i[entityIdField],
+          const entityId = i[entityIdField];
+          const existingInsightId = entityRelationMap.get(entityId);
+
+          const record: any = {
+            [relationFieldId]: entityId,
             level: levelEnum,
             range: rangeEnum,
             dateStart: i.date_start,
@@ -193,15 +255,28 @@ export class InsightSyncService {
             ...metrics,
             rawPayload: toPrismaJson(i),
           };
+
+          // Phân nhóm UPDATE hoặc CREATE để giảm tải cập nhật cha
+          if (existingInsightId) {
+            record.id = existingInsightId;
+            toUpdate.push(record);
+          } else {
+            toCreate.push(record);
+          }
+
+          return record;
         });
 
       // Special handling for TODAY and LAST_3D
       let dailyData: any[] = [];
       if (range === InsightSyncRange.TODAY) {
-        dailyData = mappedData.map((d) => ({
-          ...d,
-          range: 'DAILY',
-        }));
+        dailyData = mappedData.map((d) => {
+          const { id, ...rest } = d;
+          return {
+            ...rest,
+            range: 'DAILY',
+          };
+        });
       } else if (range === InsightSyncRange.LAST_3D) {
         if (allDailyInsights.length > 0) {
           dailyData = allDailyInsights
@@ -223,59 +298,66 @@ export class InsightSyncService {
       }
 
       // 4. Batch Upsert to Database
-      const entityIds = mappedData.map((d) => d[relationFieldId]);
-
       this.logger.log(
-        `[${accountId}] 💾 Saving ${mappedData.length} records to DB (${prismaModel})...`,
+        `[${accountId}] 💾 Saving ${mappedData.length} summary records (Update: ${toUpdate.length}, Create: ${toCreate.length}) and ${dailyData.length} daily records to DB (${prismaModel})...`,
       );
 
       await executeDbWithRetry(async () => {
-        // Delete existing records for this range
-        await (this.prisma[prismaModel] as any).deleteMany({
-          where: {
-            [relationFieldId]: { in: entityIds },
-            range: rangeEnum,
-          },
-        });
-
-        // If dailyData has records, delete existing DAILY records for those dates
-        if (dailyData.length > 0) {
-          const dailyDates = [...new Set(dailyData.map((d) => d.dateStart))];
-          await (this.prisma[prismaModel] as any).deleteMany({
-            where: {
-              [relationFieldId]: { in: entityIds },
-              range: 'DAILY',
-              dateStart: { in: dailyDates },
+        // Cập nhật các bản ghi có ID liên kết cũ (Reuse ID)
+        if (toUpdate.length > 0) {
+          await prismaHelper.upsertMany(
+            toUpdate,
+            (item: any) => {
+              const { id, ...data } = item;
+              return (this.prisma[prismaModel] as any).update({
+                where: { id },
+                data,
+              });
             },
-          });
+            50,
+          );
         }
 
-        // Insert primary data
-        await prismaHelper.createManySafe(
-          this.prisma[prismaModel] as any,
-          mappedData,
-          50,
-        );
-
-        // Insert daily data if TODAY or LAST_3D
-        if (dailyData.length > 0) {
+        // Chèn mới các bản ghi chưa có ID liên kết
+        if (toCreate.length > 0) {
           await prismaHelper.createManySafe(
             this.prisma[prismaModel] as any,
+            toCreate,
+            50,
+          );
+        }
+
+        // Upsert trực tiếp dữ liệu DAILY để tránh việc delete-then-insert gây phình DB và mất atomicity
+        if (dailyData.length > 0) {
+          const uniqueKeyName = `${relationFieldId}_dateStart_range`;
+          await prismaHelper.upsertMany(
             dailyData,
+            (item: any) => {
+              const { [relationFieldId]: rId, dateStart, range: rRange, ...data } = item;
+              return (this.prisma[prismaModel] as any).upsert({
+                where: {
+                  [uniqueKeyName]: {
+                    [relationFieldId]: rId,
+                    dateStart,
+                    range: rRange,
+                  },
+                },
+                update: data,
+                create: item,
+              });
+            },
             50,
           );
         }
       });
 
-      // 5. Update parent record's insight relation
-      await this.updateParentRelations(level, range, mappedData);
-      if (range === InsightSyncRange.TODAY) {
-        // Also update DAILY relation if needed, though usually TODAY is what matters for quick view
-        await this.updateParentRelations(level, 'daily' as any, dailyData);
+      // 5. Update parent record's insight relation ONLY for newly created insights (toCreate)
+      if (toCreate.length > 0) {
+        await this.updateParentRelations(level, range, toCreate);
       }
 
       this.logger.log(
-        `[${accountId}] ✅ Finished ${level} ${range}: ${mappedData.length} records updated.`,
+        `[${accountId}] ✅ Finished ${level} ${range}: ${mappedData.length} records sync done.`,
       );
     } catch (error: unknown) {
       const {
@@ -431,10 +513,6 @@ export class InsightSyncService {
     }
   }
 
-  /**
-   * Aggregates AdInsights into CreativeInsights for a specific account.
-   * Ported from meta.cron.ts and optimized for account-level processing.
-   */
   async aggregateCreativeInsights(accountId: string) {
     this.logger.log(
       `[${accountId}] 🚀 Starting CreativeInsight aggregation...`,
@@ -446,12 +524,16 @@ export class InsightSyncService {
     const sevenDaysAgo = dayjs().subtract(6, 'day').format('YYYY-MM-DD');
     const threeDaysAgo = dayjs().subtract(2, 'day').format('YYYY-MM-DD');
 
-    // 1. Load all creatives for this account
+    // 1. Load all creatives for this account with their current relation pointers
     const creatives = await this.prisma.creative.findMany({
       where: { accountId },
       select: {
         id: true,
         ads: { select: { id: true } },
+        insightMaxId: true,
+        insight7dId: true,
+        insight3dId: true,
+        insightTodayId: true,
       },
     });
 
@@ -460,7 +542,7 @@ export class InsightSyncService {
       return;
     }
 
-    const batchSize = 100;
+    const batchSize = 50; // Optimized batch size to prevent OOM
     for (let i = 0; i < creatives.length; i += batchSize) {
       const batch = creatives.slice(i, i + batchSize);
       const adIds = batch.flatMap((c) => c.ads.map((a) => a.id));
@@ -489,7 +571,9 @@ export class InsightSyncService {
         insightMap.get(ins.adId)!.push(ins);
       }
 
-      const creativeInsightUpserts: any[] = [];
+      const creativeInsightUpdates: any[] = [];
+      const creativeInsightCreates: any[] = [];
+      const creativeInsightDaily: any[] = [];
       const creativeUpdates: any[] = [];
 
       const sumMetrics = (target: Record<string, number>, source: any) => {
@@ -605,29 +689,34 @@ export class InsightSyncService {
             dateStart: dateBounds.max.minStart || '1975-01-01',
             dateStop: dateBounds.max.maxStop || today,
             data: bucket.max,
+            insightIdField: 'insightMaxId',
           },
           {
             range: InsightRange.DAY_7,
             dateStart: dateBounds.last7d.minStart || sevenDaysAgo,
             dateStop: dateBounds.last7d.maxStop || today,
             data: bucket.last7d,
+            insightIdField: 'insight7dId',
           },
           {
             range: InsightRange.DAY_3,
             dateStart: dateBounds.last3d.minStart || threeDaysAgo,
             dateStop: dateBounds.last3d.maxStop || today,
             data: bucket.last3d,
+            insightIdField: 'insight3dId',
           },
           {
             range: InsightRange.TODAY,
             dateStart: dateBounds.today.minStart || today,
             dateStop: dateBounds.today.maxStop || today,
             data: bucket.today,
+            insightIdField: 'insightTodayId',
           },
         ];
 
+        const dailyRanges: any[] = [];
         for (const dateStart of Object.keys(bucket.daily)) {
-          ranges.push({
+          dailyRanges.push({
             range: InsightRange.DAILY,
             dateStart: dateStart,
             dateStop: dateStart,
@@ -635,16 +724,37 @@ export class InsightSyncService {
           });
         }
 
+        // Phân loại summary ranges sang UPDATE (nếu đã có ID) hoặc CREATE (nếu chưa có ID)
         for (const r of ranges) {
-          creativeInsightUpserts.push({
+          const record: any = {
             creativeId: creative.id,
             dateStart: r.dateStart,
             range: r.range,
-            data: { dateStop: r.dateStop, ...r.data },
+            dateStop: r.data.dateStop,
+            ...r.data,
+          };
+
+          const existingId = (creative as any)[r.insightIdField];
+          if (existingId) {
+            record.id = existingId;
+            creativeInsightUpdates.push(record);
+          } else {
+            creativeInsightCreates.push(record);
+          }
+        }
+
+        // Phân loại daily ranges sang daily list để upsert
+        for (const r of dailyRanges) {
+          creativeInsightDaily.push({
+            creativeId: creative.id,
+            dateStart: r.dateStart,
+            range: r.range,
+            dateStop: r.dateStop,
+            ...r.data,
           });
         }
 
-        // Calculate performance status
+        // Tính toán trạng thái hiệu năng
         const maxSpend = bucket.max.spend ?? 0;
         const maxRevenue = bucket.max.purchaseValue ?? 0;
         const maxPurchases = bucket.max.purchases ?? 0;
@@ -696,51 +806,61 @@ export class InsightSyncService {
         });
       }
 
-      // 5. Delete existing insights for these ranges to avoid duplicates when dateStart changes
-      await this.prisma.creativeInsight.deleteMany({
-        where: {
-          creativeId: { in: batch.map((c) => c.id) },
-          range: {
-            in: [
-              InsightRange.MAX,
-              InsightRange.DAY_7,
-              InsightRange.DAY_3,
-              InsightRange.TODAY,
-              InsightRange.DAILY,
-            ],
+      // 5. Ghi dữ liệu vào DB (Sử dụng update trực tiếp cho ID cũ, tránh delete-then-insert)
+      if (creativeInsightUpdates.length > 0) {
+        await prismaHelper.upsertMany(creativeInsightUpdates, (item) => {
+          const { id, ...data } = item;
+          return this.prisma.creativeInsight.update({
+            where: { id },
+            data,
+          });
+        }, 50);
+      }
+
+      if (creativeInsightCreates.length > 0) {
+        await prismaHelper.createManySafe(
+          this.prisma.creativeInsight as any,
+          creativeInsightCreates,
+          50,
+        );
+      }
+
+      if (creativeInsightDaily.length > 0) {
+        await prismaHelper.upsertMany(creativeInsightDaily, (item) => {
+          const { creativeId, dateStart, range, ...data } = item;
+          return this.prisma.creativeInsight.upsert({
+            where: {
+              creativeId_dateStart_range: {
+                creativeId,
+                dateStart,
+                range,
+              },
+            },
+            update: data,
+            create: item,
+          });
+        }, 50);
+      }
+
+      // 6. Chỉ lấy các ID của CreativeInsight mới tạo (nếu có) để cập nhật liên kết ngược
+      const createdCreativeIds = [...new Set(creativeInsightCreates.map((c) => c.creativeId))];
+      let insightRecords: any[] = [];
+      if (createdCreativeIds.length > 0) {
+        insightRecords = await this.prisma.creativeInsight.findMany({
+          where: {
+            creativeId: { in: createdCreativeIds },
+            range: {
+              in: [
+                InsightRange.MAX,
+                InsightRange.DAY_7,
+                InsightRange.DAY_3,
+                InsightRange.TODAY,
+              ],
+            },
           },
-        },
-      });
-
-      // 5.1 Batch Create CreativeInsights
-      const createData = creativeInsightUpserts.map((item) => ({
-        creativeId: item.creativeId,
-        dateStart: item.dateStart,
-        range: item.range,
-        ...item.data,
-      }));
-
-      await prismaHelper.createManySafe(
-        this.prisma.creativeInsight as any,
-        createData,
-        100,
-      );
-
-      // 6. Fetch Insight IDs to update relations on Creative
-      const insightRecords = await this.prisma.creativeInsight.findMany({
-        where: {
-          creativeId: { in: batch.map((c) => c.id) },
-          range: {
-            in: [
-              InsightRange.MAX,
-              InsightRange.DAY_7,
-              InsightRange.DAY_3,
-              InsightRange.TODAY,
-            ],
-          },
-        },
-        select: { id: true, creativeId: true, range: true },
-      });
+          select: { id: true, creativeId: true, range: true },
+        });
+      }
 
       const insightMapByCreative = new Map<string, any>();
       for (const r of insightRecords) {
@@ -756,16 +876,20 @@ export class InsightSyncService {
       // 7. Update Creative performance status and insight IDs
       await prismaHelper.upsertMany(creativeUpdates, async (item) => {
         const ref = insightMapByCreative.get(item.id);
+        const dataToUpdate: any = {
+          ...item.data,
+        };
+
+        // Gán chỉ khi tồn tại ID mới được tạo
+        if (ref?.max) dataToUpdate.insightMaxId = ref.max;
+        if (ref?.d7) dataToUpdate.insight7dId = ref.d7;
+        if (ref?.d3) dataToUpdate.insight3dId = ref.d3;
+        if (ref?.today) dataToUpdate.insightTodayId = ref.today;
+
         try {
           await this.prisma.creative.update({
             where: { id: item.id },
-            data: {
-              ...item.data,
-              insightMaxId: ref?.max,
-              insight7dId: ref?.d7,
-              insight3dId: ref?.d3,
-              insightTodayId: ref?.today,
-            },
+            data: dataToUpdate,
           });
         } catch (err: any) {
           if (
