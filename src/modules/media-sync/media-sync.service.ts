@@ -1,6 +1,10 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { AssetType, FolderStatus } from '@prisma/client';
-import { parseMetaUrlExpireTime, sleep } from '../../common/utils';
+import {
+  parseMetaError,
+  parseMetaUrlExpireTime,
+  sleep,
+} from '../../common/utils';
 import { MetaApiService } from '../meta-api/meta-api.service';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -13,6 +17,89 @@ export class MediaSyncService implements OnModuleInit {
     private readonly prisma: PrismaService,
     private readonly metaApi: MetaApiService,
   ) {}
+
+  private getPreferredThumbnail(thumbnails?: any) {
+    return (
+      thumbnails?.data?.find((item: any) => item?.is_preferred) ||
+      thumbnails?.data?.[0] ||
+      null
+    );
+  }
+
+  private formatMetaError(err: any) {
+    const metaError = parseMetaError(err);
+    return [
+      `message="${metaError.message}"`,
+      `code=${metaError.code ?? '-'}`,
+      `subcode=${metaError.subcode ?? '-'}`,
+      `type=${metaError.type ?? '-'}`,
+      `fbtrace=${metaError.fbtrace_id ?? '-'}`,
+    ].join(' ');
+  }
+
+  private shouldDeleteMissingMetaAsset(err: any) {
+    const metaError = parseMetaError(err);
+    return Number(metaError.subcode) === 33;
+  }
+
+  private async refreshVideoCreativeAsset(asset: {
+    id: string;
+    name: string | null;
+    creation_time: string | null;
+    folderId: string;
+    video_id: string | null;
+    thumbnail: string | null;
+    height: number | null;
+    width: number | null;
+    duration: number | null;
+    video_source: string | null;
+    video_thumbnails: any;
+  }) {
+    let assetPayload: any = null;
+    let videoPayload: any = null;
+
+    if (asset.video_id) {
+      videoPayload = await this.metaApi.request('get', asset.video_id, {
+        fields: 'id,source,length,thumbnails',
+      });
+    } else {
+      assetPayload = await this.metaApi.request('get', asset.id, {
+        fields: [
+          'id',
+          'name',
+          'last_updated_time',
+          'parent_folder_id',
+          'video{id,source,length,thumbnails}',
+        ].join(','),
+      });
+      videoPayload = assetPayload?.video;
+    }
+
+    if (!videoPayload?.id) {
+      throw new Error(`Missing video payload for creative asset ${asset.id}`);
+    }
+
+    const thumbnail = this.getPreferredThumbnail(videoPayload.thumbnails);
+    await this.prisma.creativeAsset.update({
+      where: { id: asset.id },
+      data: {
+        name: assetPayload?.name || asset.name,
+        creation_time: assetPayload?.last_updated_time || asset.creation_time,
+        folderId: assetPayload?.parent_folder_id || asset.folderId,
+        video_id: videoPayload.id || asset.video_id,
+        thumbnail: thumbnail?.uri || asset.thumbnail,
+        height: thumbnail?.height || asset.height,
+        width: thumbnail?.width || asset.width,
+        duration: videoPayload.length || asset.duration,
+        video_source: videoPayload.source || asset.video_source,
+        video_thumbnails: videoPayload.thumbnails || asset.video_thumbnails,
+        urlExpiredAt: parseMetaUrlExpireTime([
+          videoPayload.source,
+          ...(videoPayload.thumbnails?.data?.map((t: any) => t.uri) || []),
+        ]),
+      },
+    });
+  }
 
   async onModuleInit() {
     this.logger.log('Module initialized. Starting automatic sync...');
@@ -464,13 +551,6 @@ export class MediaSyncService implements OnModuleInit {
 
     this.logger.log(`Refreshing URLs for ${assets.length} assets...`);
 
-    const fieldsVideo = [
-      'id',
-      'name',
-      'last_updated_time',
-      'parent_folder_id',
-      'video{id,source,length,thumbnails}',
-    ];
     const fieldsImage = [
       'id',
       'name',
@@ -493,67 +573,50 @@ export class MediaSyncService implements OnModuleInit {
       const isVideo = asset.type === AssetType.VIDEO;
 
       try {
+        if (isVideo) {
+          await this.refreshVideoCreativeAsset(asset);
+          totalUpdated++;
+          this.logger.log(
+            `[${index + 1}/${assets.length}] ✅ Cập nhật thành công URL mới cho asset ${asset.id}`,
+          );
+          await sleep(1000);
+          continue;
+        }
+
         const res = await this.metaApi.request('get', asset.id, {
-          fields: (isVideo ? fieldsVideo : fieldsImage).join(','),
+          fields: fieldsImage.join(','),
         });
 
         if (res.id) {
-          if (isVideo) {
-            const thumbnail = res.video?.thumbnails?.data?.find(
-              (d: any) => d?.is_preferred,
-            );
-            await this.prisma.creativeAsset.update({
-              where: { id: asset.id },
-              data: {
-                name: res.name || asset.name,
-                creation_time: res.last_updated_time || asset.creation_time,
-                folderId: res.parent_folder_id || asset.folderId,
-                video_id: res.video?.id || asset.video_id,
-                thumbnail: thumbnail?.uri || asset.thumbnail,
-                height: thumbnail?.height || asset.height,
-                width: thumbnail?.width || asset.width,
-                duration: res.video?.length || asset.duration,
-                video_source: res.video?.source || asset.video_source,
-                video_thumbnails:
-                  res.video?.thumbnails || asset.video_thumbnails,
-                urlExpiredAt: parseMetaUrlExpireTime([
-                  res.video?.source,
-                  ...(res.video?.thumbnails?.data?.map((t: any) => t.uri) ||
-                    []),
-                ]),
-              },
-            });
-          } else {
-            await this.prisma.creativeAsset.update({
-              where: { id: asset.id },
-              data: {
-                name: res.name || asset.name,
-                creation_time: res.last_updated_time || asset.creation_time,
-                folderId: res.parent_folder_id || asset.folderId,
-                imageUrl: res.url || asset.imageUrl,
-                thumbnail: res.url || asset.thumbnail,
-                imageHash: res.hash || asset.imageHash,
-                height: res.height || asset.height,
-                width: res.width || asset.width,
-                urlExpiredAt: parseMetaUrlExpireTime(res.url),
-              },
-            });
-          }
+          await this.prisma.creativeAsset.update({
+            where: { id: asset.id },
+            data: {
+              name: res.name || asset.name,
+              creation_time: res.last_updated_time || asset.creation_time,
+              folderId: res.parent_folder_id || asset.folderId,
+              imageUrl: res.url || asset.imageUrl,
+              thumbnail: res.url || asset.thumbnail,
+              imageHash: res.hash || asset.imageHash,
+              height: res.height || asset.height,
+              width: res.width || asset.width,
+              urlExpiredAt: parseMetaUrlExpireTime(res.url),
+            },
+          });
           totalUpdated++;
           this.logger.log(
             `[${index + 1}/${assets.length}] ✅ Cập nhật thành công URL mới cho asset ${asset.id}`,
           );
         }
       } catch (err: any) {
-        const errData =
-          err.metaError || err.response?.data?.error || err.response?.data;
-        if (errData && (errData.code === 100 || errData.error_subcode === 33)) {
-          this.logger.log(`Asset ${asset.id} not found on Meta. Deleting...`);
+        if (this.shouldDeleteMissingMetaAsset(err)) {
+          this.logger.log(
+            `Asset ${asset.id} not found on Meta. Deleting... (${this.formatMetaError(err)})`,
+          );
           await this.prisma.creativeAsset.delete({ where: { id: asset.id } });
           totalDeleted++;
         } else {
           this.logger.error(
-            `Failed to refresh asset ${asset.id}: ${err.message}`,
+            `Failed to refresh asset ${asset.id} (type=${asset.type}, video_id=${asset.video_id || '-'}): ${this.formatMetaError(err)}`,
           );
         }
       }

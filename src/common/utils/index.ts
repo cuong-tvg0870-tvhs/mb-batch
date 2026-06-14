@@ -75,7 +75,14 @@ export function isNotFound(e: any) {
 }
 
 export const parseMetaError = (err: any) => {
-  const e = err?.response?.error || err?.response || err?.error || err;
+  const e =
+    err?.metaError ||
+    err?.response?.data?.error ||
+    err?.response?.data ||
+    err?.response?.error ||
+    err?.response ||
+    err?.error ||
+    err;
   return {
     message: e?.error_user_msg || e?.message || 'Meta API error',
     title: e?.error_user_title,
