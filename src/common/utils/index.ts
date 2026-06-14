@@ -164,11 +164,14 @@ export async function executeMetaApiWithRetry<T>(
   options?: {
     maxRetries?: number;
     initialSleepMs?: number;
+    networkSleepMs?: number;
     logger?: any;
+    context?: Record<string, any>;
   },
 ): Promise<T> {
   const maxRetries = options?.maxRetries ?? 2;
   const initialSleepMs = options?.initialSleepMs ?? 60000;
+  const networkSleepMs = options?.networkSleepMs ?? 10000;
   let retry = 0;
 
   while (true) {
@@ -177,12 +180,32 @@ export async function executeMetaApiWithRetry<T>(
     } catch (error: any) {
       if (isRetryableError(error) && retry < maxRetries) {
         retry++;
-        const sleepTime = initialSleepMs * retry;
+        const normalized = normalizeMetaError(error?.response || error);
+        const message = (
+          normalized.message ||
+          error?.message ||
+          ''
+        ).toLowerCase();
+        const isNetworkError =
+          !normalized.code &&
+          (message.includes('no response was received') ||
+            message.includes('timeout') ||
+            message.includes('network error') ||
+            message.includes('enotfound') ||
+            message.includes('econnreset') ||
+            message.includes('etimedout') ||
+            message.includes('econnaborted') ||
+            message.includes('socket hang up'));
+        const sleepTime =
+          (isNetworkError ? networkSleepMs : initialSleepMs) * retry;
         const errMsg = error?.response?.code
           ? `Code: ${error.response.code}`
           : `Msg: ${error?.message || String(error)}`;
+        const contextText = options?.context
+          ? ` | Context: ${JSON.stringify(options.context)}`
+          : '';
         options?.logger?.warn?.(
-          `[Meta API Error] Error hit (${errMsg}). Retrying ${retry}/${maxRetries} after ${Math.round(sleepTime / 1000)}s...`,
+          `[Meta API Error] Error hit (${errMsg}). Retrying ${retry}/${maxRetries} after ${Math.round(sleepTime / 1000)}s...${contextText}`,
         );
         await sleep(sleepTime);
       } else {
@@ -414,8 +437,11 @@ export async function fetchAll(
           const waitTime = isRateLimit
             ? rateLimitSleepMs * retry
             : 10000 * retry; // Lỗi mạng thì chờ 10s, 20s
+          const contextText = options?.context
+            ? ` Context: ${JSON.stringify(options.context)}`
+            : '';
           console.warn(
-            `[Meta] Fetch error (RateLimit: ${isRateLimit}, NetworkError: ${isNetworkError}). Retrying in ${waitTime}ms... (Attempt ${retry}/${maxRetries})`,
+            `[Meta] Fetch error (RateLimit: ${isRateLimit}, NetworkError: ${isNetworkError}). Retrying in ${waitTime}ms... (Attempt ${retry}/${maxRetries}).${contextText}`,
           );
           await sleep(waitTime);
           // Quay lại đầu vòng lặp while để thử lại page.next()

@@ -16,7 +16,7 @@ export class InsightSyncProcessor {
 
   @Process({
     name: INSIGHT_SYNC_JOBS.SYNC_ACCOUNT,
-    concurrency: 10,
+    concurrency: Number(process.env.INSIGHT_SYNC_ACCOUNT_CONCURRENCY || 3),
   })
   async handleSyncAccount(job: Job<SyncAccountJobData>) {
     const { accountId, levels, ranges } = job.data;
@@ -72,7 +72,9 @@ export class InsightSyncProcessor {
     const { accountId } = job.data;
     const start = Date.now();
 
-    this.logger.log(`🚀 [JOB START] Missing Daily sync for Account: ${accountId}`);
+    this.logger.log(
+      `🚀 [JOB START] Missing Daily sync for Account: ${accountId}`,
+    );
 
     try {
       await this.syncService.syncAccountMissingDailyInsights(accountId);

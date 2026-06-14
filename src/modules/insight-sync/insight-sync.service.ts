@@ -11,6 +11,7 @@ import {
   chunk,
   executeDbWithRetry,
   extractCampaignMetrics,
+  sleep,
 } from '../../common/utils';
 import { MetaApiService } from '../meta-api/meta-api.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -242,7 +243,10 @@ export class InsightSyncService {
       return;
     }
 
-    const chunkSize = level === InsightSyncLevel.AD ? 50 : 200;
+    const chunkSize =
+      level === InsightSyncLevel.AD
+        ? Number(process.env.INSIGHT_SYNC_AD_CHUNK_SIZE || 25)
+        : Number(process.env.INSIGHT_SYNC_ENTITY_CHUNK_SIZE || 100);
     const idChunks = chunk(entityIds, chunkSize) as string[][];
 
     for (let i = 0; i < idChunks.length; i++) {
@@ -275,32 +279,41 @@ export class InsightSyncService {
           };
         });
 
-      if (dailyData.length === 0) continue;
-
-      await executeDbWithRetry(async () => {
-        await prismaHelper.upsertMany(
-          dailyData,
-          (item: any) => {
-            const { [relationFieldId]: rId, dateStart, range, ...data } = item;
-            return (this.prisma[prismaModel] as any).upsert({
-              where: {
-                [`${relationFieldId}_dateStart_range`]: {
-                  [relationFieldId]: rId,
-                  dateStart,
-                  range,
+      if (dailyData.length > 0) {
+        await executeDbWithRetry(async () => {
+          await prismaHelper.upsertMany(
+            dailyData,
+            (item: any) => {
+              const {
+                [relationFieldId]: rId,
+                dateStart,
+                range,
+                ...data
+              } = item;
+              return (this.prisma[prismaModel] as any).upsert({
+                where: {
+                  [`${relationFieldId}_dateStart_range`]: {
+                    [relationFieldId]: rId,
+                    dateStart,
+                    range,
+                  },
                 },
-              },
-              update: data,
-              create: item,
-            });
-          },
-          50,
-        );
-      });
+                update: data,
+                create: item,
+              });
+            },
+            50,
+          );
+        });
 
-      this.logger.log(
-        `[${accountId}] Saved ${dailyData.length} DAILY ${level} records.`,
-      );
+        this.logger.log(
+          `[${accountId}] Saved ${dailyData.length} DAILY ${level} records.`,
+        );
+      }
+
+      if (i < idChunks.length - 1) {
+        await sleep(Number(process.env.INSIGHT_SYNC_CHUNK_SLEEP_MS || 750));
+      }
     }
   }
 

@@ -235,9 +235,31 @@ export class MetaApiService implements OnModuleInit {
           },
           true, // iterate
         ),
-      { logger: this.logger },
+      {
+        logger: this.logger,
+        maxRetries: 3,
+        networkSleepMs: 10000,
+        context: {
+          accountId,
+          level,
+          ids: ids?.length || 0,
+          datePreset: rest.date_preset,
+          timeRange: rest.time_range,
+          timeIncrement: rest.time_increment,
+        },
+      },
     );
 
-    return fetchAll(cursor);
+    return fetchAll(cursor, {
+      maxRetries: 3,
+      context: {
+        accountId,
+        level,
+        ids: ids?.length || 0,
+        datePreset: rest.date_preset,
+        timeRange: rest.time_range,
+        timeIncrement: rest.time_increment,
+      },
+    });
   }
 }
