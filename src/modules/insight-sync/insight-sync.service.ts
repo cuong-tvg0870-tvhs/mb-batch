@@ -541,15 +541,47 @@ export class InsightSyncService {
           daily: {} as Record<string, Record<string, number>>,
         };
 
+        const dateBounds = {
+          max: { minStart: null as string | null, maxStop: null as string | null },
+          last7d: { minStart: null as string | null, maxStop: null as string | null },
+          last3d: { minStart: null as string | null, maxStop: null as string | null },
+          today: { minStart: null as string | null, maxStop: null as string | null },
+        };
+
+        const updateBounds = (rangeKey: 'max' | 'last7d' | 'last3d' | 'today', ins: any) => {
+          const start = ins.dateStart;
+          const stop = ins.dateStop;
+          if (start) {
+            if (!dateBounds[rangeKey].minStart || start < dateBounds[rangeKey].minStart) {
+              dateBounds[rangeKey].minStart = start;
+            }
+          }
+          if (stop) {
+            if (!dateBounds[rangeKey].maxStop || stop > dateBounds[rangeKey].maxStop) {
+              dateBounds[rangeKey].maxStop = stop;
+            }
+          }
+        };
+
         for (const adId of ads) {
           const adInsights = insightMap.get(adId) || [];
           for (const ins of adInsights) {
-            if (ins.range === InsightRange.MAX) sumMetrics(bucket.max, ins);
-            if (ins.range === InsightRange.DAY_7)
+            if (ins.range === InsightRange.MAX) {
+              sumMetrics(bucket.max, ins);
+              updateBounds('max', ins);
+            }
+            if (ins.range === InsightRange.DAY_7) {
               sumMetrics(bucket.last7d, ins);
-            if (ins.range === InsightRange.DAY_3)
+              updateBounds('last7d', ins);
+            }
+            if (ins.range === InsightRange.DAY_3) {
               sumMetrics(bucket.last3d, ins);
-            if (ins.range === InsightRange.TODAY) sumMetrics(bucket.today, ins);
+              updateBounds('last3d', ins);
+            }
+            if (ins.range === InsightRange.TODAY) {
+              sumMetrics(bucket.today, ins);
+              updateBounds('today', ins);
+            }
             if (ins.range === InsightRange.DAILY) {
               if (!bucket.daily[ins.dateStart])
                 bucket.daily[ins.dateStart] = {};
@@ -570,26 +602,35 @@ export class InsightSyncService {
         const ranges: any[] = [
           {
             range: InsightRange.MAX,
-            dateStart: '1975-01-01',
+            dateStart: dateBounds.max.minStart || '1975-01-01',
+            dateStop: dateBounds.max.maxStop || today,
             data: bucket.max,
           },
           {
             range: InsightRange.DAY_7,
-            dateStart: sevenDaysAgo,
+            dateStart: dateBounds.last7d.minStart || sevenDaysAgo,
+            dateStop: dateBounds.last7d.maxStop || today,
             data: bucket.last7d,
           },
           {
             range: InsightRange.DAY_3,
-            dateStart: threeDaysAgo,
+            dateStart: dateBounds.last3d.minStart || threeDaysAgo,
+            dateStop: dateBounds.last3d.maxStop || today,
             data: bucket.last3d,
           },
-          { range: InsightRange.TODAY, dateStart: today, data: bucket.today },
+          {
+            range: InsightRange.TODAY,
+            dateStart: dateBounds.today.minStart || today,
+            dateStop: dateBounds.today.maxStop || today,
+            data: bucket.today,
+          },
         ];
 
         for (const dateStart of Object.keys(bucket.daily)) {
           ranges.push({
             range: InsightRange.DAILY,
             dateStart: dateStart,
+            dateStop: dateStart,
             data: bucket.daily[dateStart],
           });
         }
@@ -599,7 +640,7 @@ export class InsightSyncService {
             creativeId: creative.id,
             dateStart: r.dateStart,
             range: r.range,
-            data: { dateStop: today, ...r.data },
+            data: { dateStop: r.dateStop, ...r.data },
           });
         }
 
