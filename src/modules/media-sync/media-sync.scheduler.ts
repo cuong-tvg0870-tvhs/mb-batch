@@ -71,7 +71,7 @@ export class MediaSyncScheduler implements OnModuleInit {
   /**
    * ⏰ SYNC EXPIRED URLS (Every 2 hours at minute 0)
    */
-  @Cron('0 */2 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('0 */1 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async scheduleSyncExpiredUrls() {
     this.logger.log('📅 Scheduling Expired URLs Sync...');
     await this.mediaSyncQueue.add(

@@ -454,7 +454,7 @@ export class MediaSyncService implements OnModuleInit {
           lte: new Date(Date.now() + 24 * 60 * 60 * 1000), // Within 24 hours
         },
       },
-      take: 50,
+      take: 500,
     });
 
     if (assets.length === 0) {
