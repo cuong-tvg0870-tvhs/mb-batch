@@ -14,7 +14,31 @@ export class MediaSyncScheduler implements OnModuleInit {
 
   async onModuleInit() {
     this.logger.log('🚀 MediaSyncScheduler Initialized');
-    // Initial sync on startup
+
+    if (
+      process.env.NODE_ENV === 'production' &&
+      process.env.DISABLE_STARTUP_SYNC !== 'true'
+    ) {
+      this.logger.log(
+        '🚀 [Deploy Startup] Production environment detected. Triggering Expired URLs Sync...',
+      );
+      try {
+        await this.mediaSyncQueue.add(
+          MEDIA_SYNC_JOBS.SYNC_EXPIRED_URLS,
+          {},
+          {
+            removeOnComplete: true,
+            attempts: 3,
+            backoff: { type: 'exponential', delay: 60000 },
+          },
+        );
+        this.logger.log('✅ Startup Expired URLs Sync successfully queued.');
+      } catch (error: any) {
+        this.logger.error(
+          `❌ Failed to queue startup Expired URLs Sync: ${error.message}`,
+        );
+      }
+    }
   }
 
   /**
