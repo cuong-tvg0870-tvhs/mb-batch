@@ -216,6 +216,7 @@ Scheduler (@Cron) → Bull Queue → Processor → Service
 | `15 2 * * *` (2:15 AM) | MAX sync | Lifetime insights |
 | `0 3 * * *` (3:00 AM) | Missing DAILY | Tìm và sync bù các ngày DAILY bị thiếu theo lô 50 IDs (tối ưu hóa API calls) |
 | `35 4 * * *` (4:35 AM) | Audience sync | Age/gender demographic breakdowns |
+| `10 0 * * *` (12:10 AM) | Inactive Sliding Window | Trượt ngày locally cho thực thể PAUSED/ARCHIVED quá 3 ngày (slideInactiveInsights) |
 
 #### media-sync (Creative Library)
 | Cron | Mô tả |
@@ -339,6 +340,9 @@ AutomationCategory → AutomationFolder → AutomationRule
 9. **Concurrency Control**: `p-limit(4)` cho parallel Meta API calls
 10. **Creative Asset Mapping during Sync**: Khi đồng bộ dữ liệu chiến dịch từ Meta (trong cả `mb-batch` và `mb-ads`), hệ thống tự động tìm kiếm `CreativeAsset` khớp với `imageHash` hoặc `videoId` của creative và tự động chèn các bản ghi `CreativeAssetMapping`. Đồng thời, các chiến dịch được đồng bộ từ Meta cũng được tự động liên kết ngược lại với `SystemCampaign` tương ứng (qua `systemCampaignId`) bằng cách tìm kiếm theo `meta_id`. Điều này đảm bảo tính năng kiểm tra điều kiện/lọc loại trừ của tự động hóa (automation exclusion check) hoạt động chính xác và không bị chọn lại các ảnh/video đã được sử dụng.
 11. **Optimized Insight Synchronization (Reuse ID & Concurrency)**: Dữ liệu insight theo range tổng hợp (TODAY, 3D, 7D, MAX) sử dụng cơ chế *Tái sử dụng ID (Reuse ID)*. Thay vì xóa-chèn bản ghi mới rồi cập nhật lại bảng cha, worker ghi đè dữ liệu trực tiếp vào ID insight cũ, giúp loại bỏ 99% lệnh ghi vào Campaign/AdSet/Ad/Creative và bảo toàn các trường quan hệ 1-1 cho Prisma sort/filter hoạt động mượt mà. Đồng thời, dữ liệu DAILY được cập nhật bằng lệnh Native `upsert` trên Postgres composite keys `(entityId, dateStart, range)` để tránh phình dung lượng và đảm bảo tính nguyên tử (atomicity). Chunk API calls được thực thi song song giới hạn luồng (concurrency limit = 3) để tối ưu thời gian.
+    - **Recently Paused Retention (3 Days)**: Thực thể tạm dừng vẫn được đồng bộ từ Meta API trong vòng 3 ngày sau khi pause để bắt được các chuyển đổi trễ (attribution lag) và chi tiêu phát sinh.
+    - **Local Inactive Sliding Window**: Sau 3 ngày pause, thực thể chuyển sang cơ chế trượt ngày locally (`slideInactiveInsights`). Hệ thống tự động tính toán các range TODAY, 3D, 7D dựa trên dữ liệu bảng `DAILY` trong DB mà không cần gọi API Meta, xóa bỏ hoàn toàn chi phí API cho các quảng cáo đã dừng.
+    - **Dynamic Creative Aggregation**: CreativeInsight được tổng hợp động trực tiếp từ dữ liệu `DAILY` và `MAX` của AdInsight trực thuộc. Các range TODAY, 3D (yesterday-2 đến yesterday), 7D (yesterday-6 đến yesterday) được tính toán hoàn toàn bằng local code (loại bỏ việc gọi API Meta và khắc phục lỗi ngày kết thúc dừng ở ngày ad bị tắt).
 
 ---
 

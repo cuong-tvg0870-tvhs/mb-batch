@@ -3,6 +3,7 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { Queue } from 'bull';
 import { PrismaService } from '../prisma/prisma.service';
+import { InsightSyncService } from './insight-sync.service';
 import {
   INSIGHT_SYNC_JOBS,
   INSIGHT_SYNC_QUEUE,
@@ -18,6 +19,7 @@ export class InsightSyncScheduler implements OnModuleInit {
   constructor(
     @InjectQueue(INSIGHT_SYNC_QUEUE) private readonly syncQueue: Queue,
     private readonly prisma: PrismaService,
+    private readonly syncService: InsightSyncService,
   ) {}
 
   async onModuleInit() {
@@ -51,7 +53,7 @@ export class InsightSyncScheduler implements OnModuleInit {
   }
 
   private async triggerAllSyncsSequentially() {
-    this.logger.log('📢 Triggering all insight syncs sequentially (Today, 3D, 7D, Max, Missing Daily, Audience)...');
+    this.logger.log('📢 Triggering all insight syncs sequentially (Today, 3D, 7D, Max, Missing Daily, Audience, Inactive Sliding)...');
     try {
       await this.scheduleTodaySync();
       await this.schedule3DSync();
@@ -59,6 +61,7 @@ export class InsightSyncScheduler implements OnModuleInit {
       await this.scheduleMaxSync();
       await this.scheduleMissingDailySync();
       await this.scheduleAudienceSync();
+      await this.scheduleInactiveSlidingWindow();
       this.logger.log('✅ All insight syncs successfully queued on startup.');
     } catch (error: any) {
       this.logger.error(`❌ Failed to queue startup syncs: ${error.message}`);
@@ -235,5 +238,19 @@ export class InsightSyncScheduler implements OnModuleInit {
     this.logger.log(
       `✅ Successfully queued audience jobs for ${accounts.length} accounts.`,
     );
+  }
+
+  /**
+   * 🟣 INACTIVE SLIDING WINDOW JOB
+   * Runs once a day at 12:10 AM
+   */
+  @Cron('10 0 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async scheduleInactiveSlidingWindow() {
+    this.logger.log('📅 Scheduling Inactive Sliding Window Job (12:10 AM)...');
+    try {
+      await this.syncService.slideInactiveInsights();
+    } catch (err: any) {
+      this.logger.error(`❌ Inactive Sliding Window Job failed: ${err.message}`);
+    }
   }
 }
