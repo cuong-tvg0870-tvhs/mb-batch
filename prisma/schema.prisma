@@ -2577,3 +2577,14 @@ model Contribution {
   @@index([type])
   @@index([status])
 }
+
+model HelpChapter {
+  id        String   @id @default(uuid())
+  slug      String   @unique
+  title     String
+  content   String   @db.Text
+  subItems  Json     // Array of sub-sections: [{ "title": "...", "anchor": "..." }]
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

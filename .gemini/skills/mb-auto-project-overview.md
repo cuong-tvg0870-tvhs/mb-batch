@@ -82,6 +82,7 @@
   /settings + /permissions      → Cài đặt & Phân quyền
   /profile                      → Hồ sơ cá nhân
   /feedbacks + [id]             → Đóng góp ý kiến (Khen/Chê/Đề xuất) & chi tiết đóng góp
+  /help + [slug]                → Trung tâm Trợ giúp (User Guide Viewer)
   /insights                     → Quản trị Insight (ADMIN)
     /campaigns + [id]           → Campaign Insight
     /ad-sets + [id]             → Adset Insight
