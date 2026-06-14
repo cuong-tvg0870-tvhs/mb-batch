@@ -66,8 +66,7 @@ export class MetaApiService implements OnModuleInit {
     const code = error.code;
     const type = error.type;
 
-    const isAuthError =
-      type === 'OAuthException' || code === 190 || code === 102;
+    const isAuthError = code === 190 || code === 102;
     const isLimitError =
       code === 17 || code === 4 || code === 32 || code === 613;
 
