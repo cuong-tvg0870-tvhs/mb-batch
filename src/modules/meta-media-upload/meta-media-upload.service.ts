@@ -34,6 +34,10 @@ type FolderUploadStats = {
 export class MetaMediaUploadService {
   private readonly logger = new Logger(MetaMediaUploadService.name);
   private readonly maxFilesPerRun = 20;
+  private readonly uploadChunkSize = Math.max(
+    1,
+    Number(process.env.META_MEDIA_UPLOAD_CHUNK_SIZE || 10),
+  );
   private readonly uploadingClaimTtlMs = 6 * 60 * 60 * 1000;
   private readonly driveFolderMimeType = 'application/vnd.google-apps.folder';
   private readonly rootFolderId =
@@ -152,15 +156,33 @@ export class MetaMediaUploadService {
 
     if (driveFile.mimeType === this.driveFolderMimeType) {
       if (!driveFile.id) throw new Error('Missing Drive folder ID');
+      await this.upsertDriveFile(driveFile);
+
+      const driveFolderName =
+        driveFile.name ||
+        record.product_name ||
+        record.product_code ||
+        driveFile.id;
+      const targetFolder =
+        this.cleanName(driveFolderName) === this.cleanName(productFolder.name)
+          ? productFolder
+          : await this.ensureCreativeFolder(
+              driveFolderName,
+              productFolder.id,
+              driveFolderName,
+            );
+
       const stats = await this.uploadDriveFolder(
         driveFile.id,
-        productFolder.id,
+        targetFolder.id,
         budget,
       );
 
       return {
         status: stats.limitReached ? 'PENDING' : 'SUCCESS',
         raw: {
+          sync_meta_folder_id: targetFolder.id,
+          sync_meta_folder_name: targetFolder.name,
           sync_uploaded_count: stats.uploadedCount,
           sync_skipped_count: stats.skippedCount,
           sync_unsupported_count: stats.unsupportedCount,
@@ -212,24 +234,58 @@ export class MetaMediaUploadService {
       }
 
       const children = await this.listFolderChildren(folderId);
+      const childFolders = children.filter(
+        (child) => child.mimeType === this.driveFolderMimeType,
+      );
+      const mediaFiles = children.filter(
+        (child) => child.mimeType !== this.driveFolderMimeType,
+      );
 
-      for (const child of children) {
+      for (const child of childFolders) {
         if (!child.id) continue;
 
-        if (child.mimeType === this.driveFolderMimeType) {
-          await this.upsertDriveFile(child);
-          const subFolder = await this.ensureCreativeFolder(
-            child.name || child.id,
-            targetFolderId,
-          );
-          await walk(child.id, subFolder.id);
-        } else {
-          const result = await this.uploadDriveFile(
-            child,
-            targetFolderId,
-            budget,
-          );
+        await this.upsertDriveFile(child);
+        const subFolder = await this.ensureCreativeFolder(
+          child.name || child.id,
+          targetFolderId,
+        );
+        await walk(child.id, subFolder.id);
 
+        if (budget.uploaded >= budget.limit) {
+          stats.limitReached = true;
+          return;
+        }
+      }
+
+      let chunkNumber = 0;
+      for (let i = 0; i < mediaFiles.length; ) {
+        if (budget.uploaded >= budget.limit) {
+          stats.limitReached = true;
+          return;
+        }
+
+        const remainingBudget = budget.limit - budget.uploaded;
+        const takeCount = Math.min(this.uploadChunkSize, remainingBudget);
+        const chunk = mediaFiles.slice(i, i + takeCount);
+        if (chunk.length === 0) {
+          stats.limitReached = budget.uploaded >= budget.limit;
+          return;
+        }
+
+        i += chunk.length;
+        chunkNumber += 1;
+
+        this.logger.log(
+          `Uploading media chunk ${chunkNumber} in Meta folder ${targetFolderId}: ${chunk.length} files (${budget.uploaded}/${budget.limit} uploaded this job)`,
+        );
+
+        const results = await Promise.all(
+          chunk.map((child) =>
+            this.uploadDriveFile(child, targetFolderId, budget),
+          ),
+        );
+
+        for (const result of results) {
           if (result.uploaded) stats.uploadedCount += 1;
           else if (result.reason === 'UNSUPPORTED_TYPE')
             stats.unsupportedCount += 1;
