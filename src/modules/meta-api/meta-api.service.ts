@@ -202,10 +202,15 @@ export class MetaApiService implements OnModuleInit {
       ids?: string[];
       limit?: number;
       breakdowns?: string[];
+      retryOptions?: {
+        maxRetries?: number;
+        initialSleepMs?: number;
+        networkSleepMs?: number;
+      };
     },
   ) {
     this.initSdk();
-    const { level, ids, ...rest } = params;
+    const { level, ids, retryOptions, ...rest } = params;
     const adAccount = new AdAccount(accountId);
 
     const filtering = [];
@@ -237,8 +242,9 @@ export class MetaApiService implements OnModuleInit {
         ),
       {
         logger: this.logger,
-        maxRetries: 3,
-        networkSleepMs: 10000,
+        maxRetries: retryOptions?.maxRetries ?? 3,
+        initialSleepMs: retryOptions?.initialSleepMs,
+        networkSleepMs: retryOptions?.networkSleepMs ?? 10000,
         context: {
           accountId,
           level,
@@ -251,7 +257,7 @@ export class MetaApiService implements OnModuleInit {
     );
 
     return fetchAll(cursor, {
-      maxRetries: 3,
+      maxRetries: retryOptions?.maxRetries ?? 3,
       context: {
         accountId,
         level,

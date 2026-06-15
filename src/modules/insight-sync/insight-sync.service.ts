@@ -11,6 +11,7 @@ import {
   chunk,
   executeDbWithRetry,
   extractCampaignMetrics,
+  parseMetaError,
   sleep,
 } from '../../common/utils';
 import { MetaApiService } from '../meta-api/meta-api.service';
@@ -217,6 +218,104 @@ export class InsightSyncService {
     );
   }
 
+  private shouldSplitInsightRequest(error: any) {
+    const metaError = parseMetaError(error);
+    const code = Number(metaError.code);
+    const subcode = Number(metaError.subcode);
+    const message = (metaError.message || '').toLowerCase();
+
+    return (
+      code === 1 ||
+      code === 2 ||
+      subcode === 2446079 ||
+      message.includes('reduce the amount of data') ||
+      message.includes('too much data') ||
+      message.includes('unexpected error')
+    );
+  }
+
+  private getDefaultInsightChunkSize(level: InsightSyncLevel) {
+    return level === InsightSyncLevel.AD
+      ? Number(process.env.INSIGHT_SYNC_AD_CHUNK_SIZE || 10)
+      : Number(process.env.INSIGHT_SYNC_ENTITY_CHUNK_SIZE || 100);
+  }
+
+  private getMinAdaptiveInsightChunkSize(level: InsightSyncLevel) {
+    return level === InsightSyncLevel.AD
+      ? Number(process.env.INSIGHT_SYNC_AD_MIN_CHUNK_SIZE || 3)
+      : Number(process.env.INSIGHT_SYNC_ENTITY_MIN_CHUNK_SIZE || 20);
+  }
+
+  private async fetchDailyInsightsAdaptive(
+    accountId: string,
+    level: InsightSyncLevel,
+    ids: string[],
+    timeRange: { since: string; until: string },
+    depth = 0,
+  ): Promise<any[]> {
+    const minChunkSize = this.getMinAdaptiveInsightChunkSize(level);
+    const canSplit = ids.length > minChunkSize;
+
+    try {
+      return await this.metaApi.getAccountInsights(accountId, {
+        level: level as any,
+        time_range: timeRange,
+        time_increment: 1,
+        ids,
+        limit: 50,
+        retryOptions: canSplit
+          ? {
+              maxRetries: Number(
+                process.env.INSIGHT_SYNC_ADAPTIVE_RETRIES || 1,
+              ),
+              initialSleepMs: Number(
+                process.env.INSIGHT_SYNC_ADAPTIVE_RETRY_SLEEP_MS || 15000,
+              ),
+              networkSleepMs: Number(
+                process.env.INSIGHT_SYNC_NETWORK_RETRY_SLEEP_MS || 10000,
+              ),
+            }
+          : undefined,
+      });
+    } catch (error) {
+      if (!canSplit || !this.shouldSplitInsightRequest(error)) {
+        throw error;
+      }
+
+      const middle = Math.ceil(ids.length / 2);
+      const left = ids.slice(0, middle);
+      const right = ids.slice(middle);
+      const metaError = parseMetaError(error);
+
+      this.logger.warn(
+        `[${accountId}] Splitting DAILY ${level} insight request ${ids.length} ids -> ${left.length}+${right.length} after Meta error code=${metaError.code ?? '-'} subcode=${metaError.subcode ?? '-'} depth=${depth}.`,
+      );
+
+      await sleep(
+        Number(process.env.INSIGHT_SYNC_ADAPTIVE_SPLIT_SLEEP_MS || 1000),
+      );
+      const leftResult = await this.fetchDailyInsightsAdaptive(
+        accountId,
+        level,
+        left,
+        timeRange,
+        depth + 1,
+      );
+      await sleep(
+        Number(process.env.INSIGHT_SYNC_ADAPTIVE_SPLIT_SLEEP_MS || 1000),
+      );
+      const rightResult = await this.fetchDailyInsightsAdaptive(
+        accountId,
+        level,
+        right,
+        timeRange,
+        depth + 1,
+      );
+
+      return [...leftResult, ...rightResult];
+    }
+  }
+
   private async syncRecentDailyInsights(
     accountId: string,
     level: InsightSyncLevel,
@@ -255,10 +354,7 @@ export class InsightSyncService {
       return;
     }
 
-    const chunkSize =
-      level === InsightSyncLevel.AD
-        ? Number(process.env.INSIGHT_SYNC_AD_CHUNK_SIZE || 25)
-        : Number(process.env.INSIGHT_SYNC_ENTITY_CHUNK_SIZE || 100);
+    const chunkSize = this.getDefaultInsightChunkSize(level);
     const idChunks = chunk(entityIds, chunkSize) as string[][];
 
     for (let i = 0; i < idChunks.length; i++) {
@@ -267,13 +363,12 @@ export class InsightSyncService {
         `[${accountId}] Fetching DAILY ${level}: chunk ${i + 1}/${idChunks.length}.`,
       );
 
-      const insights = await this.metaApi.getAccountInsights(accountId, {
-        level: level as any,
-        time_range: { since, until },
-        time_increment: 1,
-        ids: idChunk,
-        limit: 50,
-      });
+      const insights = await this.fetchDailyInsightsAdaptive(
+        accountId,
+        level,
+        idChunk,
+        { since, until },
+      );
 
       const dailyData = (insights || [])
         .filter((insight: any) => insight[entityIdField])
@@ -1679,10 +1774,9 @@ export class InsightSyncService {
         );
 
         // 4. Fetch from Meta in chunks (bulk fetch)
-        // Group by 50 IDs per chunk to minimize API call limits and payload size
         const entityChunks = chunk(
           entitiesToSync,
-          50,
+          this.getDefaultInsightChunkSize(level),
         ) as (typeof entitiesToSync)[];
 
         for (let i = 0; i < entityChunks.length; i++) {
@@ -1702,15 +1796,11 @@ export class InsightSyncService {
               .sort()
               .slice(-1)[0];
 
-            const metaInsights = await this.metaApi.getAccountInsights(
+            const metaInsights = await this.fetchDailyInsightsAdaptive(
               accountId,
-              {
-                level: level as any,
-                time_range: { since: chunkSince, until: chunkUntil },
-                time_increment: 1,
-                ids: chunkIds,
-                limit: 50,
-              },
+              level,
+              chunkIds,
+              { since: chunkSince, until: chunkUntil },
             );
 
             if (metaInsights && metaInsights.length > 0) {
