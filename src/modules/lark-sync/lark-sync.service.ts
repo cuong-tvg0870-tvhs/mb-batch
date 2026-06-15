@@ -29,6 +29,9 @@ export class LarkSyncService {
     'sync_skipped_count',
     'sync_unsupported_count',
     'sync_limit_reached',
+    'sync_upload_batch_id',
+    'sync_claimed_at',
+    'sync_stale_released_at',
     'last_meta_upload_checked_at',
   ];
   private driveSA: drive_v3.Drive;

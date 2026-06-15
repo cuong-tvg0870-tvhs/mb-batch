@@ -1,5 +1,6 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { AssetType, Prisma } from '@prisma/client';
+import { randomUUID } from 'crypto';
 import * as fs from 'fs';
 import { drive_v3, google } from 'googleapis';
 import * as path from 'path';
@@ -33,6 +34,7 @@ type FolderUploadStats = {
 export class MetaMediaUploadService {
   private readonly logger = new Logger(MetaMediaUploadService.name);
   private readonly maxFilesPerRun = 20;
+  private readonly uploadingClaimTtlMs = 6 * 60 * 60 * 1000;
   private readonly driveFolderMimeType = 'application/vnd.google-apps.folder';
   private readonly rootFolderId =
     process.env.META_CREATIVE_ROOT_FOLDER_ID || '4303729193176038';
@@ -54,42 +56,42 @@ export class MetaMediaUploadService {
   }
 
   async autoUpload() {
+    await this.releaseStaleUploadingRecords();
+
     const budget: UploadBudget = {
       uploaded: 0,
       limit: this.maxFilesPerRun,
     };
 
     const records = await this.prisma.larkRecord.findMany({
-      where: {
-        AND: [
-          { drive: { drive_permission: true } },
-          {
-            raw: {
-              path: ['permission_access_verified'],
-              equals: true,
-            },
-          },
-          { creative_asset_id: null },
-          {
-            OR: [
-              { NOT: { raw: { path: ['sync_status'], equals: 'SUCCESS' } } },
-              { raw: { path: ['sync_status'], equals: Prisma.DbNull } },
-            ],
-          },
-        ],
-      },
+      where: this.buildEligibleRecordWhere(),
       include: { drive: true },
       orderBy: [{ production_date: 'desc' }, { id: 'asc' }],
+      take: this.maxFilesPerRun,
     });
 
     this.logger.log(
       `Found ${records.length} eligible Lark records for Meta auto-upload`,
     );
 
-    for (const record of records) {
-      if (budget.uploaded >= budget.limit) break;
+    const uploadBatchId = randomUUID();
+    const claimedRecords = await this.claimRecordsForUpload(
+      records,
+      uploadBatchId,
+    );
 
-      await this.markRecordStatus(record, 'UPLOADING');
+    this.logger.log(
+      `Claimed ${claimedRecords.length}/${records.length} Lark records as UPLOADING for Meta auto-upload batch ${uploadBatchId}`,
+    );
+
+    for (const record of claimedRecords) {
+      if (budget.uploaded >= budget.limit) {
+        await this.markRecordStatus(record, 'PENDING', null, {
+          sync_limit_reached: true,
+          sync_upload_batch_id: uploadBatchId,
+        });
+        continue;
+      }
 
       try {
         const result = await this.uploadRecord(record, budget);
@@ -761,23 +763,144 @@ export class MetaMediaUploadService {
     syncError: string | null = null,
     extraRaw: Record<string, any> = {},
   ) {
-    const raw =
-      record.raw && typeof record.raw === 'object' && !Array.isArray(record.raw)
-        ? record.raw
-        : {};
-
     await this.prisma.larkRecord.update({
       where: { id: record.id },
       data: {
-        raw: {
-          ...raw,
-          ...extraRaw,
-          sync_status: syncStatus,
-          sync_error: syncError,
-          last_meta_upload_checked_at: new Date().toISOString(),
-        },
+        raw: this.buildRecordRaw(record.raw, syncStatus, syncError, extraRaw),
       },
     });
+  }
+
+  private buildEligibleRecordWhere(): Prisma.LarkRecordWhereInput {
+    return {
+      AND: [
+        { drive: { drive_permission: true } },
+        {
+          raw: {
+            path: ['permission_access_verified'],
+            equals: true,
+          },
+        },
+        { creative_asset_id: null },
+        {
+          OR: [
+            { NOT: { raw: { path: ['sync_status'], equals: 'SUCCESS' } } },
+            { raw: { path: ['sync_status'], equals: Prisma.DbNull } },
+          ],
+        },
+        { NOT: { raw: { path: ['sync_status'], equals: 'UPLOADING' } } },
+      ],
+    };
+  }
+
+  private async claimRecordsForUpload(records: any[], uploadBatchId: string) {
+    if (records.length === 0) return [];
+
+    const claimedAt = new Date().toISOString();
+    const claimedRaws = records.map((record) =>
+      this.buildRecordRaw(record.raw, 'UPLOADING', null, {
+        sync_upload_batch_id: uploadBatchId,
+        sync_claimed_at: claimedAt,
+      }),
+    );
+
+    const results = await this.prisma.$transaction(
+      records.map((record, index) =>
+        this.prisma.larkRecord.updateMany({
+          where: {
+            id: record.id,
+            ...this.buildEligibleRecordWhere(),
+          },
+          data: {
+            raw: claimedRaws[index],
+          },
+        }),
+      ),
+    );
+
+    return records
+      .map((record, index) =>
+        results[index].count > 0
+          ? {
+              ...record,
+              raw: claimedRaws[index],
+            }
+          : null,
+      )
+      .filter(Boolean);
+  }
+
+  private async releaseStaleUploadingRecords() {
+    const uploadingRecords = await this.prisma.larkRecord.findMany({
+      where: {
+        raw: {
+          path: ['sync_status'],
+          equals: 'UPLOADING',
+        },
+      },
+      select: {
+        id: true,
+        raw: true,
+      },
+      take: this.maxFilesPerRun * 5,
+    });
+
+    const now = Date.now();
+    const staleRecords = uploadingRecords.filter((record) => {
+      const raw = this.normalizeRaw(record.raw);
+      const checkedAt = raw.sync_claimed_at || raw.last_meta_upload_checked_at;
+      const checkedAtMs = checkedAt ? new Date(checkedAt).getTime() : 0;
+
+      return !checkedAtMs || now - checkedAtMs > this.uploadingClaimTtlMs;
+    });
+
+    if (staleRecords.length === 0) return;
+
+    await this.prisma.$transaction(
+      staleRecords.map((record) =>
+        this.prisma.larkRecord.update({
+          where: { id: record.id },
+          data: {
+            raw: this.buildRecordRaw(
+              record.raw,
+              'PENDING',
+              'Upload claim expired before completion',
+              { sync_stale_released_at: new Date().toISOString() },
+            ),
+          },
+        }),
+      ),
+    );
+
+    this.logger.warn(
+      `Released ${staleRecords.length} stale UPLOADING Lark records back to PENDING`,
+    );
+  }
+
+  private buildRecordRaw(
+    recordRaw: unknown,
+    syncStatus: string,
+    syncError: string | null = null,
+    extraRaw: Record<string, any> = {},
+  ) {
+    const raw =
+      recordRaw && typeof recordRaw === 'object' && !Array.isArray(recordRaw)
+        ? (recordRaw as Record<string, any>)
+        : {};
+
+    return {
+      ...raw,
+      ...extraRaw,
+      sync_status: syncStatus,
+      sync_error: syncError,
+      last_meta_upload_checked_at: new Date().toISOString(),
+    };
+  }
+
+  private normalizeRaw(raw: unknown): Record<string, any> {
+    return raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? (raw as Record<string, any>)
+      : {};
   }
 
   private getAssetType(mimeType?: string | null, name?: string | null) {
