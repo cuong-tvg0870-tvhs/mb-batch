@@ -236,7 +236,7 @@ Scheduler (@Cron) → Bull Queue → Processor → Service
 #### lark-sync (Lark ↔ Google Drive)
 | Cron | Mô tả |
 |---|---|
-| Mỗi 30 phút | Full pipeline: Fetch Lark records → Sync Drive files → Check permissions → Map assets |
+| Mỗi 30 phút | Fetch Lark records → Targeted Drive Permission Audit with Exponential Backoff → Map assets |
 
 #### draft-automation (Campaign Auto-generation)
 | Cron | Mô tả |

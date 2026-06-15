@@ -1,6 +1,13 @@
 import { LarkRecord } from '@prisma/client';
 import { toPrismaJson } from '../../common/utils';
 
+const MAX_PERMISSION_RETRIES = 10;
+const PUBLIC_ONLY_PERMISSION_ERROR =
+  'File is public but not shared/added to service account Drive scope';
+const RETRY_DELAYS_MINUTES = [
+  30, 60, 120, 240, 480, 720, 1440, 1440, 1440, 1440,
+];
+
 // helpers
 export function getText(field?: any) {
   return field?.value?.[0]?.text || null;
@@ -30,9 +37,67 @@ export function extractDriveId(url?: string | null): string | null {
   return null;
 }
 
+export function parseAllowedSharedDriveIds(value?: string | null): Set<string> {
+  return new Set(
+    (value || '')
+      .split(',')
+      .map((id) => id.trim())
+      .filter(Boolean),
+  );
+}
+
+export function hasExplicitDriveAccess(
+  file: any,
+  allowedSharedDriveIds: Set<string>,
+): boolean {
+  if (!file) return false;
+  if (file.ownedByMe === true) return true;
+  if (file.sharedWithMeTime) return true;
+  if (file.driveId && allowedSharedDriveIds.has(file.driveId)) return true;
+
+  return false;
+}
+
+export function isPermissionCheckDue(raw: any, now = new Date()): boolean {
+  const retryCount = Number(raw?.retry_count || 0);
+  if (retryCount >= MAX_PERMISSION_RETRIES) return false;
+  if (raw?.permission_status !== 'FAILED') return true;
+  if (!raw?.last_checked_at) return true;
+
+  const lastCheckedAt = new Date(raw.last_checked_at).getTime();
+  if (Number.isNaN(lastCheckedAt)) return true;
+
+  const delayMinutes =
+    RETRY_DELAYS_MINUTES[Math.max(0, retryCount - 1)] ||
+    RETRY_DELAYS_MINUTES[RETRY_DELAYS_MINUTES.length - 1];
+  const nextCheckAt = lastCheckedAt + delayMinutes * 60 * 1000;
+
+  return now.getTime() >= nextCheckAt;
+}
+
+export function buildPermissionRawUpdate(
+  raw: any,
+  success: boolean,
+  error: string | null,
+  now = new Date(),
+) {
+  const previousRetryCount = Number(raw?.retry_count || 0);
+  return {
+    ...(raw || {}),
+    permission_status: success ? 'SUCCESS' : 'FAILED',
+    permission_error: error,
+    permission_access_verified: success,
+    retry_count: success ? 0 : previousRetryCount + 1,
+    last_checked_at: now.toISOString(),
+  };
+}
+
+export { PUBLIC_ONLY_PERMISSION_ERROR };
+
 // mapper
 export function mapRecord(item: any) {
   const f = item.fields || {};
+  const driveUrl = getLink(f['Link Content']);
   return {
     id: item?.record_id,
     raw: toPrismaJson(item),
@@ -50,7 +115,8 @@ export function mapRecord(item: any) {
     employee_id: getArrayText(f['ID MC']),
     employee_name: getText(f['Họ và tên']),
 
-    drive_url: getLink(f['Link Content']),
+    drive_url: driveUrl,
+    drive_id: extractDriveId(driveUrl),
 
     production_date: f['Ngày sản xuất'] ? new Date(f['Ngày sản xuất']) : null,
     creative_asset_id: null,
