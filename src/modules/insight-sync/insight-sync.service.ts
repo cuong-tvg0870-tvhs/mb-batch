@@ -111,6 +111,18 @@ export class InsightSyncService {
     return map[range];
   }
 
+  private getRollupKey(entityId: string, range: InsightRange) {
+    return `${entityId}:${range}`;
+  }
+
+  private getRollupDateKey(
+    entityId: string,
+    range: InsightRange,
+    dateStart: string | null,
+  ) {
+    return `${entityId}:${range}:${dateStart || ''}`;
+  }
+
   private sumMetrics(target: Record<string, number>, source: any) {
     const additiveFields = [
       'impressions',
@@ -358,6 +370,7 @@ export class InsightSyncService {
       const hasMax = windows.some(
         (window) => window.range === InsightRange.MAX,
       );
+      const rollupRanges = [...new Set(windows.map((window) => window.range))];
       const dailyWhere: any = {
         [relationFieldId]: { in: parentIds },
         range: InsightRange.DAILY,
@@ -376,6 +389,41 @@ export class InsightSyncService {
         const parentId = insight[relationFieldId];
         if (!dailyMap.has(parentId)) dailyMap.set(parentId, []);
         dailyMap.get(parentId)!.push(insight);
+      }
+
+      const existingRollups = await (this.prisma[prismaModel] as any).findMany({
+        where: {
+          [relationFieldId]: { in: parentIds },
+          range: { in: rollupRanges },
+        },
+        select: {
+          id: true,
+          [relationFieldId]: true,
+          range: true,
+          dateStart: true,
+          updatedAt: true,
+        },
+        orderBy: [{ updatedAt: 'desc' }],
+      });
+      const existingRollupIds = new Set(
+        existingRollups.map((insight: any) => insight.id),
+      );
+      const existingByRange = new Map<string, any>();
+      const existingByRangeDate = new Map<string, any>();
+      for (const insight of existingRollups) {
+        const parentId = insight[relationFieldId];
+        const rangeKey = this.getRollupKey(parentId, insight.range);
+        const dateKey = this.getRollupDateKey(
+          parentId,
+          insight.range,
+          insight.dateStart,
+        );
+        if (!existingByRange.has(rangeKey)) {
+          existingByRange.set(rangeKey, insight);
+        }
+        if (!existingByRangeDate.has(dateKey)) {
+          existingByRangeDate.set(dateKey, insight);
+        }
       }
 
       const existingMaxIds = parentChunk
@@ -437,8 +485,22 @@ export class InsightSyncService {
                   .sort()
                   .slice(-1)[0] || window.dateStop
               : window.dateStop;
+          const pointerField = this.getRangePointerField(window.range);
+          const pointerId = pointerField ? parent[pointerField] : null;
+          const exactExisting = existingByRangeDate.get(
+            this.getRollupDateKey(parent.id, window.range, dateStart),
+          );
+          const fallbackExisting = existingByRange.get(
+            this.getRollupKey(parent.id, window.range),
+          );
+          const targetId =
+            exactExisting?.id ||
+            (pointerId && existingRollupIds.has(pointerId)
+              ? pointerId
+              : fallbackExisting?.id);
 
           rollupRecords.push({
+            _targetId: targetId,
             [relationFieldId]: parent.id,
             level: levelEnum,
             range: window.range,
@@ -452,7 +514,32 @@ export class InsightSyncService {
       await prismaHelper.upsertMany(
         rollupRecords,
         (item: any) => {
-          const { [relationFieldId]: rId, dateStart, range, ...data } = item;
+          const {
+            _targetId,
+            [relationFieldId]: rId,
+            dateStart,
+            range,
+            ...data
+          } = item;
+
+          if (_targetId) {
+            return (this.prisma[prismaModel] as any).update({
+              where: { id: _targetId },
+              data: {
+                dateStart,
+                range,
+                ...data,
+              },
+            });
+          }
+
+          const createData = {
+            [relationFieldId]: rId,
+            dateStart,
+            range,
+            ...data,
+          };
+
           return (this.prisma[prismaModel] as any).upsert({
             where: {
               [`${relationFieldId}_dateStart_range`]: {
@@ -462,11 +549,13 @@ export class InsightSyncService {
               },
             },
             update: data,
-            create: item,
+            create: createData,
           });
         },
         50,
       );
+
+      if (rollupRecords.length === 0) continue;
 
       const pointerUpdates = await (this.prisma[prismaModel] as any).findMany({
         where: {
@@ -497,6 +586,20 @@ export class InsightSyncService {
           }),
         50,
       );
+
+      const cleanupFilters = pointerUpdates
+        .map((insight) => ({
+          [relationFieldId]: insight[relationFieldId],
+          range: insight.range,
+          id: { not: insight.id },
+        }))
+        .filter((filter) => this.getRangePointerField(filter.range));
+
+      for (const filterChunk of chunk(cleanupFilters, 100) as any[]) {
+        await (this.prisma[prismaModel] as any).deleteMany({
+          where: { OR: filterChunk },
+        });
+      }
     }
 
     this.logger.log(`[${accountId}] Finished ${level} local rollups.`);
@@ -1002,6 +1105,9 @@ export class InsightSyncService {
       where: { accountId },
       select: {
         id: true,
+        insightTodayId: true,
+        insight3dId: true,
+        insight7dId: true,
         insightMaxId: true,
         ads: { select: { id: true } },
       },
@@ -1044,6 +1150,42 @@ export class InsightSyncService {
       for (const insight of adInsights) {
         if (!adInsightMap.has(insight.adId)) adInsightMap.set(insight.adId, []);
         adInsightMap.get(insight.adId)!.push(insight);
+      }
+
+      const creativeIds = creativeChunk.map((creative) => creative.id);
+      const rollupRanges = [...new Set(windows.map((window) => window.range))];
+      const existingRollups = await this.prisma.creativeInsight.findMany({
+        where: {
+          creativeId: { in: creativeIds },
+          range: { in: rollupRanges },
+        },
+        select: {
+          id: true,
+          creativeId: true,
+          range: true,
+          dateStart: true,
+          updatedAt: true,
+        },
+        orderBy: [{ updatedAt: 'desc' }],
+      });
+      const existingRollupIds = new Set(
+        existingRollups.map((insight) => insight.id),
+      );
+      const existingByRange = new Map<string, any>();
+      const existingByRangeDate = new Map<string, any>();
+      for (const insight of existingRollups) {
+        const rangeKey = this.getRollupKey(insight.creativeId, insight.range);
+        const dateKey = this.getRollupDateKey(
+          insight.creativeId,
+          insight.range,
+          insight.dateStart,
+        );
+        if (!existingByRange.has(rangeKey)) {
+          existingByRange.set(rangeKey, insight);
+        }
+        if (!existingByRangeDate.has(dateKey)) {
+          existingByRangeDate.set(dateKey, insight);
+        }
       }
 
       const existingMaxIds = creativeChunk
@@ -1110,8 +1252,24 @@ export class InsightSyncService {
                   .sort()
                   .slice(-1)[0] || window.dateStop
               : window.dateStop;
+          const pointerField = this.getRangePointerField(window.range);
+          const pointerId = pointerField
+            ? (creative as any)[pointerField]
+            : null;
+          const exactExisting = existingByRangeDate.get(
+            this.getRollupDateKey(creative.id, window.range, dateStart),
+          );
+          const fallbackExisting = existingByRange.get(
+            this.getRollupKey(creative.id, window.range),
+          );
+          const targetId =
+            exactExisting?.id ||
+            (pointerId && existingRollupIds.has(pointerId)
+              ? pointerId
+              : fallbackExisting?.id);
 
           rollupRecords.push({
+            _targetId: targetId,
             creativeId: creative.id,
             level: LevelInsight.AD,
             range: window.range,
@@ -1180,7 +1338,26 @@ export class InsightSyncService {
       await prismaHelper.upsertMany(
         rollupRecords,
         (item: any) => {
-          const { creativeId, dateStart, range, ...data } = item;
+          const { _targetId, creativeId, dateStart, range, ...data } = item;
+
+          if (_targetId) {
+            return this.prisma.creativeInsight.update({
+              where: { id: _targetId },
+              data: {
+                dateStart,
+                range,
+                ...data,
+              },
+            });
+          }
+
+          const createData = {
+            creativeId,
+            dateStart,
+            range,
+            ...data,
+          };
+
           return this.prisma.creativeInsight.upsert({
             where: {
               creativeId_dateStart_range: {
@@ -1190,11 +1367,13 @@ export class InsightSyncService {
               },
             },
             update: data,
-            create: item,
+            create: createData,
           });
         },
         50,
       );
+
+      if (rollupRecords.length === 0) continue;
 
       const pointerRecords = await this.prisma.creativeInsight.findMany({
         where: {
@@ -1225,6 +1404,20 @@ export class InsightSyncService {
           }),
         50,
       );
+
+      const cleanupFilters = pointerRecords
+        .map((insight) => ({
+          creativeId: insight.creativeId,
+          range: insight.range,
+          id: { not: insight.id },
+        }))
+        .filter((filter) => this.getRangePointerField(filter.range));
+
+      for (const filterChunk of chunk(cleanupFilters, 100) as any[]) {
+        await this.prisma.creativeInsight.deleteMany({
+          where: { OR: filterChunk },
+        });
+      }
 
       if (creativeUpdates.length > 0) {
         await prismaHelper.upsertMany(
