@@ -47,7 +47,7 @@ export class MediaSyncService implements OnModuleInit {
     );
   }
 
-  private async findVideoAssetsNeedingSourceRefresh(take = 100) {
+  private async findVideoAssetsNeedingSourceRefresh() {
     const rows = await this.prisma.$queryRaw<Array<{ id: string }>>(
       Prisma.sql`
         SELECT id
@@ -65,7 +65,6 @@ export class MediaSyncService implements OnModuleInit {
             END <= 2
           )
         ORDER BY "updatedAt" ASC
-        LIMIT ${take}
       `,
     );
 
@@ -498,9 +497,9 @@ export class MediaSyncService implements OnModuleInit {
     }
 
     // Find videos missing source or with an incomplete thumbnail set (<= 2).
-    const videos = (await this.findVideoAssetsNeedingSourceRefresh(100))
-      .filter((asset) => this.needsVideoSourceRefresh(asset))
-      .slice(0, 20);
+    const videos = (await this.findVideoAssetsNeedingSourceRefresh()).filter(
+      (asset) => this.needsVideoSourceRefresh(asset),
+    );
 
     this.logger.log(`Starting to sync sources for ${videos.length} videos...`);
 
