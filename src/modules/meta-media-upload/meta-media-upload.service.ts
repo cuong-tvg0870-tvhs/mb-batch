@@ -780,12 +780,6 @@ export class MetaMediaUploadService {
     return {
       AND: [
         { drive: { drive_permission: true } },
-        {
-          raw: {
-            path: ['permission_access_verified'],
-            equals: true,
-          },
-        },
         { creative_asset_id: null },
         {
           OR: [
