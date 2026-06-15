@@ -49,13 +49,34 @@ export function parseAllowedSharedDriveIds(value?: string | null): Set<string> {
 export function hasExplicitDriveAccess(
   file: any,
   allowedSharedDriveIds: Set<string>,
+  serviceAccountEmail?: string | null,
+  permissions: any[] = [],
 ): boolean {
   if (!file) return false;
   if (file.ownedByMe === true) return true;
   if (file.sharedWithMeTime) return true;
   if (file.driveId && allowedSharedDriveIds.has(file.driveId)) return true;
+  if (!serviceAccountEmail) return false;
 
-  return false;
+  const normalizedEmail = serviceAccountEmail.trim().toLowerCase();
+  return permissions.some((permission) => {
+    const email = String(permission?.emailAddress || '').toLowerCase();
+    const role = permission?.role;
+    const type = permission?.type;
+    return (
+      type === 'user' &&
+      email === normalizedEmail &&
+      !permission?.deleted &&
+      [
+        'owner',
+        'organizer',
+        'fileOrganizer',
+        'writer',
+        'commenter',
+        'reader',
+      ].includes(role)
+    );
+  });
 }
 
 export function isPermissionCheckDue(raw: any, now = new Date()): boolean {

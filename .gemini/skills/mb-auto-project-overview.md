@@ -238,6 +238,11 @@ Scheduler (@Cron) → Bull Queue → Processor → Service
 |---|---|
 | Mỗi 30 phút | Fetch Lark records → Targeted Drive Permission Audit with Exponential Backoff → Map assets |
 
+#### meta-media-upload (Google Drive to Meta Library)
+| Cron | Mô tả |
+|---|---|
+| `15 * * * *` (mỗi giờ :15) | Tự động upload hình ảnh/video từ Google Drive lên Meta Library (đệ quy folder, tối đa 20 files/giờ, tránh trùng lặp) |
+
 #### draft-automation (Campaign Auto-generation)
 | Cron | Mô tả |
 |---|---|

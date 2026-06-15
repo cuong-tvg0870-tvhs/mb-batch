@@ -8,6 +8,7 @@ import { InsightSyncModule } from './modules/insight-sync/insight-sync.module';
 import { LarkSyncModule } from './modules/lark-sync/lark-sync.module';
 import { MediaSyncModule } from './modules/media-sync/media-sync.module';
 import { MetaApiModule } from './modules/meta-api/meta-api.module';
+import { MetaMediaUploadModule } from './modules/meta-media-upload/meta-media-upload.module';
 import { MetaMediaSyncModule } from './modules/meta-media-sync/meta-media-sync.module';
 import { MetaSyncModule } from './modules/meta-sync/meta-sync.module';
 
@@ -41,6 +42,7 @@ export const global_modules = [
     MediaSyncModule,
     DraftAutomationModule,
     MetaMediaSyncModule,
+    MetaMediaUploadModule,
   ],
 })
 export class AppModule implements OnModuleInit {

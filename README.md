@@ -1,3 +1,16 @@
+## Google Drive Permission Audit
+
+The Lark sync worker checks Google Drive permissions by `drive_id` and does not
+treat public links as valid access. If valid files live in Google Shared Drives,
+configure a comma-separated allowlist:
+
+```bash
+GOOGLE_ALLOWED_SHARED_DRIVE_IDS="shared-drive-id-1,shared-drive-id-2"
+```
+
+Leave it empty when only directly shared files or files owned by the service
+account should pass the audit.
+
 <p align="center">
   <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="200" alt="Nest Logo" /></a>
 </p>

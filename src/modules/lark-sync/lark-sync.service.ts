@@ -22,6 +22,7 @@ export class LarkSyncService {
   private readonly allowedSharedDriveIds = parseAllowedSharedDriveIds(
     process.env.GOOGLE_ALLOWED_SHARED_DRIVE_IDS,
   );
+  private serviceAccountEmail: string | null = null;
   private accessToken: string | null = null;
   private expireAt = 0;
 
@@ -32,6 +33,7 @@ export class LarkSyncService {
     if (credentials.private_key) {
       credentials.private_key = credentials.private_key.replace(/\\n/g, '\n');
     }
+    this.serviceAccountEmail = credentials.client_email || null;
 
     const auth = new google.auth.GoogleAuth({
       credentials,
@@ -214,7 +216,17 @@ export class LarkSyncService {
               drive_permission = hasExplicitDriveAccess(
                 driveFileResponse.data,
                 this.allowedSharedDriveIds,
+                this.serviceAccountEmail,
               );
+              if (!drive_permission) {
+                const permissions = await this.getFilePermissions(driveId);
+                drive_permission = hasExplicitDriveAccess(
+                  driveFileResponse.data,
+                  this.allowedSharedDriveIds,
+                  this.serviceAccountEmail,
+                  permissions,
+                );
+              }
               if (!drive_permission) {
                 permission_error = PUBLIC_ONLY_PERMISSION_ERROR;
               }
@@ -299,6 +311,21 @@ export class LarkSyncService {
     }
 
     return results;
+  }
+
+  private async getFilePermissions(driveId: string): Promise<any[]> {
+    try {
+      const res = await this.driveSA.permissions.list({
+        fileId: driveId,
+        fields:
+          'permissions(id,type,role,emailAddress,deleted,permissionDetails(permissionType,role,inherited,inheritedFrom))',
+        supportsAllDrives: true,
+      });
+
+      return res.data.permissions || [];
+    } catch {
+      return [];
+    }
   }
 
   private async mapMissingDriveIds() {
