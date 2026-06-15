@@ -67,21 +67,26 @@ export class MetaMediaUploadService {
       where: this.buildEligibleRecordWhere(),
       include: { drive: true },
       orderBy: [{ production_date: 'desc' }, { id: 'asc' }],
-      take: this.maxFilesPerRun,
+      take: this.maxFilesPerRun * 5,
     });
+    const uploadCandidates = records
+      .filter(
+        (record) => this.normalizeRaw(record.raw).sync_status !== 'UPLOADING',
+      )
+      .slice(0, this.maxFilesPerRun);
 
     this.logger.log(
-      `Found ${records.length} eligible Lark records for Meta auto-upload`,
+      `Found ${uploadCandidates.length} eligible Lark records for Meta auto-upload`,
     );
 
     const uploadBatchId = randomUUID();
     const claimedRecords = await this.claimRecordsForUpload(
-      records,
+      uploadCandidates,
       uploadBatchId,
     );
 
     this.logger.log(
-      `Claimed ${claimedRecords.length}/${records.length} Lark records as UPLOADING for Meta auto-upload batch ${uploadBatchId}`,
+      `Claimed ${claimedRecords.length}/${uploadCandidates.length} Lark records as UPLOADING for Meta auto-upload batch ${uploadBatchId}`,
     );
 
     for (const record of claimedRecords) {
@@ -113,7 +118,7 @@ export class MetaMediaUploadService {
       `Meta auto-upload completed. Uploaded files this run: ${budget.uploaded}/${budget.limit}`,
     );
 
-    return { uploaded: budget.uploaded, scanned: records.length };
+    return { uploaded: budget.uploaded, scanned: uploadCandidates.length };
   }
 
   private async uploadRecord(record: any, budget: UploadBudget) {
@@ -788,7 +793,6 @@ export class MetaMediaUploadService {
             { raw: { path: ['sync_status'], equals: Prisma.DbNull } },
           ],
         },
-        { NOT: { raw: { path: ['sync_status'], equals: 'UPLOADING' } } },
       ],
     };
   }
