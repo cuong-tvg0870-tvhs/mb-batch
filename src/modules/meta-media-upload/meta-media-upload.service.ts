@@ -551,7 +551,7 @@ export class MetaMediaUploadService {
           try {
             if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
           } catch {}
-        }, 10000);
+        }, 30000);
       } else if (type === AssetType.IMAGE && fs.existsSync(filePath)) {
         try {
           fs.unlinkSync(filePath);
@@ -559,7 +559,8 @@ export class MetaMediaUploadService {
       }
     }
 
-    await this.sleep(2000);
+    const initialPollDelayMs = type === AssetType.VIDEO ? 15000 : 2000;
+    await this.sleep(initialPollDelayMs);
 
     const assetId =
       type === AssetType.VIDEO
@@ -610,6 +611,7 @@ export class MetaMediaUploadService {
     let asset: any = null;
     let latestReadyAsset: any = null;
     const maxRetries = type === AssetType.VIDEO ? 15 : 5;
+    const retryDelayMs = type === AssetType.VIDEO ? 5000 : 4000;
     let errorCount = 0;
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -642,7 +644,7 @@ export class MetaMediaUploadService {
         if (errorCount >= 3) break;
       }
 
-      await this.sleep(type === AssetType.VIDEO ? 5000 : 4000);
+      await this.sleep(retryDelayMs);
     }
 
     if (!asset) {
