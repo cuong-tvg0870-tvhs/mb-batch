@@ -1,5 +1,5 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { AssetType } from '@prisma/client';
+import { AssetType, Prisma } from '@prisma/client';
 import * as fs from 'fs';
 import { drive_v3, google } from 'googleapis';
 import * as path from 'path';
@@ -70,7 +70,12 @@ export class MetaMediaUploadService {
             },
           },
           { creative_asset_id: null },
-          { NOT: { raw: { path: ['sync_status'], equals: 'SUCCESS' } } },
+          {
+            OR: [
+              { NOT: { raw: { path: ['sync_status'], equals: 'SUCCESS' } } },
+              { raw: { path: ['sync_status'], equals: Prisma.DbNull } },
+            ],
+          },
         ],
       },
       include: { drive: true },

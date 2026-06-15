@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { LarkRecord } from '@prisma/client';
+import { LarkRecord, Prisma } from '@prisma/client';
 import axios, { AxiosRequestConfig } from 'axios';
 import { drive_v3, google } from 'googleapis';
 import { chunk } from '../../common/utils';
@@ -17,6 +17,20 @@ import {
 @Injectable()
 export class LarkSyncService {
   private readonly logger = new Logger(LarkSyncService.name);
+  private readonly runtimeRawKeys = [
+    'permission_status',
+    'permission_error',
+    'permission_access_verified',
+    'retry_count',
+    'last_checked_at',
+    'sync_status',
+    'sync_error',
+    'sync_uploaded_count',
+    'sync_skipped_count',
+    'sync_unsupported_count',
+    'sync_limit_reached',
+    'last_meta_upload_checked_at',
+  ];
   private driveSA: drive_v3.Drive;
   private readonly baseURL = 'https://open.larksuite.com/open-apis/bitable/v1';
   private readonly allowedSharedDriveIds = parseAllowedSharedDriveIds(
@@ -41,6 +55,25 @@ export class LarkSyncService {
     });
 
     this.driveSA = google.drive({ version: 'v3', auth });
+  }
+
+  private normalizeRaw(raw: unknown): Record<string, any> {
+    return raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? (raw as Record<string, any>)
+      : {};
+  }
+
+  private mergeRuntimeRawFields(previousRaw: unknown, nextRaw: unknown) {
+    const merged = { ...this.normalizeRaw(nextRaw) };
+    const previous = this.normalizeRaw(previousRaw);
+
+    for (const key of this.runtimeRawKeys) {
+      if (previous[key] !== undefined) {
+        merged[key] = previous[key];
+      }
+    }
+
+    return merged;
   }
 
   async syncLarkToDrive() {
@@ -105,11 +138,23 @@ export class LarkSyncService {
               },
             },
             {
+              raw: {
+                path: ['permission_status'],
+                equals: Prisma.DbNull,
+              },
+            },
+            {
               NOT: {
                 raw: {
                   path: ['permission_access_verified'],
                   equals: true,
                 },
+              },
+            },
+            {
+              raw: {
+                path: ['permission_access_verified'],
+                equals: Prisma.DbNull,
               },
             },
           ],
@@ -545,9 +590,16 @@ export class LarkSyncService {
 
     const existing = await this.prisma.larkRecord.findMany({
       where: { id: { in: ids } },
-      select: { id: true },
+      select: {
+        id: true,
+        raw: true,
+        drive_url: true,
+        drive_id: true,
+        creative_asset_id: true,
+      },
     });
-    const existingIds = new Set(existing.map((e) => e.id));
+    const existingById = new Map(existing.map((e) => [e.id, e]));
+    const existingIds = new Set(existingById.keys());
 
     const toCreate = validRecords.filter((r) => !existingIds.has(String(r.id)));
     const toUpdate = validRecords.filter((r) => existingIds.has(String(r.id)));
@@ -580,12 +632,35 @@ export class LarkSyncService {
       const batches = chunk(toUpdate, 50);
       for (const batch of batches) {
         await Promise.all(
-          batch.map((r) =>
-            this.prisma.larkRecord.update({
+          batch.map((r) => {
+            const existingRecord = existingById.get(String(r.id));
+            const nextDriveId = r.drive_id || extractDriveId(r.drive_url);
+            const previousDriveId =
+              existingRecord?.drive_id ||
+              extractDriveId(existingRecord?.drive_url);
+            const isSameDrive =
+              !!existingRecord &&
+              (previousDriveId && nextDriveId
+                ? previousDriveId === nextDriveId
+                : existingRecord.drive_url === r.drive_url);
+
+            const data: any = {
+              ...r,
+              drive_id: nextDriveId,
+              raw: isSameDrive
+                ? this.mergeRuntimeRawFields(existingRecord.raw, r.raw)
+                : r.raw,
+            };
+
+            if (isSameDrive) {
+              data.creative_asset_id = existingRecord.creative_asset_id;
+            }
+
+            return this.prisma.larkRecord.update({
               where: { id: String(r.id) },
-              data: r,
-            }),
-          ),
+              data,
+            });
+          }),
         );
       }
     }
