@@ -42,6 +42,7 @@ export class MetaMediaUploadService {
   private readonly driveFolderMimeType = 'application/vnd.google-apps.folder';
   private readonly rootFolderId =
     process.env.META_CREATIVE_ROOT_FOLDER_ID || '4303729193176038';
+  private readonly folderEnsurePromises = new Map<string, Promise<any>>();
   private readonly driveSA: drive_v3.Drive;
 
   constructor(
@@ -93,36 +94,116 @@ export class MetaMediaUploadService {
       `Claimed ${claimedRecords.length}/${uploadCandidates.length} Lark records as UPLOADING for Meta auto-upload batch ${uploadBatchId}`,
     );
 
-    for (const record of claimedRecords) {
-      if (budget.uploaded >= budget.limit) {
-        await this.markRecordStatus(record, 'PENDING', null, {
-          sync_limit_reached: true,
-          sync_upload_batch_id: uploadBatchId,
-        });
-        continue;
-      }
-
-      try {
-        const result = await this.uploadRecord(record, budget);
-        await this.markRecordStatus(record, result.status, null, result.raw);
-      } catch (err: any) {
-        this.logger.error(
-          `Meta auto-upload failed for LarkRecord ${record.id}: ${err.message}`,
-          err.stack,
-        );
-        await this.markRecordStatus(
-          record,
-          'FAILED',
-          err.message || String(err),
-        );
-      }
-    }
+    await this.uploadClaimedRecords(claimedRecords, budget, uploadBatchId);
 
     this.logger.log(
       `Meta auto-upload completed. Uploaded files this run: ${budget.uploaded}/${budget.limit}`,
     );
 
     return { uploaded: budget.uploaded, scanned: uploadCandidates.length };
+  }
+
+  private async uploadClaimedRecords(
+    records: any[],
+    budget: UploadBudget,
+    uploadBatchId: string,
+  ) {
+    const fileRecords: any[] = [];
+    const chunkState = { number: 0 };
+
+    const flushFileRecords = async () => {
+      await this.uploadFileRecordChunks(
+        fileRecords,
+        budget,
+        uploadBatchId,
+        chunkState,
+      );
+    };
+
+    for (const record of records) {
+      if (this.isDriveFolderRecord(record)) {
+        await flushFileRecords();
+
+        if (budget.uploaded >= budget.limit) {
+          await this.markRecordUploadLimitReached(record, uploadBatchId);
+          continue;
+        }
+
+        await this.processClaimedRecord(record, budget);
+        continue;
+      }
+
+      fileRecords.push(record);
+      if (fileRecords.length >= this.uploadChunkSize) {
+        await flushFileRecords();
+      }
+    }
+
+    await flushFileRecords();
+  }
+
+  private async uploadFileRecordChunks(
+    fileRecords: any[],
+    budget: UploadBudget,
+    uploadBatchId: string,
+    chunkState: { number: number },
+  ) {
+    while (fileRecords.length > 0) {
+      if (budget.uploaded >= budget.limit) {
+        const remainingRecords = fileRecords.splice(0);
+        await Promise.all(
+          remainingRecords.map((record) =>
+            this.markRecordUploadLimitReached(record, uploadBatchId),
+          ),
+        );
+        return;
+      }
+
+      const remainingBudget = budget.limit - budget.uploaded;
+      const takeCount = Math.min(
+        this.uploadChunkSize,
+        remainingBudget,
+        fileRecords.length,
+      );
+      const chunk = fileRecords.splice(0, takeCount);
+      if (chunk.length === 0) return;
+
+      chunkState.number += 1;
+      this.logger.log(
+        `Uploading Lark file-record chunk ${chunkState.number}: ${chunk.length} records (${budget.uploaded}/${budget.limit} uploaded this job)`,
+      );
+
+      await Promise.all(
+        chunk.map((record) => this.processClaimedRecord(record, budget)),
+      );
+    }
+  }
+
+  private async processClaimedRecord(record: any, budget: UploadBudget) {
+    try {
+      const result = await this.uploadRecord(record, budget);
+      await this.markRecordStatus(record, result.status, null, result.raw);
+    } catch (err: any) {
+      this.logger.error(
+        `Meta auto-upload failed for LarkRecord ${record.id}: ${err.message}`,
+        err.stack,
+      );
+      await this.markRecordStatus(record, 'FAILED', err.message || String(err));
+    }
+  }
+
+  private async markRecordUploadLimitReached(
+    record: { id: string; raw: any },
+    uploadBatchId: string,
+  ) {
+    await this.markRecordStatus(record, 'PENDING', null, {
+      sync_limit_reached: true,
+      sync_upload_batch_id: uploadBatchId,
+    });
+  }
+
+  private isDriveFolderRecord(record: any) {
+    return record.drive?.mimeType === this.driveFolderMimeType;
   }
 
   private async uploadRecord(record: any, budget: UploadBudget) {
@@ -388,11 +469,32 @@ export class MetaMediaUploadService {
     parentId: string | null,
     description = name,
   ) {
+    const folderKey = `${parentId || 'root'}:${name}`;
     const existingFolder = await this.prisma.creativeFolder.findFirst({
       where: { name, parentId },
     });
     if (existingFolder) return existingFolder;
 
+    const pendingFolder = this.folderEnsurePromises.get(folderKey);
+    if (pendingFolder) return pendingFolder;
+
+    const folderPromise = this.createCreativeFolder(
+      name,
+      parentId,
+      description,
+    ).finally(() => {
+      this.folderEnsurePromises.delete(folderKey);
+    });
+    this.folderEnsurePromises.set(folderKey, folderPromise);
+
+    return folderPromise;
+  }
+
+  private async createCreativeFolder(
+    name: string,
+    parentId: string | null,
+    description = name,
+  ) {
     const authConfig = await this.metaApi.getMetaAuthConfig();
     const businessId =
       authConfig?.businessId || this.metaApi.businessId || this.rootFolderId;
@@ -623,10 +725,10 @@ export class MetaMediaUploadService {
         if (response?.id) {
           if (type === AssetType.VIDEO && response.video?.source) {
             latestReadyAsset = response;
-            const hasThumbnails =
+            const hasGoodThumbnailSet =
               Array.isArray(response.video?.thumbnails?.data) &&
-              response.video.thumbnails.data.length > 0;
-            if (hasThumbnails || attempt === maxRetries - 1) {
+              response.video.thumbnails.data.length > 2;
+            if (hasGoodThumbnailSet || attempt === maxRetries - 1) {
               asset = response;
               break;
             }
