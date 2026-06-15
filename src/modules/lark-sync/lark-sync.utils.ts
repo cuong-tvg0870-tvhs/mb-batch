@@ -31,8 +31,11 @@ export function extractDriveId(url?: string | null): string | null {
   const match1 = url.match(/\/d\/([a-zA-Z0-9_-]+)/);
   if (match1) return match1[1];
 
-  const match2 = url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  const match2 = url.match(/\/folders\/([a-zA-Z0-9_-]+)/);
   if (match2) return match2[1];
+
+  const match3 = url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  if (match3) return match3[1];
 
   return null;
 }
@@ -81,8 +84,8 @@ export function hasExplicitDriveAccess(
 
 export function isPermissionCheckDue(raw: any, now = new Date()): boolean {
   const retryCount = Number(raw?.retry_count || 0);
-  if (retryCount >= MAX_PERMISSION_RETRIES) return false;
   if (raw?.permission_status !== 'FAILED') return true;
+  if (retryCount >= MAX_PERMISSION_RETRIES) return false;
   if (!raw?.last_checked_at) return true;
 
   const lastCheckedAt = new Date(raw.last_checked_at).getTime();

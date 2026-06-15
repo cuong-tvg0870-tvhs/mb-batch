@@ -297,7 +297,7 @@ export class LarkSyncService {
                 webViewLink: file?.webViewLink || undefined,
                 webContentLink: file?.webContentLink || undefined,
                 size: file?.size || undefined,
-                raw: file ? JSON.stringify(file) : undefined,
+                raw: file || undefined,
                 last_seen_at: now,
               },
               create: {
@@ -308,7 +308,7 @@ export class LarkSyncService {
                 webViewLink: file?.webViewLink || null,
                 webContentLink: file?.webContentLink || null,
                 size: file?.size || null,
-                raw: JSON.stringify(file || {}),
+                raw: file || {},
                 last_seen_at: now,
               },
             });
@@ -330,17 +330,6 @@ export class LarkSyncService {
             updateData.drive_id = driveId;
           }
 
-          let creative_asset_id = record.creative_asset_id;
-          if (drive_permission && !creative_asset_id) {
-            creative_asset_id = await this.findCreativeAssetId(
-              record,
-              driveFileResponse?.data,
-              driveId,
-            );
-            if (creative_asset_id)
-              updateData.creative_asset_id = creative_asset_id;
-          }
-
           await this.prisma.larkRecord.update({
             where: { id: record.id },
             data: updateData,
@@ -350,7 +339,7 @@ export class LarkSyncService {
             id: record.id,
             success: drive_permission,
             drive_permission,
-            creative_asset_id,
+            creative_asset_id: record.creative_asset_id,
           };
         }),
       );
@@ -401,7 +390,7 @@ export class LarkSyncService {
         data: uniqueDriveIds.map((id) => ({
           id,
           name: 'Pending Permission Check',
-          raw: '{}',
+          raw: {},
           drive_permission: false,
         })),
         skipDuplicates: true,
@@ -612,7 +601,7 @@ export class LarkSyncService {
       const driveData = uniqueDriveIds.map((id) => ({
         id,
         name: 'Pending Permission Check',
-        raw: '{}',
+        raw: {},
         drive_permission: false,
       }));
 
@@ -702,13 +691,6 @@ export class LarkSyncService {
         batch.map(async (record) => {
           let driveId = record.drive_id;
           if (!driveId) {
-            const extractDriveId = (url?: string | null): string | null => {
-              if (!url) return null;
-              const match =
-                url.match(/\/d\/([a-zA-Z0-9_-]+)/) ||
-                url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
-              return match ? match[1] : null;
-            };
             driveId = extractDriveId(record.drive_url);
           }
 

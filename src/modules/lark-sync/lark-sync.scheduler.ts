@@ -18,7 +18,7 @@ export class LarkSyncScheduler implements OnModuleInit {
 
   /**
    * 🔄 SYNC WORKFLOW (Lark <-> Drive)
-   * Runs every 5 minutes
+   * Runs every 30 minutes
    */
   @Cron(CronExpression.EVERY_30_MINUTES, { timeZone: 'Asia/Ho_Chi_Minh' })
   async scheduleSyncWorkflow() {
