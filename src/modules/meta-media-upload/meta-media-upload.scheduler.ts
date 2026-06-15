@@ -22,7 +22,7 @@ export class MetaMediaUploadScheduler implements OnModuleInit {
     await this.enqueueAutoUpload();
   }
 
-  @Cron('15 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('*/20 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async scheduleAutoUpload() {
     this.logger.log('📅 Scheduling Meta media auto-upload...');
     await this.enqueueAutoUpload();
