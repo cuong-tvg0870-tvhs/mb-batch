@@ -545,6 +545,7 @@ export class MetaMediaUploadService {
           ];
 
     let asset: any = null;
+    let latestReadyAsset: any = null;
     const maxRetries = type === AssetType.VIDEO ? 15 : 5;
     let errorCount = 0;
 
@@ -556,8 +557,14 @@ export class MetaMediaUploadService {
 
         if (response?.id) {
           if (type === AssetType.VIDEO && response.video?.source) {
-            asset = response;
-            break;
+            latestReadyAsset = response;
+            const hasThumbnails =
+              Array.isArray(response.video?.thumbnails?.data) &&
+              response.video.thumbnails.data.length > 0;
+            if (hasThumbnails || attempt === maxRetries - 1) {
+              asset = response;
+              break;
+            }
           }
           if (type === AssetType.IMAGE && response.url) {
             asset = response;
@@ -573,6 +580,10 @@ export class MetaMediaUploadService {
       }
 
       await this.sleep(type === AssetType.VIDEO ? 5000 : 4000);
+    }
+
+    if (!asset) {
+      asset = latestReadyAsset;
     }
 
     if (!asset) {
