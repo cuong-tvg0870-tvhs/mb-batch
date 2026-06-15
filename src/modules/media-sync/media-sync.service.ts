@@ -26,10 +26,15 @@ export class MediaSyncService implements OnModuleInit {
     );
   }
 
-  private hasVideoThumbnailList(thumbnails?: any) {
-    if (!thumbnails) return false;
-    if (Array.isArray(thumbnails?.data)) return thumbnails.data.length > 0;
-    return Array.isArray(thumbnails) && thumbnails.length > 0;
+  private getVideoThumbnailCount(thumbnails?: any) {
+    if (!thumbnails) return 0;
+    if (Array.isArray(thumbnails?.data)) return thumbnails.data.length;
+    if (Array.isArray(thumbnails)) return thumbnails.length;
+    return 0;
+  }
+
+  private hasGoodVideoThumbnailSet(thumbnails?: any) {
+    return this.getVideoThumbnailCount(thumbnails) > 2;
   }
 
   private needsVideoSourceRefresh(asset: {
@@ -37,21 +42,39 @@ export class MediaSyncService implements OnModuleInit {
     video_thumbnails?: any;
   }) {
     return (
-      !asset.video_source || !this.hasVideoThumbnailList(asset.video_thumbnails)
+      !asset.video_source ||
+      !this.hasGoodVideoThumbnailSet(asset.video_thumbnails)
     );
   }
 
-  private buildVideoSourceRefreshWhere(): Prisma.CreativeAssetWhereInput {
-    return {
-      type: AssetType.VIDEO,
-      OR: [
-        { video_source: null },
-        { video_thumbnails: { equals: Prisma.DbNull } },
-        { video_thumbnails: { equals: Prisma.JsonNull } },
-        { video_thumbnails: { path: ['data'], equals: Prisma.DbNull } },
-        { video_thumbnails: { path: ['data'], equals: [] } },
-      ],
-    };
+  private async findVideoAssetsNeedingSourceRefresh(take = 100) {
+    const rows = await this.prisma.$queryRaw<Array<{ id: string }>>(
+      Prisma.sql`
+        SELECT id
+        FROM "CreativeAsset"
+        WHERE type = ${AssetType.VIDEO}
+          AND (
+            "video_source" IS NULL
+            OR "video_thumbnails" IS NULL
+            OR CASE
+              WHEN jsonb_typeof("video_thumbnails"->'data') = 'array'
+                THEN jsonb_array_length("video_thumbnails"->'data')
+              WHEN jsonb_typeof("video_thumbnails") = 'array'
+                THEN jsonb_array_length("video_thumbnails")
+              ELSE 0
+            END <= 2
+          )
+        ORDER BY "updatedAt" ASC
+        LIMIT ${take}
+      `,
+    );
+
+    if (rows.length === 0) return [];
+
+    return this.prisma.creativeAsset.findMany({
+      where: { id: { in: rows.map((row) => row.id) } },
+      orderBy: { updatedAt: 'asc' },
+    });
   }
 
   private formatMetaError(err: any) {
@@ -474,14 +497,8 @@ export class MediaSyncService implements OnModuleInit {
       return { success: false, error: 'Chưa cấu hình Meta Auth' };
     }
 
-    // Find videos missing source or thumbnail list.
-    const videos = (
-      await this.prisma.creativeAsset.findMany({
-        where: this.buildVideoSourceRefreshWhere(),
-        orderBy: { updatedAt: 'asc' },
-        take: 100,
-      })
-    )
+    // Find videos missing source or with an incomplete thumbnail set (<= 2).
+    const videos = (await this.findVideoAssetsNeedingSourceRefresh(100))
       .filter((asset) => this.needsVideoSourceRefresh(asset))
       .slice(0, 20);
 
