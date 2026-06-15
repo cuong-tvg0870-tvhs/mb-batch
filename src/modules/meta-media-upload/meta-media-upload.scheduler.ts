@@ -1,5 +1,5 @@
 import { InjectQueue } from '@nestjs/bull';
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { Queue } from 'bull';
 import {
@@ -8,7 +8,7 @@ import {
 } from './meta-media-upload.constants';
 
 @Injectable()
-export class MetaMediaUploadScheduler {
+export class MetaMediaUploadScheduler implements OnModuleInit {
   private readonly logger = new Logger(MetaMediaUploadScheduler.name);
 
   constructor(
@@ -16,9 +16,19 @@ export class MetaMediaUploadScheduler {
     private readonly metaMediaUploadQueue: Queue,
   ) {}
 
+  async onModuleInit() {
+    this.logger.log('🚀 MetaMediaUploadScheduler initialized');
+    this.logger.log('📅 Scheduling startup Meta media auto-upload...');
+    await this.enqueueAutoUpload();
+  }
+
   @Cron('15 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async scheduleAutoUpload() {
     this.logger.log('📅 Scheduling Meta media auto-upload...');
+    await this.enqueueAutoUpload();
+  }
+
+  private async enqueueAutoUpload() {
     await this.metaMediaUploadQueue.add(
       META_MEDIA_UPLOAD_JOBS.AUTO_UPLOAD,
       {},
