@@ -1,5 +1,5 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { AssetType, FolderStatus } from '@prisma/client';
+import { AssetType, FolderStatus, Prisma } from '@prisma/client';
 import {
   parseMetaError,
   parseMetaUrlExpireTime,
@@ -24,6 +24,34 @@ export class MediaSyncService implements OnModuleInit {
       thumbnails?.data?.[0] ||
       null
     );
+  }
+
+  private hasVideoThumbnailList(thumbnails?: any) {
+    if (!thumbnails) return false;
+    if (Array.isArray(thumbnails?.data)) return thumbnails.data.length > 0;
+    return Array.isArray(thumbnails) && thumbnails.length > 0;
+  }
+
+  private needsVideoSourceRefresh(asset: {
+    video_source?: string | null;
+    video_thumbnails?: any;
+  }) {
+    return (
+      !asset.video_source || !this.hasVideoThumbnailList(asset.video_thumbnails)
+    );
+  }
+
+  private buildVideoSourceRefreshWhere(): Prisma.CreativeAssetWhereInput {
+    return {
+      type: AssetType.VIDEO,
+      OR: [
+        { video_source: null },
+        { video_thumbnails: { equals: Prisma.DbNull } },
+        { video_thumbnails: { equals: Prisma.JsonNull } },
+        { video_thumbnails: { path: ['data'], equals: Prisma.DbNull } },
+        { video_thumbnails: { path: ['data'], equals: [] } },
+      ],
+    };
   }
 
   private formatMetaError(err: any) {
@@ -446,11 +474,16 @@ export class MediaSyncService implements OnModuleInit {
       return { success: false, error: 'Chưa cấu hình Meta Auth' };
     }
 
-    // Find videos that missing source
-    const videos = await this.prisma.creativeAsset.findMany({
-      where: { type: AssetType.VIDEO, video_source: null },
-      take: 20,
-    });
+    // Find videos missing source or thumbnail list.
+    const videos = (
+      await this.prisma.creativeAsset.findMany({
+        where: this.buildVideoSourceRefreshWhere(),
+        orderBy: { updatedAt: 'asc' },
+        take: 100,
+      })
+    )
+      .filter((asset) => this.needsVideoSourceRefresh(asset))
+      .slice(0, 20);
 
     this.logger.log(`Starting to sync sources for ${videos.length} videos...`);
 
@@ -482,18 +515,18 @@ export class MediaSyncService implements OnModuleInit {
             const res = videosById[v.video_id!];
             if (!res?.id) return;
 
-            const thumbnail = res?.thumbnails?.data?.find(
-              (d: any) => d?.is_preferred,
-            );
+            const thumbnail =
+              res?.thumbnails?.data?.find((d: any) => d?.is_preferred) ||
+              res?.thumbnails?.data?.[0];
             await this.prisma.creativeAsset.update({
               where: { video_id: res.id },
               data: {
-                thumbnail: thumbnail?.uri,
-                height: thumbnail?.height,
-                width: thumbnail?.width,
-                duration: res?.length,
-                video_source: res?.source,
-                video_thumbnails: res?.thumbnails,
+                thumbnail: thumbnail?.uri || v.thumbnail,
+                height: thumbnail?.height || v.height,
+                width: thumbnail?.width || v.width,
+                duration: res?.length || v.duration,
+                video_source: res?.source || v.video_source,
+                video_thumbnails: res?.thumbnails || v.video_thumbnails,
                 urlExpiredAt: parseMetaUrlExpireTime([
                   res?.source,
                   ...(res?.thumbnails?.data?.map((t: any) => t.uri) || []),
