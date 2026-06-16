@@ -18,7 +18,12 @@ export class MetaMediaUploadProcessor {
   @Process({ name: META_MEDIA_UPLOAD_JOBS.AUTO_UPLOAD, concurrency: 1 })
   async handleAutoUpload(job: Job) {
     this.logger.log(`🚀 [JOB START] Meta media auto-upload ${job.id}`);
-    await this.metaMediaUploadService.autoUpload();
+    const result = await this.metaMediaUploadService.autoUpload();
+    if (result?.skipped) {
+      this.logger.warn(
+        `⏭️ [JOB SKIPPED] Meta media auto-upload ${job.id}: ${result.reason}`,
+      );
+    }
     this.logger.log(`✨ [JOB FINISHED] Meta media auto-upload ${job.id}`);
   }
 }

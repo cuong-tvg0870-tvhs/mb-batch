@@ -28,6 +28,8 @@ export class LarkSyncService {
     'sync_uploaded_count',
     'sync_skipped_count',
     'sync_unsupported_count',
+    'sync_creative_asset_ids',
+    'sync_creative_asset_count',
     'sync_limit_reached',
     'sync_upload_batch_id',
     'sync_claimed_at',
@@ -35,6 +37,7 @@ export class LarkSyncService {
     'last_meta_upload_checked_at',
   ];
   private driveSA: drive_v3.Drive;
+  private readonly driveFolderMimeType = 'application/vnd.google-apps.folder';
   private readonly baseURL = 'https://open.larksuite.com/open-apis/bitable/v1';
   private readonly allowedSharedDriveIds = parseAllowedSharedDriveIds(
     process.env.GOOGLE_ALLOWED_SHARED_DRIVE_IDS,
@@ -419,10 +422,22 @@ export class LarkSyncService {
         production_date: { gte: since },
         creative_asset_id: null,
         drive: { drive_permission: true },
-        raw: {
-          path: ['permission_access_verified'],
-          equals: true,
-        },
+        AND: [
+          {
+            raw: {
+              path: ['permission_access_verified'],
+              equals: true,
+            },
+          },
+          {
+            NOT: {
+              raw: {
+                path: ['sync_status'],
+                equals: 'SUCCESS',
+              },
+            },
+          },
+        ],
       },
       include: { drive: true },
     });
@@ -431,16 +446,30 @@ export class LarkSyncService {
     for (const batch of chunk(records, 50)) {
       await Promise.all(
         batch.map(async (record) => {
-          const creativeAssetId = await this.findCreativeAssetId(
+          const assetLink = await this.findCreativeAssetLink(
             record,
             record.drive,
             record.drive_id,
           );
-          if (!creativeAssetId) return;
+          if (assetLink.assetIds.length === 0) return;
+
+          const rawPatch: Record<string, any> = {
+            sync_creative_asset_ids: assetLink.assetIds,
+            sync_creative_asset_count: assetLink.assetIds.length,
+            sync_status: 'SUCCESS',
+            sync_error: null,
+            last_meta_upload_checked_at: new Date().toISOString(),
+          };
 
           await this.prisma.larkRecord.update({
             where: { id: record.id },
-            data: { creative_asset_id: creativeAssetId },
+            data: {
+              creative_asset_id: assetLink.primaryAssetId,
+              raw: {
+                ...this.normalizeRaw(record.raw),
+                ...rawPatch,
+              },
+            },
           });
           mappedCount++;
         }),
@@ -454,7 +483,7 @@ export class LarkSyncService {
     }
   }
 
-  private async findCreativeAssetId(
+  private async findCreativeAssetLink(
     record: Pick<
       LarkRecord,
       | 'project_name'
@@ -465,14 +494,17 @@ export class LarkSyncService {
     >,
     driveFile: any,
     driveId?: string | null,
-  ): Promise<string | null> {
+  ): Promise<{ primaryAssetId: string | null; assetIds: string[] }> {
     if (
       record.creative_asset_id ||
       !record.project_name ||
       !record.brand_name ||
       !record.product_code
     ) {
-      return null;
+      return {
+        primaryAssetId: record.creative_asset_id || null,
+        assetIds: record.creative_asset_id ? [record.creative_asset_id] : [],
+      };
     }
 
     let targetName = driveFile?.name;
@@ -484,6 +516,18 @@ export class LarkSyncService {
       targetName = dbFile?.name;
     }
     if (!targetName) targetName = record.project_name;
+
+    if (driveFile?.mimeType === this.driveFolderMimeType) {
+      const folderAssetIds = await this.findFolderCreativeAssetIds(
+        record,
+        targetName,
+      );
+
+      return {
+        primaryAssetId: null,
+        assetIds: folderAssetIds,
+      };
+    }
 
     const extIndex = targetName.lastIndexOf('.');
     const targetNameWithoutExt =
@@ -508,7 +552,76 @@ export class LarkSyncService {
       },
     });
 
-    return asset?.id || null;
+    return {
+      primaryAssetId: asset?.id || null,
+      assetIds: asset?.id ? [asset.id] : [],
+    };
+  }
+
+  private async findFolderCreativeAssetIds(
+    record: Pick<LarkRecord, 'project_name' | 'brand_name' | 'product_code'>,
+    driveFolderName: string,
+  ) {
+    const productFolder = await this.prisma.creativeFolder.findFirst({
+      where: {
+        name: record.product_code!,
+        parent: {
+          name: record.brand_name!,
+          parent: {
+            name: record.project_name!,
+          },
+        },
+      },
+      select: { id: true, name: true },
+    });
+
+    if (!productFolder) return [];
+
+    let targetFolderId = productFolder.id;
+    if (
+      this.cleanName(driveFolderName) !== this.cleanName(productFolder.name)
+    ) {
+      const driveNamedFolder = await this.prisma.creativeFolder.findFirst({
+        where: {
+          parentId: productFolder.id,
+          name: driveFolderName,
+        },
+        select: { id: true },
+      });
+      if (driveNamedFolder) targetFolderId = driveNamedFolder.id;
+    }
+
+    const folderIds = await this.collectCreativeFolderIds(targetFolderId);
+    const assets = await this.prisma.creativeAsset.findMany({
+      where: { folderId: { in: folderIds } },
+      select: { id: true },
+      orderBy: { createdAtLocal: 'asc' },
+    });
+
+    return assets.map((asset) => asset.id);
+  }
+
+  private async collectCreativeFolderIds(rootFolderId: string) {
+    const folderIds = [rootFolderId];
+    let cursor = [rootFolderId];
+
+    while (cursor.length > 0) {
+      const children = await this.prisma.creativeFolder.findMany({
+        where: { parentId: { in: cursor } },
+        select: { id: true },
+      });
+      cursor = children.map((child) => child.id);
+      folderIds.push(...cursor);
+    }
+
+    return folderIds;
+  }
+
+  private cleanName(name: string) {
+    return name
+      .toLowerCase()
+      .replace(/\.[^/.]+$/, '')
+      .trim();
   }
 
   private async getAccessToken(): Promise<string> {
@@ -672,11 +785,13 @@ export class LarkSyncService {
       select: {
         id: true,
         drive_url: true,
+        raw: true,
         project_name: true,
         brand_name: true,
         product_code: true,
         drive_id: true,
         creative_asset_id: true,
+        drive: true,
       },
     });
 
@@ -689,55 +804,27 @@ export class LarkSyncService {
     for (const batch of batches) {
       await Promise.all(
         batch.map(async (record) => {
-          let driveId = record.drive_id;
-          if (!driveId) {
-            driveId = extractDriveId(record.drive_url);
-          }
+          const driveId = record.drive_id || extractDriveId(record.drive_url);
+          const assetLink = await this.findCreativeAssetLink(
+            record,
+            record.drive,
+            driveId,
+          );
 
-          let targetName = null;
-          if (driveId) {
-            const dbFile = await this.prisma.driveFile.findUnique({
-              where: { id: driveId },
-              select: { name: true },
-            });
-            targetName = dbFile?.name;
-          }
-          if (!targetName) {
-            targetName = record.project_name;
-          }
-
-          const extIndex = targetName.lastIndexOf('.');
-          const targetNameWithoutExt =
-            extIndex > 0 ? targetName.substring(0, extIndex) : targetName;
-
-          const asset = await this.prisma.creativeAsset.findFirst({
-            where: {
-              OR: [
-                { name: { equals: targetName, mode: 'insensitive' } },
-                { name: { equals: targetNameWithoutExt, mode: 'insensitive' } },
-                {
-                  name: {
-                    startsWith: targetNameWithoutExt,
-                    mode: 'insensitive',
-                  },
-                },
-              ],
-              folder: {
-                name: { equals: record.product_code!, mode: 'insensitive' },
-                parent: {
-                  name: { equals: record.brand_name!, mode: 'insensitive' },
-                  parent: {
-                    name: { equals: record.project_name!, mode: 'insensitive' },
-                  },
-                },
-              },
-            },
-          });
-
-          if (asset) {
+          if (assetLink.assetIds.length > 0) {
             await this.prisma.larkRecord.update({
               where: { id: record.id },
-              data: { creative_asset_id: asset.id },
+              data: {
+                creative_asset_id: assetLink.primaryAssetId,
+                raw: {
+                  ...this.normalizeRaw(record.raw),
+                  sync_status: 'SUCCESS',
+                  sync_error: null,
+                  sync_creative_asset_ids: assetLink.assetIds,
+                  sync_creative_asset_count: assetLink.assetIds.length,
+                  last_meta_upload_checked_at: new Date().toISOString(),
+                },
+              },
             });
             matchedCount++;
           }

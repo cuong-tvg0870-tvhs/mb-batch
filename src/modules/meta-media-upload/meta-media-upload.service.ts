@@ -29,6 +29,7 @@ type FolderUploadStats = {
   skippedCount: number;
   unsupportedCount: number;
   limitReached: boolean;
+  assetIds: string[];
 };
 
 const parseEnvInteger = (
@@ -99,6 +100,20 @@ export class MetaMediaUploadService {
 
   async autoUpload() {
     await this.releaseStaleUploadingRecords();
+
+    const activeUploadingCount = await this.countActiveUploadingRecords();
+    if (activeUploadingCount > 0) {
+      this.logger.warn(
+        `Skipping Meta auto-upload because ${activeUploadingCount} Lark records are still UPLOADING`,
+      );
+      return {
+        uploaded: 0,
+        scanned: 0,
+        skipped: true,
+        reason: 'ACTIVE_UPLOAD_IN_PROGRESS',
+        activeUploadingCount,
+      };
+    }
 
     const budget: UploadBudget = {
       uploaded: 0,
@@ -354,6 +369,8 @@ export class MetaMediaUploadService {
           sync_uploaded_count: stats.uploadedCount,
           sync_skipped_count: stats.skippedCount,
           sync_unsupported_count: stats.unsupportedCount,
+          sync_creative_asset_ids: stats.assetIds,
+          sync_creative_asset_count: stats.assetIds.length,
           sync_limit_reached: stats.limitReached,
         },
       };
@@ -400,6 +417,7 @@ export class MetaMediaUploadService {
       skippedCount: 0,
       unsupportedCount: 0,
       limitReached: false,
+      assetIds: [],
     };
 
     const walk = async (folderId: string, targetFolderId: string) => {
@@ -461,6 +479,9 @@ export class MetaMediaUploadService {
         );
 
         for (const result of results) {
+          if (result.asset?.id && !stats.assetIds.includes(result.asset.id)) {
+            stats.assetIds.push(result.asset.id);
+          }
           if (result.uploaded) stats.uploadedCount += 1;
           else if (result.reason === 'UNSUPPORTED_TYPE')
             stats.unsupportedCount += 1;
@@ -1113,7 +1134,6 @@ export class MetaMediaUploadService {
         id: true,
         raw: true,
       },
-      take: this.maxFilesPerRun * 5,
     });
 
     const now = Date.now();
@@ -1146,6 +1166,17 @@ export class MetaMediaUploadService {
     this.logger.warn(
       `Released ${staleRecords.length} stale UPLOADING Lark records back to PENDING`,
     );
+  }
+
+  private async countActiveUploadingRecords() {
+    return this.prisma.larkRecord.count({
+      where: {
+        raw: {
+          path: ['sync_status'],
+          equals: 'UPLOADING',
+        },
+      },
+    });
   }
 
   private buildRecordRaw(

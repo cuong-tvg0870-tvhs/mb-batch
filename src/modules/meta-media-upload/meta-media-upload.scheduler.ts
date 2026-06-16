@@ -29,11 +29,24 @@ export class MetaMediaUploadScheduler implements OnModuleInit {
   }
 
   private async enqueueAutoUpload() {
+    const counts = await this.metaMediaUploadQueue.getJobCounts();
+    const pendingJobCount =
+      (counts.active || 0) + (counts.waiting || 0) + (counts.delayed || 0);
+
+    if (pendingJobCount > 0) {
+      this.logger.warn(
+        `Skipping Meta media auto-upload enqueue because ${pendingJobCount} job(s) are already active/waiting/delayed`,
+      );
+      return;
+    }
+
     await this.metaMediaUploadQueue.add(
       META_MEDIA_UPLOAD_JOBS.AUTO_UPLOAD,
       {},
       {
+        jobId: `${META_MEDIA_UPLOAD_JOBS.AUTO_UPLOAD}:singleton`,
         removeOnComplete: true,
+        removeOnFail: true,
         attempts: 3,
         backoff: { type: 'exponential', delay: 60000 },
       },
