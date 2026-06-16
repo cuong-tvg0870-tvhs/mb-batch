@@ -34,6 +34,12 @@ export class MetaApiService implements OnModuleInit {
     15 * 60 * 1000,
     60 * 1000,
   );
+  private readonly mutationDelayMs = parseEnvInteger(
+    process.env.META_API_MUTATION_DELAY_MS ?? process.env.META_MUTATION_DELAY_MS,
+    3000,
+    0,
+  );
+  private nextMetaMutationAt = Date.now();
 
   constructor(private readonly prisma: PrismaService) {}
 
@@ -264,6 +270,7 @@ export class MetaApiService implements OnModuleInit {
     }
 
     try {
+      await this.waitForMetaMutationSlot(method);
       const response = await axios({
         method,
         url,
@@ -288,6 +295,19 @@ export class MetaApiService implements OnModuleInit {
         (err as any).metaError = err.response.data.error;
       }
       throw err;
+    }
+  }
+
+  private async waitForMetaMutationSlot(method: 'get' | 'post' | 'delete') {
+    if (method === 'get' || this.mutationDelayMs <= 0) return;
+
+    const now = Date.now();
+    const waitMs = Math.max(0, this.nextMetaMutationAt - now);
+    this.nextMetaMutationAt =
+      Math.max(now, this.nextMetaMutationAt) + this.mutationDelayMs;
+
+    if (waitMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
     }
   }
 

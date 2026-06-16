@@ -14,6 +14,15 @@ import {
   parseAllowedSharedDriveIds,
 } from './lark-sync.utils';
 
+const parseEnvInteger = (
+  value: string | undefined,
+  defaultValue: number,
+  minValue: number,
+) => {
+  const parsed = Number(value ?? defaultValue);
+  return Number.isFinite(parsed) ? Math.max(minValue, parsed) : defaultValue;
+};
+
 @Injectable()
 export class LarkSyncService {
   private readonly logger = new Logger(LarkSyncService.name);
@@ -42,6 +51,16 @@ export class LarkSyncService {
   private readonly allowedSharedDriveIds = parseAllowedSharedDriveIds(
     process.env.GOOGLE_ALLOWED_SHARED_DRIVE_IDS,
   );
+  private readonly allowedDriveFolderIds = parseAllowedSharedDriveIds(
+    process.env.GOOGLE_ALLOWED_DRIVE_FOLDER_IDS ||
+      process.env.GOOGLE_ALLOWED_DRIVE_PARENT_FOLDER_IDS,
+  );
+  private readonly maxParentTraversalDepth = parseEnvInteger(
+    process.env.GOOGLE_DRIVE_PARENT_CHECK_MAX_DEPTH,
+    20,
+    1,
+  );
+  private readonly verifiedParentAccessCache = new Set<string>();
   private serviceAccountEmail: string | null = null;
   private accessToken: string | null = null;
   private expireAt = 0;
@@ -67,6 +86,50 @@ export class LarkSyncService {
     return raw && typeof raw === 'object' && !Array.isArray(raw)
       ? (raw as Record<string, any>)
       : {};
+  }
+
+  private addFolderIdsFromConfigValue(target: Set<string>, value: unknown) {
+    if (!value) return;
+
+    if (typeof value === 'string') {
+      parseAllowedSharedDriveIds(value).forEach((id) => target.add(id));
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      value
+        .map((item) => String(item).trim())
+        .filter(Boolean)
+        .forEach((id) => target.add(id));
+      return;
+    }
+
+    if (typeof value === 'object') {
+      const config = value as Record<string, unknown>;
+      this.addFolderIdsFromConfigValue(target, config.ids);
+      this.addFolderIdsFromConfigValue(target, config.folderIds);
+      this.addFolderIdsFromConfigValue(target, config.driveFolderIds);
+    }
+  }
+
+  private async getAllowedDriveFolderIds() {
+    const folderIds = new Set(this.allowedDriveFolderIds);
+    const configs = await this.prisma.systemConfig.findMany({
+      where: {
+        key: {
+          in: [
+            'GOOGLE_ALLOWED_DRIVE_FOLDER_IDS',
+            'GOOGLE_ALLOWED_DRIVE_PARENT_FOLDER_IDS',
+          ],
+        },
+      },
+      select: { value: true },
+    });
+
+    configs.forEach((config) =>
+      this.addFolderIdsFromConfigValue(folderIds, config.value),
+    );
+    return folderIds;
   }
 
   private mergeRuntimeRawFields(previousRaw: unknown, nextRaw: unknown) {
@@ -235,6 +298,7 @@ export class LarkSyncService {
           let drive_permission = false;
           let driveFileResponse: any = null;
           let permission_error: string | null = null;
+          let permissions: any[] = [];
           let driveId = record.drive_id || extractDriveId(record.drive_url);
 
           const alreadyVerified = !!(
@@ -256,21 +320,40 @@ export class LarkSyncService {
                 size: record.drive?.size,
               },
             };
+            this.logger.log(
+              `[DriveCheck] LarkRecord ${record.id} already verified. Using cached metadata.`,
+            );
           } else if (driveId) {
             try {
+              this.logger.log(
+                `[DriveCheck] Calling driveSA.files.get for fileId: ${driveId} (LarkRecord: ${record.id})`,
+              );
               driveFileResponse = await this.driveSA.files.get({
                 fileId: driveId,
                 fields:
-                  'id,name,mimeType,webViewLink,webContentLink,size,ownedByMe,sharedWithMeTime,driveId',
+                  'id,name,mimeType,parents,webViewLink,webContentLink,size,ownedByMe,sharedWithMeTime,driveId',
                 supportsAllDrives: true,
               });
+              this.logger.log(
+                `[DriveCheck] driveSA.files.get SUCCESS for fileId: ${driveId}. Data: ${JSON.stringify(
+                  driveFileResponse.data,
+                )}`,
+              );
+
               drive_permission = hasExplicitDriveAccess(
                 driveFileResponse.data,
                 this.allowedSharedDriveIds,
                 this.serviceAccountEmail,
               );
               if (!drive_permission) {
-                const permissions = await this.getFilePermissions(driveId);
+                this.logger.log(
+                  `[DriveCheck] File ${driveId} has no explicit access from metadata. Fetching file permissions...`,
+                );
+                permissions = await this.getFilePermissions(driveId);
+                this.logger.log(
+                  `[DriveCheck] File ${driveId} permissions list: ${JSON.stringify(permissions)}`,
+                );
+
                 drive_permission = hasExplicitDriveAccess(
                   driveFileResponse.data,
                   this.allowedSharedDriveIds,
@@ -279,14 +362,36 @@ export class LarkSyncService {
                 );
               }
               if (!drive_permission) {
+                this.logger.log(
+                  `[DriveCheck] File ${driveId} has no explicit file sharing. Checking inherited parent folder/drive access...`,
+                );
+                drive_permission = await this.checkInheritedAccess(
+                  driveFileResponse.data,
+                );
+              }
+              if (!drive_permission) {
                 permission_error = PUBLIC_ONLY_PERMISSION_ERROR;
+                this.logger.warn(
+                  `[DriveCheck] Drive permission check FAILED for fileId: ${driveId}. Error: ${permission_error}`,
+                );
+              } else {
+                this.logger.log(
+                  `[DriveCheck] Drive permission check SUCCESS for fileId: ${driveId}`,
+                );
               }
             } catch (e: any) {
               drive_permission = false;
               permission_error = e.message || String(e);
+              this.logger.error(
+                `[DriveCheck] Drive API call failed for fileId: ${driveId}. Error: ${permission_error}`,
+                e.stack || e,
+              );
             }
           } else {
             permission_error = 'Không tìm thấy Google Drive ID từ đường dẫn';
+            this.logger.warn(
+              `[DriveCheck] LarkRecord ${record.id} check failed: ${permission_error}`,
+            );
           }
 
           if (driveId && !alreadyVerified) {
@@ -296,6 +401,7 @@ export class LarkSyncService {
               update: {
                 name: file?.name || undefined,
                 drive_permission,
+                parentId: file?.parents?.[0] || undefined,
                 mimeType: file?.mimeType || undefined,
                 webViewLink: file?.webViewLink || undefined,
                 webContentLink: file?.webContentLink || undefined,
@@ -307,6 +413,7 @@ export class LarkSyncService {
                 id: driveId,
                 name: file?.name || record.drive_url || 'Unknown File',
                 drive_permission,
+                parentId: file?.parents?.[0] || null,
                 mimeType: file?.mimeType || null,
                 webViewLink: file?.webViewLink || null,
                 webContentLink: file?.webContentLink || null,
@@ -355,6 +462,9 @@ export class LarkSyncService {
 
   private async getFilePermissions(driveId: string): Promise<any[]> {
     try {
+      this.logger.log(
+        `[DriveCheck] Calling driveSA.permissions.list for fileId: ${driveId}`,
+      );
       const res = await this.driveSA.permissions.list({
         fileId: driveId,
         fields:
@@ -362,10 +472,145 @@ export class LarkSyncService {
         supportsAllDrives: true,
       });
 
-      return res.data.permissions || [];
-    } catch {
+      const list = res.data.permissions || [];
+      this.logger.log(
+        `[DriveCheck] driveSA.permissions.list SUCCESS for fileId: ${driveId}. Count: ${list.length}`,
+      );
+      return list;
+    } catch (e: any) {
+      this.logger.error(
+        `[DriveCheck] driveSA.permissions.list FAILED for fileId: ${driveId}. Error: ${e.message || String(e)}`,
+        e.stack || e,
+      );
       return [];
     }
+  }
+
+  private async checkParentAccessRecursive(
+    parentId: string,
+    depth = 0,
+    visited = new Set<string>(),
+  ): Promise<boolean> {
+    if (this.verifiedParentAccessCache.has(parentId)) return true;
+
+    const allowedDriveFolderIds = await this.getAllowedDriveFolderIds();
+    if (allowedDriveFolderIds.has(parentId)) {
+      this.logger.log(
+        `[DriveCheck] Parent folder access verified via GOOGLE_ALLOWED_DRIVE_FOLDER_IDS at depth ${depth}: ${parentId}`,
+      );
+      this.verifiedParentAccessCache.add(parentId);
+      return true;
+    }
+
+    const dbParent = await this.prisma.driveFile.findUnique({
+      where: { id: parentId },
+      select: { drive_permission: true },
+    });
+    if (dbParent?.drive_permission === true) {
+      this.logger.log(
+        `[DriveCheck] Parent folder access verified from DriveFile cache at depth ${depth}: ${parentId}`,
+      );
+      this.verifiedParentAccessCache.add(parentId);
+      return true;
+    }
+
+    if (visited.has(parentId)) {
+      this.logger.warn(
+        `[DriveCheck] Skipping circular parent traversal for folder: ${parentId}`,
+      );
+      return false;
+    }
+    visited.add(parentId);
+
+    if (depth >= this.maxParentTraversalDepth) {
+      this.logger.warn(
+        `[DriveCheck] Reached maximum parent traversal depth of ${this.maxParentTraversalDepth} for parent folder: ${parentId}`,
+      );
+      return false;
+    }
+
+    try {
+      this.logger.log(
+        `[DriveCheck] Traversing parent folder (depth ${depth}): ${parentId}`,
+      );
+      const parentMetadata = await this.driveSA.files.get({
+        fileId: parentId,
+        fields: 'id,name,ownedByMe,sharedWithMeTime,parents,driveId',
+        supportsAllDrives: true,
+      });
+
+      if (
+        hasExplicitDriveAccess(
+          parentMetadata.data,
+          this.allowedSharedDriveIds,
+          this.serviceAccountEmail,
+        )
+      ) {
+        this.logger.log(
+          `[DriveCheck] Parent folder access verified at depth ${depth} from metadata: ${parentId}`,
+        );
+        this.verifiedParentAccessCache.add(parentId);
+        return true;
+      }
+
+      const parentPermissions = await this.getFilePermissions(parentId);
+      if (
+        hasExplicitDriveAccess(
+          parentMetadata.data,
+          this.allowedSharedDriveIds,
+          this.serviceAccountEmail,
+          parentPermissions,
+        )
+      ) {
+        this.logger.log(
+          `[DriveCheck] Parent folder access verified at depth ${depth} via explicit permissions: ${parentId}`,
+        );
+        this.verifiedParentAccessCache.add(parentId);
+        return true;
+      }
+
+      const nextParents = parentMetadata.data.parents || [];
+      if (nextParents.length > 0) {
+        for (const nextParentId of nextParents) {
+          const verified = await this.checkParentAccessRecursive(
+            nextParentId,
+            depth + 1,
+            visited,
+          );
+          if (verified) return true;
+        }
+      }
+    } catch (err: any) {
+      this.logger.log(
+        `[DriveCheck] Parent folder ${parentId} at depth ${depth} is not accessible: ${err.message || err}`,
+      );
+    }
+    return false;
+  }
+
+  private async checkInheritedAccess(file: any): Promise<boolean> {
+    // 1. If in an explicitly allowed Shared Drive, access is valid for that scope.
+    if (file.driveId && this.allowedSharedDriveIds.has(file.driveId)) {
+      this.logger.log(
+        `[DriveCheck] Shared Drive access verified by GOOGLE_ALLOWED_SHARED_DRIVE_IDS for driveId: ${file.driveId}`,
+      );
+      return true;
+    }
+
+    // 2. If parent folders are present, check if the service account has access to the parent folder recursively
+    if (file.parents && file.parents.length > 0) {
+      try {
+        for (const parentId of file.parents) {
+          const verified = await this.checkParentAccessRecursive(parentId, 0);
+          if (verified) return true;
+        }
+      } catch (e: any) {
+        this.logger.warn(
+          `[DriveCheck] Recursive parent verification failed: ${e.message || e}`,
+        );
+      }
+    }
+    return false;
   }
 
   private async mapMissingDriveIds() {
