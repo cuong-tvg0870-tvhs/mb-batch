@@ -8,15 +8,56 @@ import {
 import { MetaApiService } from '../meta-api/meta-api.service';
 import { PrismaService } from '../prisma/prisma.service';
 
+const parseEnvInteger = (
+  value: string | undefined,
+  defaultValue: number,
+  minValue: number,
+) => {
+  const parsed = Number(value ?? defaultValue);
+  return Number.isFinite(parsed) ? Math.max(minValue, parsed) : defaultValue;
+};
+
 @Injectable()
 export class MediaSyncService implements OnModuleInit {
   private readonly logger = new Logger(MediaSyncService.name);
   private businessId = process.env.SDK_FACEBOOK_BUSINESS;
+  private readonly metaAssetFetchDelayMs = parseEnvInteger(
+    process.env.META_ASSET_FETCH_DELAY_MS,
+    2000,
+    0,
+  );
+  private readonly videoSourceBatchSize = parseEnvInteger(
+    process.env.META_VIDEO_SOURCE_BATCH_SIZE,
+    10,
+    1,
+  );
+  private readonly videoSourceBatchSleepMs = parseEnvInteger(
+    process.env.META_VIDEO_SOURCE_CHUNK_SLEEP_MS,
+    8000,
+    0,
+  );
+  private readonly expiredUrlAssetSleepMs = parseEnvInteger(
+    process.env.META_EXPIRED_URL_ASSET_SLEEP_MS,
+    2000,
+    0,
+  );
+  private nextMetaAssetFetchAt = Date.now();
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly metaApi: MetaApiService,
   ) {}
+
+  private async waitForMetaAssetFetchSlot() {
+    if (this.metaAssetFetchDelayMs <= 0) return;
+
+    const now = Date.now();
+    const waitMs = Math.max(0, this.nextMetaAssetFetchAt - now);
+    this.nextMetaAssetFetchAt =
+      Math.max(now, this.nextMetaAssetFetchAt) + this.metaAssetFetchDelayMs;
+
+    if (waitMs > 0) await sleep(waitMs);
+  }
 
   private getPreferredThumbnail(thumbnails?: any) {
     return (
@@ -109,10 +150,12 @@ export class MediaSyncService implements OnModuleInit {
     let videoPayload: any = null;
 
     if (asset.video_id) {
+      await this.waitForMetaAssetFetchSlot();
       videoPayload = await this.metaApi.request('get', asset.video_id, {
         fields: 'id,source,length,thumbnails',
       });
     } else {
+      await this.waitForMetaAssetFetchSlot();
       assetPayload = await this.metaApi.request('get', asset.id, {
         fields: [
           'id',
@@ -503,7 +546,7 @@ export class MediaSyncService implements OnModuleInit {
 
     this.logger.log(`Starting to sync sources for ${videos.length} videos...`);
 
-    const chunkSize = 20;
+    const chunkSize = this.videoSourceBatchSize;
     let totalUpdated = 0;
 
     for (let i = 0; i < videos.length; i += chunkSize) {
@@ -516,6 +559,7 @@ export class MediaSyncService implements OnModuleInit {
       if (!videoIds.length) continue;
 
       try {
+        await this.waitForMetaAssetFetchSlot();
         const response = await this.metaApi.request(
           'get',
           'https://graph.facebook.com/v24.0/',
@@ -563,9 +607,7 @@ export class MediaSyncService implements OnModuleInit {
       );
 
       if (i + chunkSize < videos.length) {
-        await sleep(
-          Number(process.env.META_VIDEO_SOURCE_CHUNK_SLEEP_MS || 5000),
-        );
+        await sleep(this.videoSourceBatchSleepMs);
       }
     }
 
@@ -628,10 +670,11 @@ export class MediaSyncService implements OnModuleInit {
           this.logger.log(
             `[${index + 1}/${assets.length}] ✅ Cập nhật thành công URL mới cho asset ${asset.id}`,
           );
-          await sleep(1000);
+          await sleep(this.expiredUrlAssetSleepMs);
           continue;
         }
 
+        await this.waitForMetaAssetFetchSlot();
         const res = await this.metaApi.request('get', asset.id, {
           fields: fieldsImage.join(','),
         });
@@ -670,7 +713,7 @@ export class MediaSyncService implements OnModuleInit {
         }
       }
 
-      await sleep(1000); // Tạm dừng 1s giữa mỗi request
+      await sleep(this.expiredUrlAssetSleepMs);
     }
 
     this.logger.log(

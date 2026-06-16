@@ -21,6 +21,7 @@ type DriveFileEntry = {
 type UploadBudget = {
   uploaded: number;
   limit: number;
+  reserved: number;
 };
 
 type FolderUploadStats = {
@@ -30,19 +31,55 @@ type FolderUploadStats = {
   limitReached: boolean;
 };
 
+const parseEnvInteger = (
+  value: string | undefined,
+  defaultValue: number,
+  minValue: number,
+) => {
+  const parsed = Number(value ?? defaultValue);
+  return Number.isFinite(parsed) ? Math.max(minValue, parsed) : defaultValue;
+};
+
 @Injectable()
 export class MetaMediaUploadService {
   private readonly logger = new Logger(MetaMediaUploadService.name);
   private readonly maxFilesPerRun = 20;
-  private readonly uploadChunkSize = Math.max(
+  private readonly metaUploadConcurrency = parseEnvInteger(
+    process.env.META_MEDIA_UPLOAD_CONCURRENCY,
+    5,
     1,
-    Number(process.env.META_MEDIA_UPLOAD_CHUNK_SIZE || 10),
+  );
+  private readonly metaUploadStartDelayMs = parseEnvInteger(
+    process.env.META_MEDIA_UPLOAD_START_DELAY_MS,
+    1500,
+    0,
+  );
+  private readonly metaUploadChunkDelayMs = parseEnvInteger(
+    process.env.META_MEDIA_UPLOAD_CHUNK_DELAY_MS,
+    5000,
+    0,
+  );
+  private readonly metaAssetFetchDelayMs = parseEnvInteger(
+    process.env.META_ASSET_FETCH_DELAY_MS,
+    2000,
+    0,
+  );
+  private readonly metaImagePollRetryDelayMs = parseEnvInteger(
+    process.env.META_IMAGE_POLL_RETRY_DELAY_MS,
+    5000,
+    0,
+  );
+  private readonly metaVideoPollRetryDelayMs = parseEnvInteger(
+    process.env.META_VIDEO_POLL_RETRY_DELAY_MS,
+    7000,
+    0,
   );
   private readonly uploadingClaimTtlMs = 6 * 60 * 60 * 1000;
   private readonly driveFolderMimeType = 'application/vnd.google-apps.folder';
   private readonly rootFolderId =
     process.env.META_CREATIVE_ROOT_FOLDER_ID || '4303729193176038';
   private readonly folderEnsurePromises = new Map<string, Promise<any>>();
+  private nextMetaAssetFetchAt = Date.now();
   private readonly driveSA: drive_v3.Drive;
 
   constructor(
@@ -66,6 +103,7 @@ export class MetaMediaUploadService {
     const budget: UploadBudget = {
       uploaded: 0,
       limit: this.maxFilesPerRun,
+      reserved: 0,
     };
 
     const records = await this.prisma.larkRecord.findMany({
@@ -109,14 +147,14 @@ export class MetaMediaUploadService {
     uploadBatchId: string,
   ) {
     const fileRecords: any[] = [];
-    const chunkState = { number: 0 };
+    const queueState = { number: 0 };
 
     const flushFileRecords = async () => {
-      await this.uploadFileRecordChunks(
+      await this.uploadFileRecordQueue(
         fileRecords,
         budget,
         uploadBatchId,
-        chunkState,
+        queueState,
       );
     };
 
@@ -124,7 +162,7 @@ export class MetaMediaUploadService {
       if (this.isDriveFolderRecord(record)) {
         await flushFileRecords();
 
-        if (budget.uploaded >= budget.limit) {
+        if (this.getRemainingUploadSlots(budget) <= 0) {
           await this.markRecordUploadLimitReached(record, uploadBatchId);
           continue;
         }
@@ -134,22 +172,20 @@ export class MetaMediaUploadService {
       }
 
       fileRecords.push(record);
-      if (fileRecords.length >= this.uploadChunkSize) {
-        await flushFileRecords();
-      }
     }
 
     await flushFileRecords();
   }
 
-  private async uploadFileRecordChunks(
+  private async uploadFileRecordQueue(
     fileRecords: any[],
     budget: UploadBudget,
     uploadBatchId: string,
-    chunkState: { number: number },
+    queueState: { number: number },
   ) {
     while (fileRecords.length > 0) {
-      if (budget.uploaded >= budget.limit) {
+      const remainingSlots = this.getRemainingUploadSlots(budget);
+      if (remainingSlots <= 0) {
         const remainingRecords = fileRecords.splice(0);
         await Promise.all(
           remainingRecords.map((record) =>
@@ -159,24 +195,75 @@ export class MetaMediaUploadService {
         return;
       }
 
-      const remainingBudget = budget.limit - budget.uploaded;
-      const takeCount = Math.min(
-        this.uploadChunkSize,
-        remainingBudget,
-        fileRecords.length,
+      const queue = fileRecords.splice(
+        0,
+        Math.min(remainingSlots, fileRecords.length),
       );
-      const chunk = fileRecords.splice(0, takeCount);
-      if (chunk.length === 0) return;
+      if (queue.length === 0) return;
 
-      chunkState.number += 1;
+      queueState.number += 1;
       this.logger.log(
-        `Uploading Lark file-record chunk ${chunkState.number}: ${chunk.length} records (${budget.uploaded}/${budget.limit} uploaded this job)`,
+        `Uploading Lark file-record queue ${queueState.number}: ${queue.length} records (${budget.uploaded}/${budget.limit} uploaded this job, concurrency=${this.metaUploadConcurrency}, startDelay=${this.metaUploadStartDelayMs}ms)`,
       );
 
-      await Promise.all(
-        chunk.map((record) => this.processClaimedRecord(record, budget)),
+      await this.mapWithMetaUploadThrottle(queue, (record) =>
+        this.processClaimedRecord(record, budget),
       );
+
+      if (
+        fileRecords.length > 0 &&
+        this.getRemainingUploadSlots(budget) > 0 &&
+        this.metaUploadChunkDelayMs > 0
+      ) {
+        await this.sleep(this.metaUploadChunkDelayMs);
+      }
     }
+  }
+
+  private async mapWithMetaUploadThrottle<T, R>(
+    items: T[],
+    task: (item: T, index: number) => Promise<R>,
+  ): Promise<R[]> {
+    const results = new Array<R>(items.length);
+    let nextIndex = 0;
+    let nextStartAt = Date.now();
+    const workerCount = Math.min(this.metaUploadConcurrency, items.length);
+
+    await Promise.all(
+      Array.from({ length: workerCount }, async () => {
+        while (true) {
+          const index = nextIndex++;
+          if (index >= items.length) return;
+
+          if (this.metaUploadStartDelayMs > 0) {
+            const now = Date.now();
+            const waitMs = Math.max(0, nextStartAt - now);
+            nextStartAt =
+              Math.max(now, nextStartAt) + this.metaUploadStartDelayMs;
+            if (waitMs > 0) await this.sleep(waitMs);
+          }
+
+          results[index] = await task(items[index], index);
+        }
+      }),
+    );
+
+    return results;
+  }
+
+  private getRemainingUploadSlots(budget: UploadBudget) {
+    return Math.max(0, budget.limit - budget.uploaded - budget.reserved);
+  }
+
+  private tryReserveUploadSlot(budget: UploadBudget) {
+    if (this.getRemainingUploadSlots(budget) <= 0) return false;
+    budget.reserved += 1;
+    return true;
+  }
+
+  private releaseUploadSlot(budget: UploadBudget, uploaded: boolean) {
+    budget.reserved = Math.max(0, budget.reserved - 1);
+    if (uploaded) budget.uploaded += 1;
   }
 
   private async processClaimedRecord(record: any, budget: UploadBudget) {
@@ -277,6 +364,13 @@ export class MetaMediaUploadService {
       productFolder.id,
       budget,
     );
+    if (asset.reason === 'LIMIT_REACHED') {
+      return {
+        status: 'PENDING',
+        raw: { sync_limit_reached: true },
+      };
+    }
+
     if (!asset.asset) {
       throw new Error(
         `Loại file Drive chưa được hỗ trợ để upload Meta: ${
@@ -309,7 +403,7 @@ export class MetaMediaUploadService {
     };
 
     const walk = async (folderId: string, targetFolderId: string) => {
-      if (budget.uploaded >= budget.limit) {
+      if (this.getRemainingUploadSlots(budget) <= 0) {
         stats.limitReached = true;
         return;
       }
@@ -332,50 +426,59 @@ export class MetaMediaUploadService {
         );
         await walk(child.id, subFolder.id);
 
-        if (budget.uploaded >= budget.limit) {
+        if (this.getRemainingUploadSlots(budget) <= 0) {
           stats.limitReached = true;
           return;
         }
       }
 
-      let chunkNumber = 0;
+      let queueNumber = 0;
       for (let i = 0; i < mediaFiles.length; ) {
-        if (budget.uploaded >= budget.limit) {
+        const remainingSlots = this.getRemainingUploadSlots(budget);
+        if (remainingSlots <= 0) {
           stats.limitReached = true;
           return;
         }
 
-        const remainingBudget = budget.limit - budget.uploaded;
-        const takeCount = Math.min(this.uploadChunkSize, remainingBudget);
-        const chunk = mediaFiles.slice(i, i + takeCount);
-        if (chunk.length === 0) {
-          stats.limitReached = budget.uploaded >= budget.limit;
+        const queue = mediaFiles.slice(
+          i,
+          i + Math.min(remainingSlots, mediaFiles.length - i),
+        );
+        if (queue.length === 0) {
+          stats.limitReached = this.getRemainingUploadSlots(budget) <= 0;
           return;
         }
 
-        i += chunk.length;
-        chunkNumber += 1;
+        i += queue.length;
+        queueNumber += 1;
 
         this.logger.log(
-          `Uploading media chunk ${chunkNumber} in Meta folder ${targetFolderId}: ${chunk.length} files (${budget.uploaded}/${budget.limit} uploaded this job)`,
+          `Uploading media queue ${queueNumber} in Meta folder ${targetFolderId}: ${queue.length} files (${budget.uploaded}/${budget.limit} uploaded this job, concurrency=${this.metaUploadConcurrency}, startDelay=${this.metaUploadStartDelayMs}ms)`,
         );
 
-        const results = await Promise.all(
-          chunk.map((child) =>
-            this.uploadDriveFile(child, targetFolderId, budget),
-          ),
+        const results = await this.mapWithMetaUploadThrottle(queue, (child) =>
+          this.uploadDriveFile(child, targetFolderId, budget),
         );
 
         for (const result of results) {
           if (result.uploaded) stats.uploadedCount += 1;
           else if (result.reason === 'UNSUPPORTED_TYPE')
             stats.unsupportedCount += 1;
+          else if (result.reason === 'LIMIT_REACHED') stats.limitReached = true;
           else stats.skippedCount += 1;
         }
 
-        if (budget.uploaded >= budget.limit) {
+        if (this.getRemainingUploadSlots(budget) <= 0) {
           stats.limitReached = true;
           return;
+        }
+
+        if (
+          i < mediaFiles.length &&
+          this.getRemainingUploadSlots(budget) > 0 &&
+          this.metaUploadChunkDelayMs > 0
+        ) {
+          await this.sleep(this.metaUploadChunkDelayMs);
         }
       }
     };
@@ -426,22 +529,27 @@ export class MetaMediaUploadService {
       return { uploaded: false, asset: syncedAsset };
     }
 
-    if (budget.uploaded >= budget.limit) {
+    if (!this.tryReserveUploadSlot(budget)) {
       return { uploaded: false, reason: 'LIMIT_REACHED' as const };
     }
 
-    const buffer = await this.downloadDriveFile(file.id);
-    const asset = await this.uploadBufferToMeta({
-      buffer,
-      name: file.name || file.id,
-      type,
-      folderId,
-      driveUrl: file.webViewLink || this.buildDriveWebViewUrl(file.id),
-      driveId: file.id,
-    });
-    budget.uploaded += 1;
+    try {
+      const buffer = await this.downloadDriveFile(file.id);
+      const asset = await this.uploadBufferToMeta({
+        buffer,
+        name: file.name || file.id,
+        type,
+        folderId,
+        driveUrl: file.webViewLink || this.buildDriveWebViewUrl(file.id),
+        driveId: file.id,
+      });
+      this.releaseUploadSlot(budget, true);
 
-    return { uploaded: true, asset };
+      return { uploaded: true, asset };
+    } catch (err) {
+      this.releaseUploadSlot(budget, false);
+      throw err;
+    }
   }
 
   private async ensureFolderForRecord(
@@ -713,11 +821,15 @@ export class MetaMediaUploadService {
     let asset: any = null;
     let latestReadyAsset: any = null;
     const maxRetries = type === AssetType.VIDEO ? 15 : 5;
-    const retryDelayMs = type === AssetType.VIDEO ? 5000 : 4000;
+    const retryDelayMs =
+      type === AssetType.VIDEO
+        ? this.metaVideoPollRetryDelayMs
+        : this.metaImagePollRetryDelayMs;
     let errorCount = 0;
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
+        await this.waitForMetaAssetFetchSlot();
         const response = await this.metaApi.request('get', assetId, {
           fields: fields.join(','),
         });
@@ -850,6 +962,7 @@ export class MetaMediaUploadService {
         },
       ];
 
+      await this.waitForMetaAssetFetchSlot();
       const response = await this.metaApi.request(
         'get',
         `${businessId}/creatives`,
@@ -1087,6 +1200,17 @@ export class MetaMediaUploadService {
       .toLowerCase()
       .replace(/\.[^/.]+$/, '')
       .trim();
+  }
+
+  private async waitForMetaAssetFetchSlot() {
+    if (this.metaAssetFetchDelayMs <= 0) return;
+
+    const now = Date.now();
+    const waitMs = Math.max(0, this.nextMetaAssetFetchAt - now);
+    this.nextMetaAssetFetchAt =
+      Math.max(now, this.nextMetaAssetFetchAt) + this.metaAssetFetchDelayMs;
+
+    if (waitMs > 0) await this.sleep(waitMs);
   }
 
   private sleep(ms: number) {
