@@ -10,6 +10,18 @@ import { PrismaService } from '../prisma/prisma.service';
 import { executeMetaApiWithRetry, fetchAll } from '../../common/utils';
 import { AD_INSIGHT_FIELDS } from '../../common/utils/meta-field';
 
+const META_AUTH_CONFIG_KEY = 'META_AUTH_CONFIG';
+const META_API_COOLDOWN_CONFIG_KEY = 'META_API_COOLDOWN';
+
+const parseEnvInteger = (
+  value: string | undefined,
+  defaultValue: number,
+  minValue: number,
+) => {
+  const parsed = Number(value ?? defaultValue);
+  return Number.isFinite(parsed) ? Math.max(minValue, parsed) : defaultValue;
+};
+
 @Injectable()
 export class MetaApiService implements OnModuleInit {
   private readonly logger = new Logger(MetaApiService.name);
@@ -17,6 +29,11 @@ export class MetaApiService implements OnModuleInit {
     process.env.SDK_FACEBOOK_BUSINESS || '1916878948527753';
   private initialized = false;
   private metaAuthConfigCache: { value: any; expiresAt: number } | null = null;
+  private readonly rateLimitCooldownMs = parseEnvInteger(
+    process.env.META_API_RATE_LIMIT_COOLDOWN_MS,
+    15 * 60 * 1000,
+    60 * 1000,
+  );
 
   constructor(private readonly prisma: PrismaService) {}
 
@@ -64,21 +81,103 @@ export class MetaApiService implements OnModuleInit {
     if (!error || !error.code) return;
 
     const code = error.code;
-    const type = error.type;
 
     const isAuthError = code === 190 || code === 102;
-    const isLimitError =
-      code === 17 || code === 4 || code === 32 || code === 613;
+    const isLimitError = this.isMetaRateLimitError(error);
 
-    if (isAuthError || isLimitError) {
+    if (isAuthError) {
       this.logger.warn(
         `Meta API Error [${code}]: ${error.message}. Clearing META_AUTH_CONFIG.`,
       );
       this.metaAuthConfigCache = null;
       await this.prisma.systemConfig.deleteMany({
-        where: { key: 'META_AUTH_CONFIG' },
+        where: { key: META_AUTH_CONFIG_KEY },
       });
+      return;
     }
+
+    if (isLimitError) {
+      await this.setMetaApiCooldown(error);
+    }
+  }
+
+  private isMetaRateLimitError(error: any) {
+    const code = Number(error?.code);
+    const subcode = Number(error?.error_subcode);
+    const message = String(error?.message || '').toLowerCase();
+
+    return (
+      [4, 17, 32, 368, 613, 80004].includes(code) ||
+      subcode === 2446079 ||
+      message.includes('rate limit') ||
+      message.includes('too many') ||
+      message.includes('temporarily blocked') ||
+      message.includes('reduce the amount of data') ||
+      message.includes('try again later')
+    );
+  }
+
+  private async setMetaApiCooldown(error: any) {
+    const now = new Date();
+    const blockedUntil = new Date(now.getTime() + this.rateLimitCooldownMs);
+    const value = {
+      reason: 'rate_limit',
+      code: error?.code,
+      subcode: error?.error_subcode,
+      type: error?.type,
+      message: error?.message || 'Meta API rate limit',
+      fbtrace_id: error?.fbtrace_id,
+      blockedAt: now.toISOString(),
+      blockedUntil: blockedUntil.toISOString(),
+    };
+
+    this.logger.warn(
+      `Meta API limit/block [${value.code ?? '-'}:${value.subcode ?? '-'}]. Cooling down until ${value.blockedUntil}; keeping META_AUTH_CONFIG.`,
+    );
+
+    await this.prisma.systemConfig.upsert({
+      where: { key: META_API_COOLDOWN_CONFIG_KEY },
+      update: {
+        value,
+        description:
+          'Temporary Meta API cooldown. Do not delete META_AUTH_CONFIG for rate-limit errors.',
+      },
+      create: {
+        key: META_API_COOLDOWN_CONFIG_KEY,
+        value,
+        description:
+          'Temporary Meta API cooldown. Do not delete META_AUTH_CONFIG for rate-limit errors.',
+      },
+    });
+  }
+
+  public async getActiveMetaApiCooldown() {
+    const config = await this.prisma.systemConfig.findUnique({
+      where: { key: META_API_COOLDOWN_CONFIG_KEY },
+    });
+    const value = (config?.value as any) || null;
+    const blockedUntilMs = value?.blockedUntil
+      ? new Date(value.blockedUntil).getTime()
+      : NaN;
+
+    if (!Number.isFinite(blockedUntilMs)) return null;
+    if (blockedUntilMs <= Date.now()) {
+      await this.prisma.systemConfig.deleteMany({
+        where: { key: META_API_COOLDOWN_CONFIG_KEY },
+      });
+      return null;
+    }
+
+    return value;
+  }
+
+  public async assertMetaApiAvailable() {
+    const cooldown = await this.getActiveMetaApiCooldown();
+    if (!cooldown) return;
+
+    throw new BadRequestException(
+      `Meta API đang tạm cooldown đến ${cooldown.blockedUntil} do lỗi ${cooldown.code ?? '-'}: ${cooldown.message || 'rate limit'}`,
+    );
   }
 
   public async fetchAllPages(initialUrl: string, authConfig: any) {
@@ -87,6 +186,7 @@ export class MetaApiService implements OnModuleInit {
 
     while (nextUrl) {
       try {
+        await this.assertMetaApiAvailable();
         const response = await axios.get(nextUrl, {
           headers: this.getHeaders(authConfig),
         });
@@ -120,7 +220,7 @@ export class MetaApiService implements OnModuleInit {
     }
 
     const config = await this.prisma.systemConfig.findUnique({
-      where: { key: 'META_AUTH_CONFIG' },
+      where: { key: META_AUTH_CONFIG_KEY },
     });
     const value = (config?.value as any) || {};
     this.metaAuthConfigCache = {
@@ -139,6 +239,7 @@ export class MetaApiService implements OnModuleInit {
         'Hệ thống đang cập nhật và admin đã nhận được thông báo này, vui lòng chọn những tài nguyên đã có',
       );
     }
+    await this.assertMetaApiAvailable();
     return token;
   }
 
@@ -149,6 +250,7 @@ export class MetaApiService implements OnModuleInit {
     data?: any,
     configOptions?: any,
   ) {
+    await this.assertMetaApiAvailable();
     const authConfig = await this.getMetaAuthConfig();
     const token = authConfig?.accessToken;
 

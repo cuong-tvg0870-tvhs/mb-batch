@@ -41,6 +41,16 @@ export class MediaSyncService implements OnModuleInit {
     2000,
     0,
   );
+  private readonly videoSourceMaxPerRun = parseEnvInteger(
+    process.env.META_VIDEO_SOURCE_MAX_PER_RUN,
+    50,
+    1,
+  );
+  private readonly expiredUrlMaxPerRun = parseEnvInteger(
+    process.env.META_EXPIRED_URL_MAX_PER_RUN,
+    100,
+    1,
+  );
   private nextMetaAssetFetchAt = Date.now();
 
   constructor(
@@ -106,6 +116,7 @@ export class MediaSyncService implements OnModuleInit {
             END <= 2
           )
         ORDER BY "updatedAt" ASC
+        LIMIT ${this.videoSourceMaxPerRun}
       `,
     );
 
@@ -632,7 +643,8 @@ export class MediaSyncService implements OnModuleInit {
           lte: new Date(Date.now() + 24 * 60 * 60 * 1000), // Within 24 hours
         },
       },
-      take: 500,
+      orderBy: { urlExpiredAt: 'asc' },
+      take: this.expiredUrlMaxPerRun,
     });
 
     if (assets.length === 0) {

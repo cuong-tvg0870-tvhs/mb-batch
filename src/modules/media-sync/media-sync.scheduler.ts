@@ -12,6 +12,34 @@ export class MediaSyncScheduler implements OnModuleInit {
     @InjectQueue(MEDIA_SYNC_QUEUE) private readonly mediaSyncQueue: Queue,
   ) {}
 
+  private async enqueueSingletonJob(jobName: string) {
+    const jobId = `media-sync:${jobName}:singleton`;
+    const existingJob = await this.mediaSyncQueue.getJob(jobId);
+    if (existingJob) {
+      const state = await existingJob.getState();
+      if (['active', 'waiting', 'delayed', 'paused'].includes(state)) {
+        this.logger.warn(
+          `⏳ Skip ${jobName}; existing singleton job is ${state}.`,
+        );
+        return false;
+      }
+      await existingJob.remove().catch(() => undefined);
+    }
+
+    await this.mediaSyncQueue.add(
+      jobName,
+      {},
+      {
+        jobId,
+        removeOnComplete: true,
+        removeOnFail: true,
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 60000 },
+      },
+    );
+    return true;
+  }
+
   async onModuleInit() {
     this.logger.log('🚀 MediaSyncScheduler Initialized');
 
@@ -23,16 +51,14 @@ export class MediaSyncScheduler implements OnModuleInit {
         '🚀 [Deploy Startup] Production environment detected. Triggering Expired URLs Sync...',
       );
       try {
-        await this.mediaSyncQueue.add(
+        const queued = await this.enqueueSingletonJob(
           MEDIA_SYNC_JOBS.SYNC_EXPIRED_URLS,
-          {},
-          {
-            removeOnComplete: true,
-            attempts: 3,
-            backoff: { type: 'exponential', delay: 60000 },
-          },
         );
-        this.logger.log('✅ Startup Expired URLs Sync successfully queued.');
+        this.logger.log(
+          queued
+            ? '✅ Startup Expired URLs Sync successfully queued.'
+            : '⏳ Startup Expired URLs Sync skipped because a job is already pending.',
+        );
       } catch (error: any) {
         this.logger.error(
           `❌ Failed to queue startup Expired URLs Sync: ${error.message}`,
@@ -47,15 +73,7 @@ export class MediaSyncScheduler implements OnModuleInit {
   @Cron('0 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async scheduleSyncFolders() {
     this.logger.log('📅 Scheduling Folders Sync...');
-    await this.mediaSyncQueue.add(
-      MEDIA_SYNC_JOBS.SYNC_FOLDERS,
-      {},
-      {
-        removeOnComplete: true,
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 60000 },
-      },
-    );
+    await this.enqueueSingletonJob(MEDIA_SYNC_JOBS.SYNC_FOLDERS);
   }
 
   /**
@@ -64,48 +82,24 @@ export class MediaSyncScheduler implements OnModuleInit {
   @Cron('3 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async scheduleSyncCreatives() {
     this.logger.log('📅 Scheduling Creatives Sync...');
-    await this.mediaSyncQueue.add(
-      MEDIA_SYNC_JOBS.SYNC_CREATIVES,
-      {},
-      {
-        removeOnComplete: true,
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 60000 },
-      },
-    );
+    await this.enqueueSingletonJob(MEDIA_SYNC_JOBS.SYNC_CREATIVES);
   }
 
   /**
-   * ⏰ SYNC VIDEO SOURCES (Every hour at minute 6)
+   * ⏰ SYNC VIDEO SOURCES (Every 3 hours at minute 6)
    */
-  @Cron('6 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('6 */3 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async scheduleSyncVideoSources() {
     this.logger.log('📅 Scheduling Video Sources Sync...');
-    await this.mediaSyncQueue.add(
-      MEDIA_SYNC_JOBS.SYNC_VIDEO_SOURCES,
-      {},
-      {
-        removeOnComplete: true,
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 60000 },
-      },
-    );
+    await this.enqueueSingletonJob(MEDIA_SYNC_JOBS.SYNC_VIDEO_SOURCES);
   }
 
   /**
    * ⏰ SYNC EXPIRED URLS (Every 2 hours at minute 0)
    */
-  @Cron('0 */1 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('0 */2 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async scheduleSyncExpiredUrls() {
     this.logger.log('📅 Scheduling Expired URLs Sync...');
-    await this.mediaSyncQueue.add(
-      MEDIA_SYNC_JOBS.SYNC_EXPIRED_URLS,
-      {},
-      {
-        removeOnComplete: true,
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 60000 },
-      },
-    );
+    await this.enqueueSingletonJob(MEDIA_SYNC_JOBS.SYNC_EXPIRED_URLS);
   }
 }
