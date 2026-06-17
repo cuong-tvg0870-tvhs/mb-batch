@@ -1,25 +1,7 @@
-# Skill: Meta Marketing API Official Documentation References (v24.0)
+# Skill: Meta Marketing API Documentation References (v24.0)
 
-## Context
-Whenever you need to clarify edge cases, verify available enum values, or optimize Meta API integration, refer to the core structures defined in the official documentation mapping below.
-
-## Core Documentation Mapping
-
-1. **Root Reference Index**:
-   - URL: https://developers.facebook.com/docs/marketing-api/
-   - Context: Use this to explore the overall Graph API graph node architecture (Nodes, Edges, Fields) for v24.0.
-
-2. **Campaign Object Reference**:
-   - URL: https://developers.facebook.com/docs/marketing-api/reference/ad-campaign-group/
-   - Context: Check valid `objective` fields, special categories rules, and auction types.
-
-3. **Ad Set Object Reference**:
-   - URL: https://developers.facebook.com/docs/marketing-api/reference/ad-campaign/
-   - Context: Look up advanced targeting objects, custom audiences, pixel setups, and optimization configurations.
-
-4. **Ad Creative & Carousel Specifications**:
-   - URL: https://developers.facebook.com/docs/marketing-api/reference/ad-creative/
-   - Context: Deep dive into `object_story_spec`, `link_data`, dynamic ads, catalog ads, and structuring Multi-Product (Carousel) layout arrays.
-
-## Instructions for AI Behavior
-Before suggesting any payload containing fields you are uncertain of, check the specific reference page above. Ensure fields align with standard Graph API version (v24.0).
+For Graph API v24.0 integration, refer to these official documentations:
+1. **Root Reference Index**: https://developers.facebook.com/docs/marketing-api/ (Graph node architecture)
+2. **Campaign Reference**: https://developers.facebook.com/docs/marketing-api/reference/ad-campaign-group/ (Objective, buying type, bid strategy)
+3. **Ad Set Reference**: https://developers.facebook.com/docs/marketing-api/reference/ad-campaign/ (Targeting, daily budget, optimization)
+4. **Ad Creative & Carousel Spec**: https://developers.facebook.com/docs/marketing-api/reference/ad-creative/ (object_story_spec, asset_feed_spec, dynamic creatives)
