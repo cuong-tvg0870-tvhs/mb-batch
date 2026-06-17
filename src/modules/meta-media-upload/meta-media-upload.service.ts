@@ -16,6 +16,8 @@ type DriveFileEntry = {
   webContentLink?: string | null;
   webViewLink?: string | null;
   size?: string | null;
+  capabilities?: { canDownload?: boolean | null } | null;
+  raw?: any;
 };
 
 type UploadBudget = {
@@ -30,6 +32,16 @@ type FolderUploadStats = {
   unsupportedCount: number;
   limitReached: boolean;
   assetIds: string[];
+};
+
+type UploadErrorInfo = {
+  message: string;
+  raw: Record<string, string | null>;
+};
+
+type UploadControl = {
+  paused: boolean;
+  cooldown?: any;
 };
 
 const parseEnvInteger = (
@@ -75,6 +87,10 @@ export class MetaMediaUploadService {
     7000,
     0,
   );
+  private readonly metaCooldownHardBlock =
+    process.env.META_API_COOLDOWN_HARD_BLOCK === 'true';
+  private readonly checkMetaExistingAssetBeforeUpload =
+    process.env.META_MEDIA_UPLOAD_CHECK_META_EXISTING_ASSET === 'true';
   private readonly uploadingClaimTtlMs = 6 * 60 * 60 * 1000;
   private readonly driveFolderMimeType = 'application/vnd.google-apps.folder';
   private readonly rootFolderId =
@@ -98,6 +114,11 @@ export class MetaMediaUploadService {
     this.driveSA = google.drive({ version: 'v3', auth });
   }
 
+  private async getBlockingMetaApiCooldown() {
+    if (!this.metaCooldownHardBlock) return null;
+    return this.metaApi.getActiveMetaApiCooldown();
+  }
+
   async autoUpload() {
     await this.releaseStaleUploadingRecords();
 
@@ -112,6 +133,20 @@ export class MetaMediaUploadService {
         skipped: true,
         reason: 'ACTIVE_UPLOAD_IN_PROGRESS',
         activeUploadingCount,
+      };
+    }
+
+    const activeCooldown = await this.getBlockingMetaApiCooldown();
+    if (activeCooldown) {
+      this.logger.warn(
+        `Skipping Meta auto-upload because Meta API is cooling down until ${activeCooldown.blockedUntil}`,
+      );
+      return {
+        uploaded: 0,
+        scanned: 0,
+        skipped: true,
+        reason: 'META_API_COOLDOWN',
+        cooldownUntil: activeCooldown.blockedUntil,
       };
     }
 
@@ -174,15 +209,46 @@ export class MetaMediaUploadService {
     };
 
     for (const record of records) {
+      const cooldown = await this.getBlockingMetaApiCooldown();
+      if (cooldown) {
+        await this.markRecordsMetaCooldownPending(
+          [record, ...fileRecords, ...records.slice(records.indexOf(record) + 1)],
+          uploadBatchId,
+          cooldown,
+        );
+        return;
+      }
+
       if (this.isDriveFolderRecord(record)) {
         await flushFileRecords();
+
+        const cooldownAfterFlush = await this.getBlockingMetaApiCooldown();
+        if (cooldownAfterFlush) {
+          await this.markRecordsMetaCooldownPending(
+            [record, ...records.slice(records.indexOf(record) + 1)],
+            uploadBatchId,
+            cooldownAfterFlush,
+          );
+          return;
+        }
 
         if (this.getRemainingUploadSlots(budget) <= 0) {
           await this.markRecordUploadLimitReached(record, uploadBatchId);
           continue;
         }
 
-        await this.processClaimedRecord(record, budget);
+        const result = await this.processClaimedRecord(
+          record,
+          budget,
+          uploadBatchId,
+        );
+        if (result === 'COOLDOWN') {
+          await this.markRecordsMetaCooldownPending(
+            records.slice(records.indexOf(record) + 1),
+            uploadBatchId,
+          );
+          return;
+        }
         continue;
       }
 
@@ -221,9 +287,33 @@ export class MetaMediaUploadService {
         `Uploading Lark file-record queue ${queueState.number}: ${queue.length} records (${budget.uploaded}/${budget.limit} uploaded this job, concurrency=${this.metaUploadConcurrency}, startDelay=${this.metaUploadStartDelayMs}ms)`,
       );
 
-      await this.mapWithMetaUploadThrottle(queue, (record) =>
-        this.processClaimedRecord(record, budget),
+      const control: UploadControl = { paused: false };
+      const results = await this.mapWithMetaUploadThrottle(
+        queue,
+        async (record) => {
+          const result = await this.processClaimedRecord(
+            record,
+            budget,
+            uploadBatchId,
+          );
+          if (result === 'COOLDOWN') control.paused = true;
+          return result;
+        },
+        control,
       );
+
+      const cooldown = await this.getBlockingMetaApiCooldown();
+      if (control.paused || cooldown) {
+        const skippedQueueRecords = queue.filter(
+          (_, index) => results[index] === undefined,
+        );
+        await this.markRecordsMetaCooldownPending(
+          [...skippedQueueRecords, ...fileRecords.splice(0)],
+          uploadBatchId,
+          control.cooldown || cooldown,
+        );
+        return;
+      }
 
       if (
         fileRecords.length > 0 &&
@@ -238,8 +328,9 @@ export class MetaMediaUploadService {
   private async mapWithMetaUploadThrottle<T, R>(
     items: T[],
     task: (item: T, index: number) => Promise<R>,
-  ): Promise<R[]> {
-    const results = new Array<R>(items.length);
+    control?: UploadControl,
+  ): Promise<Array<R | undefined>> {
+    const results = new Array<R | undefined>(items.length);
     let nextIndex = 0;
     let nextStartAt = Date.now();
     const workerCount = Math.min(this.metaUploadConcurrency, items.length);
@@ -247,6 +338,16 @@ export class MetaMediaUploadService {
     await Promise.all(
       Array.from({ length: workerCount }, async () => {
         while (true) {
+          if (control?.paused) return;
+          const cooldown = await this.getBlockingMetaApiCooldown();
+          if (cooldown) {
+            if (control) {
+              control.paused = true;
+              control.cooldown = cooldown;
+            }
+            return;
+          }
+
           const index = nextIndex++;
           if (index >= items.length) return;
 
@@ -258,6 +359,7 @@ export class MetaMediaUploadService {
             if (waitMs > 0) await this.sleep(waitMs);
           }
 
+          if (control?.paused) return;
           results[index] = await task(items[index], index);
         }
       }),
@@ -281,17 +383,146 @@ export class MetaMediaUploadService {
     if (uploaded) budget.uploaded += 1;
   }
 
-  private async processClaimedRecord(record: any, budget: UploadBudget) {
+  private normalizeUploadError(error: any): UploadErrorInfo {
+    const responseData = error?.response?.data || null;
+    const responseError =
+      error?.metaError || responseData?.error || error?.error || null;
+    const nestedErrors =
+      responseError?.errors || responseData?.errors || error?.errors || [];
+    const firstNestedError = Array.isArray(nestedErrors)
+      ? nestedErrors[0]
+      : null;
+
+    const message =
+      responseError?.message ||
+      firstNestedError?.message ||
+      responseData?.message ||
+      error?.message ||
+      String(error);
+    const code =
+      responseError?.code ??
+      error?.code ??
+      error?.status ??
+      error?.response?.status ??
+      null;
+    const status = error?.status ?? error?.response?.status ?? null;
+    const reason =
+      firstNestedError?.reason ||
+      responseError?.error_subcode ||
+      responseError?.reason ||
+      null;
+    const type = responseError?.type || firstNestedError?.domain || null;
+    const detailParts = [type, reason ? `reason=${reason}` : null].filter(
+      Boolean,
+    );
+
+    return {
+      message,
+      raw: {
+        sync_error_code: code === null ? null : String(code),
+        sync_error_status: status === null ? null : String(status),
+        sync_error_reason: reason === null ? null : String(reason),
+        sync_error_detail:
+          detailParts.length > 0 ? detailParts.join(' | ') : null,
+        sync_error_at: new Date().toISOString(),
+      },
+    };
+  }
+
+  private async processClaimedRecord(
+    record: any,
+    budget: UploadBudget,
+    uploadBatchId: string,
+  ): Promise<'DONE' | 'COOLDOWN'> {
     try {
       const result = await this.uploadRecord(record, budget);
       await this.markRecordStatus(record, result.status, null, result.raw);
+      return 'DONE';
     } catch (err: any) {
       this.logger.error(
         `Meta auto-upload failed for LarkRecord ${record.id}: ${err.message}`,
         err.stack,
       );
-      await this.markRecordStatus(record, 'FAILED', err.message || String(err));
+      const errorInfo = this.normalizeUploadError(err);
+      if (this.isMetaCooldownError(err)) {
+        await this.markRecordMetaCooldownPending(
+          record,
+          uploadBatchId,
+          errorInfo,
+        );
+        return 'COOLDOWN';
+      }
+
+      await this.markRecordStatus(record, 'FAILED', errorInfo.message, {
+        ...errorInfo.raw,
+      });
+      return 'DONE';
     }
+  }
+
+  private isMetaCooldownError(error: any) {
+    const responseData = error?.response?.data || null;
+    const responseError =
+      error?.metaError || responseData?.error || error?.error || null;
+    const code = Number(responseError?.code ?? error?.code);
+    const subcode = Number(responseError?.error_subcode);
+    const message = String(
+      responseError?.message || responseData?.message || error?.message || '',
+    ).toLowerCase();
+
+    return (
+      [4, 17, 32, 368, 613, 80004].includes(code) ||
+      subcode === 2446079 ||
+      message.includes('meta api đang tạm cooldown') ||
+      message.includes('temporarily blocked') ||
+      message.includes('rate limit') ||
+      message.includes('too many') ||
+      message.includes('try again later')
+    );
+  }
+
+  private async markRecordMetaCooldownPending(
+    record: { id: string; raw: any },
+    uploadBatchId: string | null,
+    errorInfo?: UploadErrorInfo,
+    cooldown?: any,
+  ) {
+    const activeCooldown =
+      cooldown || (await this.metaApi.getActiveMetaApiCooldown());
+    await this.markRecordStatus(
+      record,
+      'PENDING',
+      errorInfo?.message || null,
+      {
+        ...(errorInfo?.raw || {}),
+        sync_meta_cooldown: true,
+        sync_meta_cooldown_until: activeCooldown?.blockedUntil || null,
+        ...(uploadBatchId ? { sync_upload_batch_id: uploadBatchId } : {}),
+      },
+    );
+  }
+
+  private async markRecordsMetaCooldownPending(
+    records: Array<{ id: string; raw: any }>,
+    uploadBatchId: string,
+    cooldown?: any,
+  ) {
+    const uniqueRecords = Array.from(
+      new Map(records.filter(Boolean).map((record) => [record.id, record]))
+        .values(),
+    );
+    if (uniqueRecords.length === 0) return;
+
+    await Promise.all(
+      uniqueRecords.map((record) =>
+        this.markRecordMetaCooldownPending(
+          record,
+          uploadBatchId,
+          undefined,
+          cooldown,
+        ),
+      ),
+    );
   }
 
   private async markRecordUploadLimitReached(
@@ -335,6 +566,8 @@ export class MetaMediaUploadService {
       webContentLink: record.drive.webContentLink,
       webViewLink: record.drive.webViewLink || record.drive_url,
       size: record.drive.size,
+      capabilities: (record.drive.raw as any)?.capabilities || null,
+      raw: record.drive.raw,
     };
 
     if (driveFile.mimeType === this.driveFolderMimeType) {
@@ -360,6 +593,12 @@ export class MetaMediaUploadService {
         targetFolder.id,
         budget,
       );
+      if (stats.assetIds[0]) {
+        await this.prisma.larkRecord.update({
+          where: { id: record.id },
+          data: { creative_asset_id: stats.assetIds[0] },
+        });
+      }
 
       return {
         status: stats.limitReached ? 'PENDING' : 'SUCCESS',
@@ -421,6 +660,11 @@ export class MetaMediaUploadService {
     };
 
     const walk = async (folderId: string, targetFolderId: string) => {
+      if (await this.getBlockingMetaApiCooldown()) {
+        stats.limitReached = true;
+        return;
+      }
+
       if (this.getRemainingUploadSlots(budget) <= 0) {
         stats.limitReached = true;
         return;
@@ -436,6 +680,10 @@ export class MetaMediaUploadService {
 
       for (const child of childFolders) {
         if (!child.id) continue;
+        if (await this.getBlockingMetaApiCooldown()) {
+          stats.limitReached = true;
+          return;
+        }
 
         await this.upsertDriveFile(child);
         const subFolder = await this.ensureCreativeFolder(
@@ -474,19 +722,43 @@ export class MetaMediaUploadService {
           `Uploading media queue ${queueNumber} in Meta folder ${targetFolderId}: ${queue.length} files (${budget.uploaded}/${budget.limit} uploaded this job, concurrency=${this.metaUploadConcurrency}, startDelay=${this.metaUploadStartDelayMs}ms)`,
         );
 
-        const results = await this.mapWithMetaUploadThrottle(queue, (child) =>
-          this.uploadDriveFile(child, targetFolderId, budget),
+        const control: UploadControl = { paused: false };
+        const results = await this.mapWithMetaUploadThrottle(
+          queue,
+          async (child) => {
+            try {
+              return await this.uploadDriveFile(child, targetFolderId, budget);
+            } catch (err) {
+              if (this.isMetaCooldownError(err)) {
+                control.paused = true;
+                return {
+                  uploaded: false,
+                  reason: 'META_COOLDOWN' as const,
+                };
+              }
+              throw err;
+            }
+          },
+          control,
         );
 
         for (const result of results) {
-          if (result.asset?.id && !stats.assetIds.includes(result.asset.id)) {
-            stats.assetIds.push(result.asset.id);
+          if (!result) continue;
+          const resultAsset = 'asset' in result ? result.asset : null;
+          if (resultAsset?.id && !stats.assetIds.includes(resultAsset.id)) {
+            stats.assetIds.push(resultAsset.id);
           }
           if (result.uploaded) stats.uploadedCount += 1;
           else if (result.reason === 'UNSUPPORTED_TYPE')
             stats.unsupportedCount += 1;
           else if (result.reason === 'LIMIT_REACHED') stats.limitReached = true;
+          else if (result.reason === 'META_COOLDOWN') stats.limitReached = true;
           else stats.skippedCount += 1;
+        }
+
+        if (control.paused || (await this.getBlockingMetaApiCooldown())) {
+          stats.limitReached = true;
+          return;
         }
 
         if (this.getRemainingUploadSlots(budget) <= 0) {
@@ -522,6 +794,14 @@ export class MetaMediaUploadService {
       return { uploaded: false, reason: 'UNSUPPORTED_TYPE' as const };
     }
 
+    if (this.isDriveDownloadBlocked(file)) {
+      throw new Error(
+        `Google Drive không cho phép tải file này để upload Meta: ${
+          file.name || file.id
+        } (capabilities.canDownload=false)`,
+      );
+    }
+
     const existingAsset = await this.findExistingAssetForDriveFile(
       file,
       folderId,
@@ -535,19 +815,21 @@ export class MetaMediaUploadService {
       return { uploaded: false, asset: existingAsset };
     }
 
-    const metaAssetId = await this.findMetaAssetIdByName(
-      file.name || file.id,
-      folderId,
-    );
-    if (metaAssetId) {
-      const syncedAsset = await this.pollAndSaveAsset({
-        assetId: metaAssetId,
-        type,
+    if (this.checkMetaExistingAssetBeforeUpload) {
+      const metaAssetId = await this.findMetaAssetIdByName(
+        file.name || file.id,
         folderId,
-        driveUrl: file.webViewLink || this.buildDriveWebViewUrl(file.id),
-        driveId: file.id,
-      });
-      return { uploaded: false, asset: syncedAsset };
+      );
+      if (metaAssetId) {
+        const syncedAsset = await this.pollAndSaveAsset({
+          assetId: metaAssetId,
+          type,
+          folderId,
+          driveUrl: file.webViewLink || this.buildDriveWebViewUrl(file.id),
+          driveId: file.id,
+        });
+        return { uploaded: false, asset: syncedAsset };
+      }
     }
 
     if (!this.tryReserveUploadSlot(budget)) {
@@ -673,7 +955,7 @@ export class MetaMediaUploadService {
       const response = await this.driveSA.files.list({
         q: `'${folderId}' in parents and trashed = false`,
         fields:
-          'nextPageToken, files(id,name,mimeType,parents,webViewLink,webContentLink,size)',
+          'nextPageToken, files(id,name,mimeType,parents,webViewLink,webContentLink,size,capabilities/canDownload)',
         pageSize: 1000,
         pageToken,
         supportsAllDrives: true,
@@ -699,6 +981,14 @@ export class MetaMediaUploadService {
     );
 
     return Buffer.from(driveRes.data as ArrayBuffer);
+  }
+
+  private isDriveDownloadBlocked(file: DriveFileEntry) {
+    const canDownload =
+      file.capabilities?.canDownload ??
+      file.raw?.capabilities?.canDownload ??
+      null;
+    return canDownload === false;
   }
 
   private async uploadBufferToMeta(params: {
@@ -1189,9 +1479,20 @@ export class MetaMediaUploadService {
       recordRaw && typeof recordRaw === 'object' && !Array.isArray(recordRaw)
         ? (recordRaw as Record<string, any>)
         : {};
+    const clearErrorRaw =
+      syncError === null
+        ? {
+            sync_error_code: null,
+            sync_error_status: null,
+            sync_error_reason: null,
+            sync_error_detail: null,
+            sync_error_at: null,
+          }
+        : {};
 
     return {
       ...raw,
+      ...clearErrorRaw,
       ...extraRaw,
       sync_status: syncStatus,
       sync_error: syncError,

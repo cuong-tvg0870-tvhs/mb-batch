@@ -34,12 +34,19 @@ export class LarkSyncService {
     'last_checked_at',
     'sync_status',
     'sync_error',
+    'sync_error_code',
+    'sync_error_status',
+    'sync_error_reason',
+    'sync_error_detail',
+    'sync_error_at',
     'sync_uploaded_count',
     'sync_skipped_count',
     'sync_unsupported_count',
     'sync_creative_asset_ids',
     'sync_creative_asset_count',
     'sync_limit_reached',
+    'sync_meta_cooldown',
+    'sync_meta_cooldown_until',
     'sync_upload_batch_id',
     'sync_claimed_at',
     'sync_stale_released_at',
@@ -331,7 +338,7 @@ export class LarkSyncService {
               driveFileResponse = await this.driveSA.files.get({
                 fileId: driveId,
                 fields:
-                  'id,name,mimeType,parents,webViewLink,webContentLink,size,ownedByMe,sharedWithMeTime,driveId',
+                  'id,name,mimeType,parents,webViewLink,webContentLink,size,ownedByMe,sharedWithMeTime,driveId,capabilities/canDownload',
                 supportsAllDrives: true,
               });
               this.logger.log(

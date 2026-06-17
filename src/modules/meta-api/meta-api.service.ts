@@ -39,6 +39,8 @@ export class MetaApiService implements OnModuleInit {
     3000,
     0,
   );
+  private readonly cooldownHardBlock =
+    process.env.META_API_COOLDOWN_HARD_BLOCK === 'true';
   private nextMetaMutationAt = Date.now();
 
   constructor(private readonly prisma: PrismaService) {}
@@ -180,6 +182,12 @@ export class MetaApiService implements OnModuleInit {
   public async assertMetaApiAvailable() {
     const cooldown = await this.getActiveMetaApiCooldown();
     if (!cooldown) return;
+    if (!this.cooldownHardBlock) {
+      this.logger.debug(
+        `Meta API system cooldown is advisory until ${cooldown.blockedUntil}; request is allowed because META_API_COOLDOWN_HARD_BLOCK is not true.`,
+      );
+      return;
+    }
 
     throw new BadRequestException(
       `Meta API đang tạm cooldown đến ${cooldown.blockedUntil} do lỗi ${cooldown.code ?? '-'}: ${cooldown.message || 'rate limit'}`,
