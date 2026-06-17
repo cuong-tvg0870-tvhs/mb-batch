@@ -175,7 +175,7 @@ export class MetaMediaUploadService {
         where: this.buildEligibleRecordWhere(),
         include: { drive: true },
         orderBy: [{ production_date: 'desc' }, { id: 'asc' }],
-        take: Math.max(remainingSlots, this.metaUploadConcurrency),
+        take: remainingSlots,
       });
       const uploadCandidates = records.filter(
         (record) => this.normalizeRaw(record.raw).sync_status !== 'UPLOADING',
