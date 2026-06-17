@@ -37,6 +37,8 @@ export const AD_PIXEL_FIELDS = [
   AdsPixel.Fields.is_created_by_business,
   AdsPixel.Fields.is_unavailable,
   AdsPixel.Fields.is_restricted_use,
+  'valid_entries',
+  'da_checks',
   AdsPixel.Fields.usage,
 ];
 
