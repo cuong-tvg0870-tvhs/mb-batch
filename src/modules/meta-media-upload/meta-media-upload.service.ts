@@ -156,39 +156,59 @@ export class MetaMediaUploadService {
       reserved: 0,
     };
 
-    const records = await this.prisma.larkRecord.findMany({
-      where: this.buildEligibleRecordWhere(),
-      include: { drive: true },
-      orderBy: [{ production_date: 'desc' }, { id: 'asc' }],
-      take: this.maxFilesPerRun * 5,
-    });
-    const uploadCandidates = records
-      .filter(
-        (record) => this.normalizeRaw(record.raw).sync_status !== 'UPLOADING',
-      )
-      .slice(0, this.maxFilesPerRun);
-
-    this.logger.log(
-      `Found ${uploadCandidates.length} eligible Lark records for Meta auto-upload`,
-    );
-
     const uploadBatchId = randomUUID();
-    const claimedRecords = await this.claimRecordsForUpload(
-      uploadCandidates,
-      uploadBatchId,
-    );
+    let scanned = 0;
+    let claimed = 0;
+    let queueNumber = 0;
 
-    this.logger.log(
-      `Claimed ${claimedRecords.length}/${uploadCandidates.length} Lark records as UPLOADING for Meta auto-upload batch ${uploadBatchId}`,
-    );
+    while (this.getRemainingUploadSlots(budget) > 0) {
+      const activeLoopCooldown = await this.getBlockingMetaApiCooldown();
+      if (activeLoopCooldown) {
+        this.logger.warn(
+          `Stopping Meta auto-upload because Meta API is cooling down until ${activeLoopCooldown.blockedUntil}`,
+        );
+        break;
+      }
 
-    await this.uploadClaimedRecords(claimedRecords, budget, uploadBatchId);
+      const remainingSlots = this.getRemainingUploadSlots(budget);
+      const records = await this.prisma.larkRecord.findMany({
+        where: this.buildEligibleRecordWhere(),
+        include: { drive: true },
+        orderBy: [{ production_date: 'desc' }, { id: 'asc' }],
+        take: Math.max(remainingSlots, this.metaUploadConcurrency),
+      });
+      const uploadCandidates = records.filter(
+        (record) => this.normalizeRaw(record.raw).sync_status !== 'UPLOADING',
+      );
+
+      if (uploadCandidates.length === 0) break;
+
+      scanned += uploadCandidates.length;
+      queueNumber += 1;
+      this.logger.log(
+        `Found ${uploadCandidates.length} eligible Lark records for Meta auto-upload queue ${queueNumber} (${budget.uploaded}/${budget.limit} uploaded so far)`,
+      );
+
+      const claimedRecords = await this.claimRecordsForUpload(
+        uploadCandidates,
+        uploadBatchId,
+      );
+      claimed += claimedRecords.length;
+
+      this.logger.log(
+        `Claimed ${claimedRecords.length}/${uploadCandidates.length} Lark records as UPLOADING for Meta auto-upload batch ${uploadBatchId}`,
+      );
+
+      if (claimedRecords.length === 0) break;
+
+      await this.uploadClaimedRecords(claimedRecords, budget, uploadBatchId);
+    }
 
     this.logger.log(
       `Meta auto-upload completed. Uploaded files this run: ${budget.uploaded}/${budget.limit}`,
     );
 
-    return { uploaded: budget.uploaded, scanned: uploadCandidates.length };
+    return { uploaded: budget.uploaded, scanned, claimed };
   }
 
   private async uploadClaimedRecords(
@@ -1364,12 +1384,64 @@ export class MetaMediaUploadService {
     return {
       AND: [
         { drive: { drive_permission: true } },
+        this.buildNotUploadedRecordWhere(),
+        this.buildSyncStatusNotWhere('UPLOADING'),
+        this.buildSyncStatusNotWhere('FAILED'),
+        this.buildSyncStatusNotWhere('SUCCESS'),
+      ],
+    };
+  }
+
+  private buildNotUploadedRecordWhere(): Prisma.LarkRecordWhereInput {
+    return {
+      AND: [
         { creative_asset_id: null },
         {
           OR: [
-            { NOT: { raw: { path: ['sync_status'], equals: 'SUCCESS' } } },
-            { raw: { path: ['sync_status'], equals: Prisma.DbNull } },
+            {
+              raw: {
+                path: ['sync_creative_asset_count'],
+                equals: Prisma.DbNull,
+              },
+            },
+            {
+              raw: {
+                path: ['sync_creative_asset_count'],
+                equals: Prisma.JsonNull,
+              },
+            },
+            {
+              raw: {
+                path: ['sync_creative_asset_count'],
+                lte: 0,
+              },
+            },
           ],
+        },
+      ],
+    };
+  }
+
+  private buildSyncStatusNotWhere(status: string): Prisma.LarkRecordWhereInput {
+    return {
+      OR: [
+        {
+          raw: {
+            path: ['sync_status'],
+            equals: Prisma.DbNull,
+          },
+        },
+        {
+          raw: {
+            path: ['sync_status'],
+            equals: Prisma.JsonNull,
+          },
+        },
+        {
+          raw: {
+            path: ['sync_status'],
+            not: status,
+          },
         },
       ],
     };
