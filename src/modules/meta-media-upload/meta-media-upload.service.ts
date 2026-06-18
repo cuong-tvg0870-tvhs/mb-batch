@@ -92,6 +92,21 @@ export class MetaMediaUploadService {
   private readonly checkMetaExistingAssetBeforeUpload =
     process.env.META_MEDIA_UPLOAD_CHECK_META_EXISTING_ASSET === 'true';
   private readonly uploadingClaimTtlMs = 6 * 60 * 60 * 1000;
+  private readonly maxFailedUploadRetries = parseEnvInteger(
+    process.env.META_MEDIA_UPLOAD_FAILED_RETRY_MAX,
+    10,
+    1,
+  );
+  private readonly failedUploadRetryBaseMs = parseEnvInteger(
+    process.env.META_MEDIA_UPLOAD_FAILED_RETRY_BASE_MS,
+    20 * 60 * 1000,
+    60 * 1000,
+  );
+  private readonly failedUploadRetryMaxDelayMs = parseEnvInteger(
+    process.env.META_MEDIA_UPLOAD_FAILED_RETRY_MAX_DELAY_MS,
+    6 * 60 * 60 * 1000,
+    60 * 1000,
+  );
   private readonly driveFolderMimeType = 'application/vnd.google-apps.folder';
   private readonly rootFolderId =
     process.env.META_CREATIVE_ROOT_FOLDER_ID || '4303729193176038';
@@ -456,7 +471,10 @@ export class MetaMediaUploadService {
   ): Promise<'DONE' | 'COOLDOWN'> {
     try {
       const result = await this.uploadRecord(record, budget);
-      await this.markRecordStatus(record, result.status, null, result.raw);
+      await this.markRecordStatus(record, result.status, null, {
+        ...result.raw,
+        ...this.buildUploadRetryResetRaw(),
+      });
       return 'DONE';
     } catch (err: any) {
       this.logger.error(
@@ -475,6 +493,7 @@ export class MetaMediaUploadService {
 
       await this.markRecordStatus(record, 'FAILED', errorInfo.message, {
         ...errorInfo.raw,
+        ...this.buildFailedUploadRetryRaw(record.raw),
       });
       return 'DONE';
     }
@@ -1380,14 +1399,116 @@ export class MetaMediaUploadService {
     });
   }
 
+  private buildUploadRetryResetRaw() {
+    return {
+      meta_upload_retry_count: 0,
+      meta_upload_next_retry_at: null,
+      meta_upload_last_failed_at: null,
+      meta_upload_retry_exhausted: null,
+    };
+  }
+
+  private buildFailedUploadRetryRaw(recordRaw: unknown) {
+    const raw = this.normalizeRaw(recordRaw);
+    const previousRetryCount = Number(raw.meta_upload_retry_count || 0);
+    const retryCount = previousRetryCount + 1;
+    const exhausted =
+      this.maxFailedUploadRetries > 0 &&
+      retryCount >= this.maxFailedUploadRetries;
+    const delayMs = Math.min(
+      this.failedUploadRetryBaseMs * 2 ** Math.max(0, retryCount - 1),
+      this.failedUploadRetryMaxDelayMs,
+    );
+    const now = new Date();
+
+    return {
+      meta_upload_retry_count: retryCount,
+      meta_upload_last_failed_at: now.toISOString(),
+      meta_upload_next_retry_at: exhausted
+        ? null
+        : new Date(now.getTime() + delayMs).toISOString(),
+      meta_upload_retry_exhausted: exhausted,
+    };
+  }
+
+  private buildRetryableFailedUploadWhere(): Prisma.LarkRecordWhereInput {
+    return {
+      AND: [
+        {
+          raw: {
+            path: ['sync_status'],
+            equals: 'FAILED',
+          },
+        },
+        {
+          OR: [
+            {
+              raw: {
+                path: ['meta_upload_retry_count'],
+                equals: Prisma.DbNull,
+              },
+            },
+            {
+              raw: {
+                path: ['meta_upload_retry_count'],
+                equals: Prisma.JsonNull,
+              },
+            },
+            {
+              raw: {
+                path: ['meta_upload_retry_count'],
+                lt: this.maxFailedUploadRetries,
+              },
+            },
+          ],
+        },
+        {
+          OR: [
+            {
+              raw: {
+                path: ['meta_upload_next_retry_at'],
+                equals: Prisma.DbNull,
+              },
+            },
+            {
+              raw: {
+                path: ['meta_upload_next_retry_at'],
+                equals: Prisma.JsonNull,
+              },
+            },
+            {
+              raw: {
+                path: ['meta_upload_next_retry_at'],
+                lte: new Date().toISOString(),
+              },
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  private buildAutoUploadStatusEligibleWhere(): Prisma.LarkRecordWhereInput {
+    return {
+      OR: [
+        {
+          AND: [
+            this.buildSyncStatusNotWhere('UPLOADING'),
+            this.buildSyncStatusNotWhere('FAILED'),
+            this.buildSyncStatusNotWhere('SUCCESS'),
+          ],
+        },
+        this.buildRetryableFailedUploadWhere(),
+      ],
+    };
+  }
+
   private buildEligibleRecordWhere(): Prisma.LarkRecordWhereInput {
     return {
       AND: [
         { drive: { drive_permission: true } },
         this.buildNotUploadedRecordWhere(),
-        this.buildSyncStatusNotWhere('UPLOADING'),
-        this.buildSyncStatusNotWhere('FAILED'),
-        this.buildSyncStatusNotWhere('SUCCESS'),
+        this.buildAutoUploadStatusEligibleWhere(),
       ],
     };
   }
