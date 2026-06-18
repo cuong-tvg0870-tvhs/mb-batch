@@ -156,6 +156,8 @@ model User {
   activities UserActivity[]
   contributions          Contribution[] @relation("UserContributions")
   processedContributions Contribution[] @relation("ProcessedContributions")
+  proposals              AccountProposal[] @relation("UserProposals")
+  processedProposals     AccountProposal[] @relation("ProcessedProposals")
 }
 
 model UserActivity {
@@ -2587,4 +2589,41 @@ model HelpChapter {
   order     Int      @default(0)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+enum ProposalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model AccountProposal {
+  id              String         @id @default(uuid())
+  userId          String
+  user            User           @relation("UserProposals", fields: [userId], references: [id], onDelete: Cascade)
+  
+  targetUserEmail String
+  targetUserName  String
+  employeeId      String?
+  rank            String?
+  project         String?
+  
+  adAccounts      Json?
+  fanpages        Json?
+  pixels          Json?
+  bms             Json?
+  
+  status          ProposalStatus @default(PENDING)
+  checkResult     Json?
+  adminFeedback   String?        @db.Text
+  
+  processedById   String?
+  processedBy     User?          @relation("ProcessedProposals", fields: [processedById], references: [id], onDelete: SetNull)
+  processedAt     DateTime?
+  
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@index([userId])
+  @@index([status])
 }

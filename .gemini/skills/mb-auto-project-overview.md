@@ -47,7 +47,7 @@
   - `meta`: Core Meta SDK interaction (sync, publish, upload).
   - `draft-campaign` (94KB): CRUD drafts, templates, logic publish to Meta.
   - `data-sync`, `medias`, `drive`, `larkbase`: Sync and manage media assets.
-  - `auth`, `user`, `permission` (RBAC), `accounts`, `project`: User management & access control.
+  - `auth`, `user`, `permission` (RBAC), `accounts`, `project`, `account-proposal`: User management, access control & account allocation proposals.
 - **Auth Guard**: `@UseGuards(JwtAuthGuard)` + `@CurrentUser()`.
 
 ### C. MB-Batch (NestJS 11 Background Worker)
