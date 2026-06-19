@@ -859,10 +859,17 @@ export class DraftAutomationMetaPublisherService {
   }
 
   private cleanTargetingForMeta(targeting: any) {
-    if (!targeting || !targeting.geo_locations) return targeting;
+    const {
+      geo_locations,
+      excluded_geo_locations,
+      is_manual,
+      use_age_min_control,
+      ...rest
+    } = targeting || {};
 
-    const { geo_locations, excluded_geo_locations, is_manual, ...rest } =
-      targeting;
+    void use_age_min_control;
+
+    if (!targeting || !geo_locations) return CleanObjectOrArray(rest) || rest;
 
     const processInclusion = (geo: any) => {
       if (!geo) return geo;
