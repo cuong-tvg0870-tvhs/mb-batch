@@ -82,6 +82,8 @@
 5. **Creative Placeholder Substitution**: Tự động thay thế các placeholder `VIDEO_1`, `IMAGE_1` trong TemplateCampaign bằng media asset thực tế từ folder chỉ định. Bản nháp chạy thử được xử lý in-process trên `mb-ads` thay vì gọi sang `mb-batch`.
 6. **Folder-based Permission for CIDs**: User không phải admin chỉ xem được LarkRecords (CIDs) thuộc các folder mà họ có quyền (qua Project manager/leader hoặc FolderMember). Logic lọc bằng clause `OR` ngay dưới DB để phân trang nhanh chóng.
 7. **Creative Asset Mapping during Sync**: Tự động mapping `CreativeAsset` khớp với `imageHash`/`videoId` từ Meta, đồng thời map `SystemCampaign` tương ứng qua `meta_id` để phục vụ lọc điều kiện automation.
+8. **Automation History & Template Visibility Filter**: Để bảo mật thông tin, màn hình lịch sử tự động hoá (`/dashboard/automations/history`) và các endpoint của nó (`/automations/templates` và `/automations/draft-history`) được lọc theo user đang đăng nhập (chỉ hiển thị những mẫu và lịch sử chạy thuộc về user đó), ngoại trừ user có quyền `ADMIN` sẽ xem được toàn bộ.
+9. **Advantage+ Audience Minimum Age Control**: Cho phép cấu hình giới hạn cứng độ tuổi tối thiểu (`age_min` từ 18–25) khi sử dụng Advantage+ Audience thông qua tuỳ chọn "Kiểm soát đối tượng" trên UI bản nháp. Trạng thái này được lưu trữ qua thuộc tính `use_age_min_control` trong JSON targeting của `SystemAdSet`. Khi tắt kiểm soát này, `age_min` và `age_max` sẽ được bỏ qua trong payload đẩy lên Meta (để AI tự tối ưu hóa). Khi tắt hoàn toàn Advantage+ Audience, khoảng tuổi `age_min` và `age_max` tiêu chuẩn (13–65) vẫn được gửi đi đầy đủ.
 
 ---
 
