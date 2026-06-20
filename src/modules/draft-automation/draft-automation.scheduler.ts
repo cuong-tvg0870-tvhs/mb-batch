@@ -149,20 +149,12 @@ function inferMediaType(creative: any): string {
   }
 
   // Video check
-  if (
-    spec.video_data?.video_id ||
-    creative.videoId ||
-    creative.video_id
-  ) {
+  if (spec.video_data?.video_id || creative.videoId || creative.video_id) {
     return 'VIDEO';
   }
 
   // Image check
-  if (
-    spec.link_data?.image_hash ||
-    creative.imageHash ||
-    creative.image_hash
-  ) {
+  if (spec.link_data?.image_hash || creative.imageHash || creative.image_hash) {
     return 'IMAGE';
   }
 
@@ -595,7 +587,8 @@ export class DraftAutomationScheduler {
     const getNextVideoSlot = (): string => {
       if (requiredVideos <= 0) return '';
       if (availableVideoIndexes.length > 0) {
-        const idx = availableVideoIndexes[nextVideoPtr % availableVideoIndexes.length];
+        const idx =
+          availableVideoIndexes[nextVideoPtr % availableVideoIndexes.length];
         nextVideoPtr++;
         return `VIDEO_${idx}`;
       } else {
@@ -609,7 +602,8 @@ export class DraftAutomationScheduler {
     const getNextImageSlot = (): string => {
       if (requiredImages <= 0) return '';
       if (availableImageIndexes.length > 0) {
-        const idx = availableImageIndexes[nextImagePtr % availableImageIndexes.length];
+        const idx =
+          availableImageIndexes[nextImagePtr % availableImageIndexes.length];
         nextImagePtr++;
         return `IMAGE_${idx}`;
       } else {
@@ -632,9 +626,7 @@ export class DraftAutomationScheduler {
 
       if (mediaType === 'VIDEO') {
         const hasVideoSlot = isSlotPlaceholder(
-          creative.videoId ||
-          creative.video_id ||
-          spec.video_data?.video_id
+          creative.videoId || creative.video_id || spec.video_data?.video_id,
         );
         if (!hasVideoSlot) {
           const slot = getNextVideoSlot();
@@ -659,8 +651,8 @@ export class DraftAutomationScheduler {
       } else if (mediaType === 'IMAGE') {
         const hasImageSlot = isSlotPlaceholder(
           creative.imageHash ||
-          creative.image_hash ||
-          spec.link_data?.image_hash
+            creative.image_hash ||
+            spec.link_data?.image_hash,
         );
         if (!hasImageSlot) {
           const slot = getNextImageSlot();
@@ -710,7 +702,9 @@ export class DraftAutomationScheduler {
         if (Array.isArray(spec.link_data?.child_attachments)) {
           for (const attachment of spec.link_data.child_attachments) {
             if (attachment.video_id || attachment.videoId) {
-              const hasVideoSlot = isSlotPlaceholder(attachment.video_id || attachment.videoId);
+              const hasVideoSlot = isSlotPlaceholder(
+                attachment.video_id || attachment.videoId,
+              );
               if (!hasVideoSlot) {
                 const slot = getNextVideoSlot();
                 if (slot) {
@@ -722,7 +716,9 @@ export class DraftAutomationScheduler {
                 }
               }
             } else {
-              const hasImageSlot = isSlotPlaceholder(attachment.image_hash || attachment.imageHash);
+              const hasImageSlot = isSlotPlaceholder(
+                attachment.image_hash || attachment.imageHash,
+              );
               if (!hasImageSlot) {
                 const slot = getNextImageSlot();
                 if (slot) {
@@ -782,7 +778,11 @@ export class DraftAutomationScheduler {
       }
     }
 
-    const substitutedValues = replacePlaceholders(clonedTemplateData, videos, images);
+    const substitutedValues = replacePlaceholders(
+      clonedTemplateData,
+      videos,
+      images,
+    );
 
     const employeeId = creator.employee_id;
     const employeeName = creator.name;
@@ -1069,14 +1069,19 @@ export class DraftAutomationScheduler {
           : allFolderAssets;
         const folderAssetIds = folderAssets.map((asset) => asset.id);
 
-        // 3. Query all active drafts of this creator to extract used assets
+        // 3. Query all active drafts to extract assets that are currently reserved.
+        // Deleted drafts are ignored so their assets can become eligible again.
         const activeDrafts = await this.prisma.systemCampaign.findMany({
           where: {
-            createdById: creator.id,
             status: Status.DRAFT,
             deletedAt: null,
+            meta_id: null,
+            OR: [{ is_template: false }, { is_template: null }],
           },
           select: {
+            id: true,
+            createdById: true,
+            automationTemplateId: true,
             data: true,
             ad_sets: {
               select: {
@@ -1091,8 +1096,37 @@ export class DraftAutomationScheduler {
           },
         });
 
+        let inProgressDraft = automation?.inProgressDraftId
+          ? activeDrafts.find(
+              (draft) => draft.id === automation.inProgressDraftId,
+            )
+          : null;
+        if (
+          inProgressDraft &&
+          (inProgressDraft.data as any)?.automation_progress?.isComplete ===
+            true
+        ) {
+          inProgressDraft = null;
+        }
+        if (!inProgressDraft) {
+          inProgressDraft = activeDrafts.find((draft) => {
+            const draftAutomation = (draft.data as any)?.automation;
+            const isDraftComplete =
+              (draft.data as any)?.automation_progress?.isComplete === true;
+            return (
+              !isDraftComplete &&
+              draft.createdById === creator.id &&
+              draft.automationTemplateId === template.id &&
+              draftAutomation?.folderId === automation.folderId
+            );
+          });
+        }
+        const reservedDrafts = inProgressDraft
+          ? activeDrafts.filter((draft) => draft.id !== inProgressDraft.id)
+          : activeDrafts;
+
         const usedDraftIdentifiers = new Set<string>();
-        for (const draft of activeDrafts) {
+        for (const draft of reservedDrafts) {
           extractMediaIdentifiersFromString(
             JSON.stringify(draft),
             usedDraftIdentifiers,
@@ -1100,11 +1134,6 @@ export class DraftAutomationScheduler {
           );
         }
 
-        const inProgressDraft = await this.getInProgressDraft(
-          template,
-          creator.id,
-          automation,
-        );
         const existingAssetIds = Array.isArray(
           (inProgressDraft?.data as any)?.automation_used_assets,
         )
@@ -1113,33 +1142,82 @@ export class DraftAutomationScheduler {
         const existingAssets = await this.getAssetsByIds(existingAssetIds);
         const existingAssetsByType = this.splitAssetsByType(existingAssets);
 
-        const creatorSystemCampaignAssetMappings = folderAssetIds.length
+        const launchedSystemCampaigns = folderAssetIds.length
+          ? await this.prisma.systemCampaign.findMany({
+              where: {
+                createdByAutomation: true,
+                deletedAt: null,
+                OR: [
+                  { meta_id: { not: null } },
+                  { status: { not: Status.DRAFT } },
+                ],
+              },
+              select: {
+                id: true,
+                data: true,
+              },
+            })
+          : [];
+        const usedSystemCampaignIdentifiers = new Set<string>();
+        for (const campaign of launchedSystemCampaigns) {
+          extractMediaIdentifiersFromString(
+            JSON.stringify(campaign),
+            usedSystemCampaignIdentifiers,
+            folderAssetIds,
+          );
+        }
+
+        const publishedAssetMappings = folderAssetIds.length
           ? await this.prisma.creativeAssetMapping.findMany({
               where: {
                 creativeAssetId: { in: folderAssetIds },
-                creative: {
-                  ads: {
-                    some: {
-                      campaign: {
-                        systemCampaign: {
-                          createdById: creator.id,
-                        },
-                      },
-                    },
-                  },
-                },
               },
               select: { creativeAssetId: true },
             })
           : [];
-        const usedByCreatorInSystemCampaignAssetIds = new Set(
-          creatorSystemCampaignAssetMappings.map((m) => m.creativeAssetId),
+        const publishedAssetIds = new Set(
+          publishedAssetMappings.map((m) => m.creativeAssetId),
         );
+        const folderImageHashes = folderAssets
+          .map((asset) => asset.imageHash)
+          .filter(Boolean) as string[];
+        const folderVideoIds = folderAssets
+          .map((asset) => asset.video_id)
+          .filter(Boolean) as string[];
+        const directlyPublishedCreatives =
+          folderImageHashes.length || folderVideoIds.length
+            ? await this.prisma.creative.findMany({
+                where: {
+                  ads: { some: {} },
+                  OR: [
+                    folderImageHashes.length
+                      ? { imageHash: { in: folderImageHashes } }
+                      : undefined,
+                    folderVideoIds.length
+                      ? { videoId: { in: folderVideoIds } }
+                      : undefined,
+                  ].filter(Boolean) as any,
+                },
+                select: {
+                  imageHash: true,
+                  videoId: true,
+                },
+              })
+            : [];
+        const publishedCreativeIdentifiers = new Set<string>();
+        for (const creative of directlyPublishedCreatives) {
+          if (creative.imageHash) {
+            publishedCreativeIdentifiers.add(creative.imageHash);
+          }
+          if (creative.videoId) {
+            publishedCreativeIdentifiers.add(creative.videoId);
+          }
+        }
 
-        // 4. Filter assets based on creator system-campaign usage, draft state,
-        // and naming rules. This is scoped by system user ID, not Lark metadata.
+        // 4. Filter assets based on published/system usage, draft state,
+        // and naming rules. Usage checks are system-wide, not scoped by creator.
         const exclusionCounts = {
-          alreadyUsedByCreatorInSystemCampaign: 0,
+          alreadyUsedBySystemOrPublished: 0,
           usedInDraft: 0,
           nameRuleMismatch: 0,
         };
@@ -1149,24 +1227,31 @@ export class DraftAutomationScheduler {
             usedDraftIdentifiers.has(asset.id) ||
             (asset.video_id && usedDraftIdentifiers.has(asset.video_id)) ||
             (asset.imageHash && usedDraftIdentifiers.has(asset.imageHash));
-          const isUsedByCreatorInSystemCampaign =
-            usedByCreatorInSystemCampaignAssetIds.has(asset.id);
+          const isUsedBySystemOrPublished =
+            publishedAssetIds.has(asset.id) ||
+            (asset.video_id &&
+              publishedCreativeIdentifiers.has(asset.video_id)) ||
+            (asset.imageHash &&
+              publishedCreativeIdentifiers.has(asset.imageHash)) ||
+            usedSystemCampaignIdentifiers.has(asset.id) ||
+            (asset.video_id &&
+              usedSystemCampaignIdentifiers.has(asset.video_id)) ||
+            (asset.imageHash &&
+              usedSystemCampaignIdentifiers.has(asset.imageHash));
           const matchesNameRule =
             !automation.nameRule ||
             (asset.name || '')
               .toLowerCase()
               .includes(automation.nameRule.toLowerCase());
 
-          if (isUsedByCreatorInSystemCampaign) {
-            exclusionCounts.alreadyUsedByCreatorInSystemCampaign += 1;
+          if (isUsedBySystemOrPublished) {
+            exclusionCounts.alreadyUsedBySystemOrPublished += 1;
           }
           if (isUsedInDraft) exclusionCounts.usedInDraft += 1;
           if (!matchesNameRule) exclusionCounts.nameRuleMismatch += 1;
 
           return (
-            !isUsedByCreatorInSystemCampaign &&
-            !isUsedInDraft &&
-            matchesNameRule
+            !isUsedBySystemOrPublished && !isUsedInDraft && matchesNameRule
           );
         });
 
@@ -1216,7 +1301,9 @@ export class DraftAutomationScheduler {
           }
           if (Array.isArray(creative.dynamicAssets)) {
             for (const asset of creative.dynamicAssets) {
-              const assetType = String(asset.type || asset.mediaType || '').toUpperCase();
+              const assetType = String(
+                asset.type || asset.mediaType || '',
+              ).toUpperCase();
               if (assetType === 'VIDEO') {
                 templateVideoCount++;
               } else if (assetType === 'IMAGE') {
@@ -1329,9 +1416,13 @@ export class DraftAutomationScheduler {
             folderAssets: allFolderAssets.length,
             folderAssetsAfterCreationTime: folderAssets.length,
             activeDrafts: activeDrafts.length,
+            reservedDrafts: reservedDrafts.length,
             usedDraftIdentifiers: usedDraftIdentifiers.size,
-            creatorSystemCampaignUsedAssetsKnown:
-              usedByCreatorInSystemCampaignAssetIds.size,
+            launchedSystemCampaigns: launchedSystemCampaigns.length,
+            usedSystemCampaignIdentifiers: usedSystemCampaignIdentifiers.size,
+            publishedAssetMappingsKnown: publishedAssetIds.size,
+            publishedCreativeIdentifiersKnown:
+              publishedCreativeIdentifiers.size,
             eligibleAssets: eligibleAssets.length,
             eligibleVideos: eligibleVideos.length,
             eligibleImages: eligibleImages.length,
@@ -1358,11 +1449,10 @@ export class DraftAutomationScheduler {
               excluded: allFolderAssets.length - folderAssets.length,
             },
             {
-              key: 'not_used_by_creator_in_system_campaign',
-              label:
-                'Asset chưa được người tạo này dùng trong campaign tạo từ hệ thống',
+              key: 'not_used_by_system_or_published',
+              label: 'Asset chưa từng được chạy bằng hệ thống hoặc publish',
               status: 'passed',
-              excluded: exclusionCounts.alreadyUsedByCreatorInSystemCampaign,
+              excluded: exclusionCounts.alreadyUsedBySystemOrPublished,
             },
             {
               key: 'not_used_in_active_draft',
@@ -1513,7 +1603,7 @@ export class DraftAutomationScheduler {
           };
 
           for (const asset of [...selectedVideos, ...selectedImages]) {
-            usedByCreatorInSystemCampaignAssetIds.add(asset.id);
+            publishedAssetIds.add(asset.id);
           }
         } else if (publishRequested && !isComplete) {
           successSteps.push({
