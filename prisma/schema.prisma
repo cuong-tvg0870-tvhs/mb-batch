@@ -145,6 +145,7 @@ model User {
   projectMembers ProjectMember[]
   folderMembers  FolderMember[]
   savedFilters   SavedFilter[]
+  exportPresets  ExportPreset[]
 
   createdAt   DateTime  @default(now())
   createdById String?
@@ -2096,6 +2097,21 @@ model SavedFilter {
 
   @@unique([userId, tableKey, name])
   @@index([userId, tableKey])
+}
+
+model ExportPreset {
+  id           String   @id @default(uuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name         String
+  exportType   String   // e.g. campaign, adset, ad, creative, asset
+  filterConfig Json     // dateRange, adAccountIds, dynamicFilters
+  columnConfig Json     // fieldsToExport array
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([userId, exportType, name])
+  @@index([userId, exportType])
 }
 
 // ==========================================================================

@@ -27,36 +27,432 @@ export class MetaMediaSyncService {
     private readonly metaApi: MetaApiService,
   ) {}
 
-  async syncAdVideo(limit: number = 50) {
+  private pickFirstString(...values: unknown[]) {
+    for (const value of values) {
+      if (typeof value === 'string' && value.trim()) return value.trim();
+    }
+
+    return null;
+  }
+
+  private normalizeAccountId(accountId?: string | null) {
+    return accountId?.replaceAll('act_', '') || null;
+  }
+
+  private getThumbnailList(thumbnails: any) {
+    if (Array.isArray(thumbnails?.data)) return thumbnails.data;
+    if (Array.isArray(thumbnails)) return thumbnails;
+    return [];
+  }
+
+  private getPreferredThumbnailUrl(thumbnails: any) {
+    const list = this.getThumbnailList(thumbnails);
+    const preferred =
+      list.find((thumbnail: any) => !!thumbnail?.is_preferred) || list[0];
+
+    return this.pickFirstString(
+      preferred?.uri,
+      preferred?.url,
+      preferred?.image_url,
+    );
+  }
+
+  private resolveAdVideoPreview(video?: any) {
+    if (!video) {
+      return { previewUrl: null, thumbnailUrl: null };
+    }
+
+    const thumbnailUrl = this.pickFirstString(
+      video.thumbnailUrl,
+      this.getPreferredThumbnailUrl(video.rawPayload?.thumbnails),
+      video.rawPayload?.picture,
+    );
+
+    return {
+      previewUrl: this.pickFirstString(video.source, thumbnailUrl),
+      thumbnailUrl,
+    };
+  }
+
+  private resolveAdImageUrl(image?: any) {
+    if (!image) return null;
+
+    return this.pickFirstString(image.url, image.permalink_url);
+  }
+
+  private resolveAssetPreview(asset?: any) {
+    if (!asset) {
+      return { previewUrl: null, thumbnailUrl: null, imageUrl: null };
+    }
+
+    if (asset.type === 'VIDEO') {
+      const thumbnailUrl = this.pickFirstString(
+        asset.thumbnail,
+        this.getPreferredThumbnailUrl(asset.video_thumbnails),
+        asset.imageUrl,
+      );
+
+      return {
+        previewUrl: this.pickFirstString(asset.video_source, thumbnailUrl),
+        thumbnailUrl,
+        imageUrl: thumbnailUrl,
+      };
+    }
+
+    const imageUrl = this.pickFirstString(asset.imageUrl, asset.thumbnail);
+
+    return {
+      previewUrl: imageUrl,
+      thumbnailUrl: imageUrl,
+      imageUrl,
+    };
+  }
+
+  private datesEqual(a?: Date | null, b?: Date | null) {
+    if (!a && !b) return true;
+    if (!a || !b) return false;
+    return a.getTime() === b.getTime();
+  }
+
+  private getImageKey(accountId?: string | null, hash?: string | null) {
+    const normalizedAccountId = this.normalizeAccountId(accountId);
+    if (!normalizedAccountId || !hash) return null;
+    return `${normalizedAccountId}:${hash}`;
+  }
+
+  private async refreshCreativePreviews(options?: {
+    videoIds?: string[];
+    imageHashes?: string[];
+    imageIds?: string[];
+  }) {
+    const videoIds = [...new Set(options?.videoIds?.filter(Boolean) || [])];
+    const imageHashes = [
+      ...new Set(options?.imageHashes?.filter(Boolean) || []),
+    ];
+    const imageIds = [...new Set(options?.imageIds?.filter(Boolean) || [])];
+
+    const relationFilters: Prisma.CreativeWhereInput[] = [
+      videoIds.length ? { videoId: { in: videoIds } } : undefined,
+      imageHashes.length ? { imageHash: { in: imageHashes } } : undefined,
+      imageIds.length ? { imageId: { in: imageIds } } : undefined,
+    ].filter(Boolean) as Prisma.CreativeWhereInput[];
+
+    if (!relationFilters.length) return 0;
+
+    const creatives = await this.prisma.creative.findMany({
+      where: { OR: relationFilters },
+      select: {
+        id: true,
+        accountId: true,
+        imageHash: true,
+        imageId: true,
+        imageUrl: true,
+        thumbnailUrl: true,
+        previewUrl: true,
+        urlExpiredAt: true,
+        videoId: true,
+        adImage: {
+          select: {
+            id: true,
+            hash: true,
+            accountId: true,
+            url: true,
+            permalink_url: true,
+          },
+        },
+        adVideo: {
+          select: {
+            id: true,
+            source: true,
+            thumbnailUrl: true,
+            rawPayload: true,
+          },
+        },
+        assetMappings: {
+          select: {
+            creativeAsset: {
+              select: {
+                id: true,
+                type: true,
+                imageHash: true,
+                imageUrl: true,
+                thumbnail: true,
+                video_id: true,
+                video_source: true,
+                video_thumbnails: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (!creatives.length) return 0;
+
+    const creativeImageKeys = creatives
+      .map((creative) =>
+        creative.accountId && creative.imageHash
+          ? { accountId: creative.accountId, hash: creative.imageHash }
+          : null,
+      )
+      .filter(Boolean) as Array<{ accountId: string; hash: string }>;
+    const creativeImageIds = creatives
+      .map((creative) => creative.imageId)
+      .filter(Boolean) as string[];
+    const creativeVideoIds = creatives
+      .map((creative) => creative.videoId)
+      .filter(Boolean) as string[];
+    const creativeImageHashes = creatives
+      .map((creative) => creative.imageHash)
+      .filter(Boolean) as string[];
+
+    const [images, directAssets] = await Promise.all([
+      creativeImageKeys.length || creativeImageIds.length
+        ? this.prisma.adImage.findMany({
+            where: {
+              OR: [
+                creativeImageIds.length
+                  ? { id: { in: creativeImageIds } }
+                  : undefined,
+                ...creativeImageKeys,
+              ].filter(Boolean) as Prisma.AdImageWhereInput[],
+            },
+            select: {
+              id: true,
+              accountId: true,
+              hash: true,
+              url: true,
+              permalink_url: true,
+            },
+          })
+        : [],
+      creativeImageHashes.length || creativeVideoIds.length
+        ? this.prisma.creativeAsset.findMany({
+            where: {
+              OR: [
+                creativeImageHashes.length
+                  ? { imageHash: { in: creativeImageHashes } }
+                  : undefined,
+                creativeVideoIds.length
+                  ? { video_id: { in: creativeVideoIds } }
+                  : undefined,
+              ].filter(Boolean) as Prisma.CreativeAssetWhereInput[],
+            },
+            select: {
+              id: true,
+              type: true,
+              imageHash: true,
+              imageUrl: true,
+              thumbnail: true,
+              video_id: true,
+              video_source: true,
+              video_thumbnails: true,
+            },
+          })
+        : [],
+    ]);
+
+    const imageById = new Map(
+      images.map((image) => [image.id, image] as [string, (typeof images)[0]]),
+    );
+    const imageByKey = new Map(
+      images
+        .map((image) => [this.getImageKey(image.accountId, image.hash), image])
+        .filter(([key]) => !!key) as Array<[string, (typeof images)[0]]>,
+    );
+    const assetByImageHash = new Map(
+      directAssets
+        .filter((asset) => asset.imageHash)
+        .map(
+          (asset) =>
+            [asset.imageHash as string, asset] as [
+              string,
+              (typeof directAssets)[0],
+            ],
+        ),
+    );
+    const assetByVideoId = new Map(
+      directAssets
+        .filter((asset) => asset.video_id)
+        .map(
+          (asset) =>
+            [asset.video_id as string, asset] as [
+              string,
+              (typeof directAssets)[0],
+            ],
+        ),
+    );
+
+    const updates: Array<{ id: string; data: Prisma.CreativeUpdateInput }> = [];
+
+    for (const creative of creatives) {
+      const mappedAssets = (creative.assetMappings || [])
+        .map((mapping) => mapping.creativeAsset)
+        .filter(Boolean);
+      const image = this.pickFirstString(creative.imageId)
+        ? imageById.get(creative.imageId) || creative.adImage
+        : creative.adImage;
+      const imageByHash =
+        image ||
+        imageByKey.get(
+          this.getImageKey(creative.accountId, creative.imageHash),
+        );
+
+      let previewUrl: string | null = null;
+      let thumbnailUrl: string | null = null;
+      let imageUrl: string | null = null;
+      const expiryUrls: string[] = [];
+
+      if (creative.videoId) {
+        const videoPreview = this.resolveAdVideoPreview(creative.adVideo);
+        const mappedVideoAsset =
+          mappedAssets.find(
+            (asset) =>
+              asset.type === 'VIDEO' &&
+              (!creative.videoId || asset.video_id === creative.videoId),
+          ) || assetByVideoId.get(creative.videoId);
+        const assetPreview = this.resolveAssetPreview(mappedVideoAsset);
+
+        thumbnailUrl = this.pickFirstString(
+          videoPreview.thumbnailUrl,
+          assetPreview.thumbnailUrl,
+          creative.thumbnailUrl,
+          creative.imageUrl,
+        );
+        previewUrl = this.pickFirstString(
+          videoPreview.previewUrl,
+          assetPreview.previewUrl,
+          thumbnailUrl,
+          creative.previewUrl,
+        );
+        imageUrl = this.pickFirstString(thumbnailUrl, creative.imageUrl);
+        expiryUrls.push(
+          ...[
+            videoPreview.previewUrl,
+            videoPreview.thumbnailUrl,
+            assetPreview.previewUrl,
+            assetPreview.thumbnailUrl,
+          ].filter(Boolean),
+        );
+      } else {
+        const mappedImageAsset =
+          mappedAssets.find(
+            (asset) =>
+              asset.type === 'IMAGE' &&
+              (!creative.imageHash || asset.imageHash === creative.imageHash),
+          ) || assetByImageHash.get(creative.imageHash);
+        const assetPreview = this.resolveAssetPreview(mappedImageAsset);
+        const syncedImageUrl = this.resolveAdImageUrl(imageByHash);
+
+        imageUrl = this.pickFirstString(
+          syncedImageUrl,
+          assetPreview.imageUrl,
+          creative.imageUrl,
+          creative.thumbnailUrl,
+          creative.previewUrl,
+        );
+        thumbnailUrl = this.pickFirstString(
+          imageUrl,
+          assetPreview.thumbnailUrl,
+        );
+        previewUrl = this.pickFirstString(imageUrl, assetPreview.previewUrl);
+        expiryUrls.push(
+          ...[
+            syncedImageUrl,
+            assetPreview.imageUrl,
+            assetPreview.thumbnailUrl,
+          ].filter(Boolean),
+        );
+      }
+
+      if (!previewUrl && !thumbnailUrl && !imageUrl) continue;
+
+      const calculatedUrlExpiredAt = parseMetaUrlExpireTime(expiryUrls);
+      const data: Prisma.CreativeUpdateInput = {};
+
+      if (previewUrl && creative.previewUrl !== previewUrl) {
+        data.previewUrl = previewUrl;
+      }
+      if (thumbnailUrl && creative.thumbnailUrl !== thumbnailUrl) {
+        data.thumbnailUrl = thumbnailUrl;
+      }
+      if (imageUrl && creative.imageUrl !== imageUrl) {
+        data.imageUrl = imageUrl;
+      }
+      if (
+        calculatedUrlExpiredAt &&
+        !this.datesEqual(creative.urlExpiredAt, calculatedUrlExpiredAt)
+      ) {
+        data.urlExpiredAt = calculatedUrlExpiredAt;
+      }
+
+      if (Object.keys(data).length) {
+        data.updatedAt = new Date();
+        updates.push({ id: creative.id, data });
+      }
+    }
+
+    for (const updateChunk of chunk(updates, 50)) {
+      await Promise.all(
+        updateChunk.map((item) =>
+          this.prisma.creative.update({
+            where: { id: item.id },
+            data: item.data,
+          }),
+        ),
+      );
+    }
+
+    if (updates.length) {
+      this.logger.log(
+        `[refreshCreativePreviews] Updated ${updates.length}/${creatives.length} creatives`,
+      );
+    }
+
+    return updates.length;
+  }
+
+  async syncAdVideo(limit: number = 200) {
     this.logger.log('🔄 Sync Ad Video (fully optimized)');
 
     try {
       const where: Prisma.AdVideoWhereInput = {
         account: { needsReauth: false },
-        status: { not: 'ERROR' },
-        OR: [
-          { source: null },
-          { urlExpiredAt: null },
-          { urlExpiredAt: { lte: new Date(Date.now() + 24 * 60 * 60 * 1000) } },
-          { rawPayload: { equals: Prisma.DbNull } },
-          { rawPayload: { equals: Prisma.JsonNull } },
+        AND: [
+          {
+            OR: [{ status: null }, { status: { notIn: ['ERROR', 'error'] } }],
+          },
+          {
+            OR: [
+              { source: null },
+              { thumbnailUrl: null },
+              { urlExpiredAt: null },
+              {
+                urlExpiredAt: {
+                  lte: new Date(Date.now() + 24 * 60 * 60 * 1000),
+                },
+              },
+              { rawPayload: { equals: Prisma.DbNull } },
+              { rawPayload: { equals: Prisma.JsonNull } },
+            ],
+          },
         ],
       };
 
-      const [existingVideos, totalCount] = await Promise.all([
-        this.prisma.adVideo.findMany({
-          where,
-          orderBy: { urlExpiredAt: 'asc' },
-          take: limit,
-          select: { id: true, accountId: true, thumbnailUrl: true },
-        }),
-        this.prisma.adVideo.count({ where }),
-      ]);
+      const existingVideos = await this.prisma.adVideo.findMany({
+        where,
+        orderBy: { urlExpiredAt: 'asc' },
+        take: limit,
+        select: { id: true, accountId: true, thumbnailUrl: true },
+      });
 
       this.logger.log(
-        `[syncAdVideo] Found ${existingVideos.length} videos to sync (Total pending: ${totalCount})`,
+        `[syncAdVideo] Found ${existingVideos.length} videos to sync`,
       );
-      if (!existingVideos.length) return;
+
+      if (!existingVideos.length) {
+        return true;
+      }
 
       // Gom nhóm theo accountId
       const byAccount: Record<string, string[]> = {};
@@ -100,7 +496,9 @@ export class MetaMediaSyncService {
               const thumbnail =
                 videoData.thumbnails?.data?.find(
                   (th: any) => !!th?.is_preferred,
-                )?.uri || videoData.picture;
+                )?.uri ||
+                videoData.thumbnails?.data?.[0]?.uri ||
+                videoData.picture;
 
               await this.prisma.adVideo.update({
                 where: { id: videoData.id },
@@ -116,10 +514,14 @@ export class MetaMediaSyncService {
                   rawPayload: toPrismaJson(videoData),
                   urlExpiredAt: parseMetaUrlExpireTime([
                     videoData.source,
+                    thumbnail,
+                    videoData.picture,
                     ...(videoData.thumbnails?.data?.map((t: any) => t.uri) ||
                       []),
                   ]),
-                  status: 'READY',
+                  status:
+                    videoData.status ||
+                    (videoData.source ? 'READY' : 'PROCESSING'),
                   updatedAt: new Date(),
                 },
               });
@@ -134,6 +536,9 @@ export class MetaMediaSyncService {
           });
 
           await Promise.all(updatePromises);
+          await this.refreshCreativePreviews({
+            videoIds: videos.map((video) => video.id).filter(Boolean),
+          });
           await sleep(5000);
         } catch (err: any) {
           this.logger.error(
@@ -165,22 +570,20 @@ export class MetaMediaSyncService {
         ],
       };
 
-      const [existingImages, total] = await Promise.all([
-        this.prisma.adImage.findMany({
-          where,
-          orderBy: { urlExpiredAt: 'asc' },
-          take: limit,
-          select: { hash: true, url: true, accountId: true },
-        }),
-        this.prisma.adImage.count({ where }),
-      ]);
-      const totalCount = total;
+      const existingImages = await this.prisma.adImage.findMany({
+        where,
+        orderBy: { urlExpiredAt: 'asc' },
+        take: limit,
+        select: { hash: true, url: true, accountId: true },
+      });
 
       this.logger.log(
-        `[syncAdImage] Found ${existingImages.length} images to sync (Total pending: ${totalCount})`,
+        `[syncAdImage] Found ${existingImages.length} images to sync`,
       );
 
-      if (!existingImages.length) return;
+      if (!existingImages.length) {
+        return;
+      }
 
       const byAccount: Record<string, string[]> = {};
       for (const img of existingImages) {
@@ -263,6 +666,9 @@ export class MetaMediaSyncService {
               `[syncAdImage] Account ${accountId}: Synced ${updateData.length} images`,
             );
 
+            await this.refreshCreativePreviews({
+              imageHashes: images.map((image) => image.hash).filter(Boolean),
+            });
             await sleep(800);
           } catch (error) {
             this.logger.error(
