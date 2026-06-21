@@ -75,7 +75,8 @@ export class MetaMediaSyncService {
   }
 
   private normalizeAccountId(accountId?: string | null) {
-    return accountId?.replaceAll('act_', '') || null;
+    if (!accountId) return null;
+    return accountId.startsWith('act_') ? accountId : `act_${accountId}`;
   }
 
   private getThumbnailList(thumbnails: any) {
