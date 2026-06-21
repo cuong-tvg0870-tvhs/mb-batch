@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { AdAccount } from 'facebook-nodejs-business-sdk';
+import { AdAccount, FacebookAdsApi } from 'facebook-nodejs-business-sdk';
 import { PrismaBatchHelper } from '../../common/helpers/prisma-batch.helper';
 import {
   chunk,
@@ -33,6 +33,45 @@ export class MetaMediaSyncService {
     }
 
     return null;
+  }
+
+  private initMetaSdk() {
+    const token = process.env.SDK_FACEBOOK_ACCESS_TOKEN;
+    if (!token) {
+      throw new Error('SDK_FACEBOOK_ACCESS_TOKEN missing');
+    }
+
+    FacebookAdsApi.init(token);
+  }
+
+  private normalizeNullableInt(value: unknown) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return Math.trunc(value);
+    }
+
+    if (typeof value === 'string' && value.trim()) {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) return Math.trunc(parsed);
+    }
+
+    return null;
+  }
+
+  private normalizeNullableDate(value: unknown) {
+    if (!value) return null;
+    const date = new Date(value as string | number | Date);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  private resolveMetaVideoStatus(videoData: any) {
+    return (
+      this.pickFirstString(
+        videoData?.status?.video_status,
+        videoData?.status?.status,
+        videoData?.video_status,
+        videoData?.status,
+      ) || (videoData?.source ? 'READY' : 'PROCESSING')
+    );
   }
 
   private normalizeAccountId(accountId?: string | null) {
@@ -108,6 +147,91 @@ export class MetaMediaSyncService {
     };
   }
 
+  private getFirstArrayItem(value: unknown) {
+    return Array.isArray(value) && value.length > 0 ? value[0] : undefined;
+  }
+
+  private getAssetImageUrl(asset?: any) {
+    return this.pickFirstString(
+      asset?.previewUrl,
+      asset?.preview_url,
+      asset?.imageUrl,
+      asset?.image_url,
+      asset?.thumbnailUrl,
+      asset?.thumbnail_url,
+      asset?.picture,
+      asset?.url,
+    );
+  }
+
+  private getAssetVideoThumbnailUrl(asset?: any) {
+    return this.pickFirstString(
+      asset?.thumbnailUrl,
+      asset?.thumbnail_url,
+      asset?.imageUrl,
+      asset?.image_url,
+      asset?.previewUrl,
+      asset?.preview_url,
+      asset?.picture,
+      this.getPreferredThumbnailUrl(asset?.thumbnails),
+      this.getPreferredThumbnailUrl(asset?.list_thumbnails),
+      this.getPreferredThumbnailUrl(asset?.video_thumbnails),
+      asset?.selected_thumbnail?.image_url,
+      asset?.selected_thumbnail?.uri,
+    );
+  }
+
+  private resolveRawCreativePreview(raw?: any) {
+    if (!raw) {
+      return { previewUrl: null, thumbnailUrl: null, imageUrl: null };
+    }
+
+    const story = raw.object_story_spec;
+    const linkData = story?.link_data;
+    const videoData = story?.video_data;
+    const photoData = story?.photo_data;
+    const assetImage = this.getFirstArrayItem(raw.asset_feed_spec?.images);
+    const assetVideo = this.getFirstArrayItem(raw.asset_feed_spec?.videos);
+    const childAttachment = this.getFirstArrayItem(
+      linkData?.child_attachments || raw.child_attachments,
+    );
+
+    const thumbnailUrl = this.pickFirstString(
+      raw.thumbnailUrl,
+      raw.thumbnail_url,
+      raw.picture,
+      this.getAssetVideoThumbnailUrl(assetVideo),
+      this.getAssetImageUrl(assetImage),
+      videoData?.image_url,
+      videoData?.thumbnail_url,
+      videoData?.picture,
+      linkData?.picture,
+      linkData?.image_url,
+      linkData?.thumbnail_url,
+      photoData?.image_url,
+      photoData?.picture,
+      photoData?.url,
+      this.getAssetImageUrl(childAttachment),
+    );
+
+    const imageUrl = this.pickFirstString(
+      raw.imageUrl,
+      raw.image_url,
+      this.getAssetImageUrl(assetImage),
+      linkData?.image_url,
+      linkData?.picture,
+      photoData?.image_url,
+      photoData?.url,
+      thumbnailUrl,
+    );
+
+    return {
+      previewUrl: this.pickFirstString(thumbnailUrl, imageUrl),
+      thumbnailUrl,
+      imageUrl,
+    };
+  }
+
   private datesEqual(a?: Date | null, b?: Date | null) {
     if (!a && !b) return true;
     if (!a || !b) return false;
@@ -149,6 +273,7 @@ export class MetaMediaSyncService {
         imageUrl: true,
         thumbnailUrl: true,
         previewUrl: true,
+        rawPayload: true,
         urlExpiredAt: true,
         videoId: true,
         adImage: {
@@ -302,6 +427,7 @@ export class MetaMediaSyncService {
       let thumbnailUrl: string | null = null;
       let imageUrl: string | null = null;
       const expiryUrls: string[] = [];
+      const rawPreview = this.resolveRawCreativePreview(creative.rawPayload);
 
       if (creative.videoId) {
         const videoPreview = this.resolveAdVideoPreview(creative.adVideo);
@@ -316,22 +442,31 @@ export class MetaMediaSyncService {
         thumbnailUrl = this.pickFirstString(
           videoPreview.thumbnailUrl,
           assetPreview.thumbnailUrl,
+          rawPreview.thumbnailUrl,
           creative.thumbnailUrl,
           creative.imageUrl,
         );
         previewUrl = this.pickFirstString(
-          videoPreview.previewUrl,
           assetPreview.previewUrl,
+          rawPreview.previewUrl,
           thumbnailUrl,
+          videoPreview.previewUrl,
           creative.previewUrl,
         );
-        imageUrl = this.pickFirstString(thumbnailUrl, creative.imageUrl);
+        imageUrl = this.pickFirstString(
+          thumbnailUrl,
+          rawPreview.imageUrl,
+          creative.imageUrl,
+        );
         expiryUrls.push(
           ...[
             videoPreview.previewUrl,
             videoPreview.thumbnailUrl,
             assetPreview.previewUrl,
             assetPreview.thumbnailUrl,
+            rawPreview.previewUrl,
+            rawPreview.thumbnailUrl,
+            rawPreview.imageUrl,
           ].filter(Boolean),
         );
       } else {
@@ -347,6 +482,7 @@ export class MetaMediaSyncService {
         imageUrl = this.pickFirstString(
           syncedImageUrl,
           assetPreview.imageUrl,
+          rawPreview.imageUrl,
           creative.imageUrl,
           creative.thumbnailUrl,
           creative.previewUrl,
@@ -354,13 +490,21 @@ export class MetaMediaSyncService {
         thumbnailUrl = this.pickFirstString(
           imageUrl,
           assetPreview.thumbnailUrl,
+          rawPreview.thumbnailUrl,
         );
-        previewUrl = this.pickFirstString(imageUrl, assetPreview.previewUrl);
+        previewUrl = this.pickFirstString(
+          imageUrl,
+          assetPreview.previewUrl,
+          rawPreview.previewUrl,
+        );
         expiryUrls.push(
           ...[
             syncedImageUrl,
             assetPreview.imageUrl,
             assetPreview.thumbnailUrl,
+            rawPreview.previewUrl,
+            rawPreview.thumbnailUrl,
+            rawPreview.imageUrl,
           ].filter(Boolean),
         );
       }
@@ -416,6 +560,8 @@ export class MetaMediaSyncService {
     this.logger.log('🔄 Sync Ad Video (fully optimized)');
 
     try {
+      this.initMetaSdk();
+
       const where: Prisma.AdVideoWhereInput = {
         account: { needsReauth: false },
         AND: [
@@ -507,10 +653,10 @@ export class MetaMediaSyncService {
                   source: videoData.source || null,
                   title: videoData.title || null,
                   description: videoData.description || null,
-                  length: videoData.length || null,
-                  createdTime: videoData.created_time
-                    ? new Date(videoData.created_time)
-                    : null,
+                  length: this.normalizeNullableInt(videoData.length),
+                  createdTime: this.normalizeNullableDate(
+                    videoData.created_time,
+                  ),
                   rawPayload: toPrismaJson(videoData),
                   urlExpiredAt: parseMetaUrlExpireTime([
                     videoData.source,
@@ -519,9 +665,7 @@ export class MetaMediaSyncService {
                     ...(videoData.thumbnails?.data?.map((t: any) => t.uri) ||
                       []),
                   ]),
-                  status:
-                    videoData.status ||
-                    (videoData.source ? 'READY' : 'PROCESSING'),
+                  status: this.resolveMetaVideoStatus(videoData),
                   updatedAt: new Date(),
                 },
               });

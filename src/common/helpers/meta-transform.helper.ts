@@ -4,6 +4,127 @@ import { extractCampaignMetrics, toPrismaJson } from '../utils';
 const toDate = (value?: string | number | Date | null) =>
   value ? new Date(value) : undefined;
 
+const pickFirstString = (...values: unknown[]) => {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return undefined;
+};
+
+const firstArrayItem = (value: unknown) =>
+  Array.isArray(value) && value.length > 0 ? value[0] : undefined;
+
+const getThumbnailList = (thumbnails: any) => {
+  if (Array.isArray(thumbnails?.data)) return thumbnails.data;
+  if (Array.isArray(thumbnails)) return thumbnails;
+  return [];
+};
+
+const getPreferredThumbnailUrl = (thumbnails: any) => {
+  const list = getThumbnailList(thumbnails);
+  const preferred =
+    list.find((thumbnail: any) => !!thumbnail?.is_preferred) || list[0];
+
+  return pickFirstString(
+    preferred?.uri,
+    preferred?.url,
+    preferred?.image_url,
+    preferred?.imageUrl,
+  );
+};
+
+const getAssetImageUrl = (image: any) =>
+  pickFirstString(
+    image?.previewUrl,
+    image?.preview_url,
+    image?.imageUrl,
+    image?.image_url,
+    image?.thumbnailUrl,
+    image?.thumbnail_url,
+    image?.picture,
+    image?.url,
+  );
+
+const getAssetVideoThumbnailUrl = (video: any) =>
+  pickFirstString(
+    video?.thumbnailUrl,
+    video?.thumbnail_url,
+    video?.imageUrl,
+    video?.image_url,
+    video?.previewUrl,
+    video?.preview_url,
+    video?.picture,
+    getPreferredThumbnailUrl(video?.thumbnails),
+    getPreferredThumbnailUrl(video?.list_thumbnails),
+    getPreferredThumbnailUrl(video?.video_thumbnails),
+    video?.selected_thumbnail?.image_url,
+    video?.selected_thumbnail?.uri,
+  );
+
+const resolveCreativeMedia = (creative: any) => {
+  const story = creative?.object_story_spec;
+  const linkData = story?.link_data;
+  const videoData = story?.video_data;
+  const photoData = story?.photo_data;
+  const assetFeed = creative?.asset_feed_spec;
+  const assetImage = firstArrayItem(assetFeed?.images);
+  const assetVideo = firstArrayItem(assetFeed?.videos);
+  const childAttachment = firstArrayItem(
+    linkData?.child_attachments || creative?.child_attachments,
+  );
+
+  const thumbnailUrl = pickFirstString(
+    creative?.thumbnail_url,
+    creative?.thumbnailUrl,
+    getAssetVideoThumbnailUrl(assetVideo),
+    getAssetImageUrl(assetImage),
+    videoData?.image_url,
+    videoData?.thumbnail_url,
+    videoData?.picture,
+    linkData?.picture,
+    linkData?.image_url,
+    linkData?.thumbnail_url,
+    photoData?.image_url,
+    photoData?.picture,
+    photoData?.url,
+    getAssetImageUrl(childAttachment),
+    creative?.image_url,
+    creative?.imageUrl,
+    creative?.picture,
+  );
+
+  const imageUrl = pickFirstString(
+    creative?.image_url,
+    creative?.imageUrl,
+    getAssetImageUrl(assetImage),
+    linkData?.image_url,
+    linkData?.picture,
+    photoData?.image_url,
+    photoData?.url,
+    thumbnailUrl,
+  );
+
+  return {
+    imageHash: pickFirstString(
+      creative?.image_hash,
+      linkData?.image_hash,
+      photoData?.image_hash,
+      assetImage?.hash,
+      assetImage?.image_hash,
+      childAttachment?.image_hash,
+    ),
+    imageUrl,
+    videoId: pickFirstString(
+      videoData?.video_id,
+      creative?.video_id,
+      assetVideo?.video_id,
+      assetVideo?.id,
+    ),
+    thumbnailUrl,
+    previewUrl: pickFirstString(thumbnailUrl, imageUrl),
+  };
+};
+
 export class MetaTransformHelper {
   static campaign(c: any, accountId: string) {
     return {
@@ -89,6 +210,8 @@ export class MetaTransformHelper {
       pageId = c?.actor_id || c?.object_story_spec?.page_id;
     }
 
+    const media = resolveCreativeMedia(c);
+
     return {
       id: c.id,
       accountId,
@@ -96,14 +219,11 @@ export class MetaTransformHelper {
       creativeType: c.object_type,
       objectStoryId: c.object_story_id,
       effectObjectStoryId: c.effective_object_story_id,
-      imageHash: c.image_hash,
-      imageUrl: c.image_url || c.object_story_spec?.link_data?.image_url,
-      videoId: c?.object_story_spec?.video_data?.video_id || c.video_id,
-      thumbnailUrl:
-        c.object_story_spec?.video_data?.image_url ||
-        c.object_story_spec?.link_data?.image_url ||
-        c.image_url ||
-        c.thumbnail_url,
+      imageHash: media.imageHash,
+      imageUrl: media.imageUrl,
+      videoId: media.videoId,
+      thumbnailUrl: media.thumbnailUrl,
+      previewUrl: media.previewUrl,
       pageId,
       postId,
       rawPayload: toPrismaJson(c),
