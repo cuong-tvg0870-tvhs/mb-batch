@@ -599,12 +599,41 @@ export class MetaMediaSyncService {
         ],
       };
 
-      const existingVideos = await this.prisma.adVideo.findMany({
-        where,
+      const existingVideosActive = await this.prisma.adVideo.findMany({
+        where: {
+          ...where,
+          creatives: {
+            some: {
+              ads: {
+                some: {
+                  status: 'ACTIVE',
+                  adset: { status: 'ACTIVE' },
+                  campaign: { status: 'ACTIVE' },
+                },
+              },
+            },
+          },
+        },
         orderBy: { urlExpiredAt: 'asc' },
         take: limit,
         select: { id: true, accountId: true, thumbnailUrl: true },
       });
+
+      let existingVideos = existingVideosActive;
+      if (existingVideosActive.length < limit) {
+        const activeIds = existingVideosActive.map((v) => v.id);
+        const remainingLimit = limit - existingVideosActive.length;
+        const existingVideosInactive = await this.prisma.adVideo.findMany({
+          where: {
+            ...where,
+            id: { notIn: activeIds },
+          },
+          orderBy: { urlExpiredAt: 'asc' },
+          take: remainingLimit,
+          select: { id: true, accountId: true, thumbnailUrl: true },
+        });
+        existingVideos = [...existingVideosActive, ...existingVideosInactive];
+      }
 
       this.logger.log(
         `[syncAdVideo] Found ${existingVideos.length} videos to sync`,
@@ -753,12 +782,41 @@ export class MetaMediaSyncService {
         ],
       };
 
-      const existingVideos = await this.prisma.adVideo.findMany({
-        where,
-        orderBy: { updatedAt: 'asc' }, // round robin by last update time
+      const existingVideosActive = await this.prisma.adVideo.findMany({
+        where: {
+          ...where,
+          creatives: {
+            some: {
+              ads: {
+                some: {
+                  status: 'ACTIVE',
+                  adset: { status: 'ACTIVE' },
+                  campaign: { status: 'ACTIVE' },
+                },
+              },
+            },
+          },
+        },
+        orderBy: { updatedAt: 'asc' },
         take: limit,
         select: { id: true, accountId: true },
       });
+
+      let existingVideos = existingVideosActive;
+      if (existingVideosActive.length < limit) {
+        const activeIds = existingVideosActive.map((v) => v.id);
+        const remainingLimit = limit - existingVideosActive.length;
+        const existingVideosInactive = await this.prisma.adVideo.findMany({
+          where: {
+            ...where,
+            id: { notIn: activeIds },
+          },
+          orderBy: { updatedAt: 'asc' },
+          take: remainingLimit,
+          select: { id: true, accountId: true },
+        });
+        existingVideos = [...existingVideosActive, ...existingVideosInactive];
+      }
 
       this.logger.log(
         `[syncAdVideoError] Found ${existingVideos.length} error-state/system-synced videos to sync`,
