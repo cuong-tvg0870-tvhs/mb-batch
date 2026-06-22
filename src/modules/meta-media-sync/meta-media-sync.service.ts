@@ -567,7 +567,20 @@ export class MetaMediaSyncService {
         account: { needsReauth: false },
         AND: [
           {
-            OR: [{ status: null }, { status: { notIn: ['ERROR', 'error'] } }],
+            OR: [
+              { status: null },
+              {
+                status: {
+                  notIn: [
+                    'ERROR',
+                    'error',
+                    'SYSTEM_READY',
+                    'SYSTEM_ERROR',
+                    'SYSTEM_PROCESSING',
+                  ],
+                },
+              },
+            ],
           },
           {
             OR: [
@@ -695,6 +708,233 @@ export class MetaMediaSyncService {
       return true;
     } catch (err: any) {
       this.logger.error('[CRON ERROR]', err?.message);
+      return false;
+    }
+  }
+
+  private resolveSystemVideoStatus(videoData: any) {
+    const status = this.resolveMetaVideoStatus(videoData);
+    if (status === 'READY') return 'SYSTEM_READY';
+    if (status === 'PROCESSING') return 'SYSTEM_PROCESSING';
+    if (status === 'ERROR') return 'SYSTEM_ERROR';
+    return `SYSTEM_${status}`;
+  }
+
+  async syncAdVideoError(limit: number = 200) {
+    this.logger.log('🔄 Sync Ad Video Error (using System Auth & Cooldown Precautions)');
+
+    try {
+      // 1. Get system config token & cookies
+      const authConfig = await this.metaApi.getMetaAuthConfig();
+      const token = authConfig?.accessToken;
+      if (!token) {
+        this.logger.error('[syncAdVideoError] System token not found in SystemConfig');
+        return false;
+      }
+
+      // 2. Query ad videos that are in ERROR/SYSTEM_ERROR status or system-synced status and need update/refresh
+      const where: Prisma.AdVideoWhereInput = {
+        status: { in: ['ERROR', 'error', 'SYSTEM_READY', 'SYSTEM_ERROR', 'SYSTEM_PROCESSING'] },
+        AND: [
+          {
+            OR: [
+              { source: null },
+              { thumbnailUrl: null },
+              { urlExpiredAt: null },
+              {
+                urlExpiredAt: {
+                  lte: new Date(Date.now() + 24 * 60 * 60 * 1000),
+                },
+              },
+              { rawPayload: { equals: Prisma.DbNull } },
+              { rawPayload: { equals: Prisma.JsonNull } },
+            ],
+          },
+        ],
+      };
+
+      const existingVideos = await this.prisma.adVideo.findMany({
+        where,
+        orderBy: { updatedAt: 'asc' }, // round robin by last update time
+        take: limit,
+        select: { id: true, accountId: true },
+      });
+
+      this.logger.log(
+        `[syncAdVideoError] Found ${existingVideos.length} error-state/system-synced videos to sync`,
+      );
+
+      if (!existingVideos.length) {
+        return true;
+      }
+
+      const videoIds = existingVideos.map((v) => v.id);
+
+      // 3. Batch fetch from Meta using system auth in chunks of 50
+      const batches = chunk(videoIds, 50);
+      const fields = AD_VIDEO_FIELDS.join(',');
+
+      for (const batchIds of batches) {
+        try {
+          this.logger.debug(
+            `[syncAdVideoError] Fetching batch of ${batchIds.length} videos...`,
+          );
+
+          const response = await this.metaApi.request('get', '', {
+            ids: batchIds.join(','),
+            fields,
+          });
+
+          // response is key-value: { [videoId]: videoData }
+          const returnedIds = new Set(Object.keys(response || {}));
+          const missingIds = batchIds.filter((id) => !returnedIds.has(id));
+
+          // For missing videos in the batch response, they might be deleted or we don't have access.
+          // Let's mark them as SYSTEM_ERROR so they aren't retried immediately.
+          if (missingIds.length > 0) {
+            this.logger.warn(
+              `[syncAdVideoError] ${missingIds.length} videos not found in batch response. Marking as SYSTEM_ERROR.`,
+            );
+            await this.prisma.adVideo.updateMany({
+              where: { id: { in: missingIds } },
+              data: { status: 'SYSTEM_ERROR', updatedAt: new Date() },
+            });
+          }
+
+          // Update found videos
+          const updatePromises = Object.entries(response || {}).map(
+            async ([videoId, videoData]: [string, any]) => {
+              try {
+                if (videoData.error) {
+                  // If specific ID has an error object returned
+                  this.logger.warn(
+                    `[syncAdVideoError] Video ${videoId} returned error: ${videoData.error.message}. Marking as SYSTEM_ERROR.`,
+                  );
+                  await this.prisma.adVideo.update({
+                    where: { id: videoId },
+                    data: { status: 'SYSTEM_ERROR', updatedAt: new Date() },
+                  });
+                  return;
+                }
+
+                const thumbnail =
+                  videoData.thumbnails?.data?.find(
+                    (th: any) => !!th?.is_preferred,
+                  )?.uri ||
+                  videoData.thumbnails?.data?.[0]?.uri ||
+                  videoData.picture;
+
+                await this.prisma.adVideo.update({
+                  where: { id: videoId },
+                  data: {
+                    thumbnailUrl: thumbnail || null,
+                    source: videoData.source || null,
+                    title: videoData.title || null,
+                    description: videoData.description || null,
+                    length: this.normalizeNullableInt(videoData.length),
+                    createdTime: this.normalizeNullableDate(
+                      videoData.created_time,
+                    ),
+                    rawPayload: toPrismaJson(videoData),
+                    urlExpiredAt: parseMetaUrlExpireTime([
+                      videoData.source,
+                      thumbnail,
+                      videoData.picture,
+                      ...(videoData.thumbnails?.data?.map((t: any) => t.uri) ||
+                        []),
+                    ]),
+                    status: this.resolveSystemVideoStatus(videoData),
+                    updatedAt: new Date(),
+                  },
+                });
+
+                this.logger.debug(
+                  `[syncAdVideoError] Updated video ${videoId} successfully`,
+                );
+              } catch (err: any) {
+                this.logger.error(
+                  `[syncAdVideoError] DB Error updating ${videoId}: ${err.message}`,
+                );
+              }
+            },
+          );
+
+          await Promise.all(updatePromises);
+          await this.refreshCreativePreviews({
+            videoIds: Object.keys(response || {}).filter(Boolean),
+          });
+
+          // Delay 3 seconds between batches to avoid rate limit/cooldown
+          await sleep(3000);
+        } catch (batchErr: any) {
+          this.logger.error(
+            `[syncAdVideoError] Batch request failed. Falling back to single queries. Error: ${batchErr.message}`,
+          );
+
+          // Fallback to querying each video ID one-by-one in this batch
+          for (const videoId of batchIds) {
+            try {
+              // Delay 1 second before single query to be extremely gentle on Meta API
+              await sleep(1000);
+
+              const videoData = await this.metaApi.request('get', videoId, {
+                fields,
+              });
+
+              if (!videoData || videoData.error) {
+                throw new Error(videoData?.error?.message || 'Empty payload');
+              }
+
+              const thumbnail =
+                videoData.thumbnails?.data?.find(
+                  (th: any) => !!th?.is_preferred,
+                )?.uri ||
+                videoData.thumbnails?.data?.[0]?.uri ||
+                videoData.picture;
+
+              await this.prisma.adVideo.update({
+                where: { id: videoId },
+                data: {
+                  thumbnailUrl: thumbnail || null,
+                  source: videoData.source || null,
+                  title: videoData.title || null,
+                  description: videoData.description || null,
+                  length: this.normalizeNullableInt(videoData.length),
+                  createdTime: this.normalizeNullableDate(
+                    videoData.created_time,
+                  ),
+                  rawPayload: toPrismaJson(videoData),
+                  urlExpiredAt: parseMetaUrlExpireTime([
+                    videoData.source,
+                    thumbnail,
+                    videoData.picture,
+                    ...(videoData.thumbnails?.data?.map((t: any) => t.uri) ||
+                      []),
+                  ]),
+                  status: this.resolveSystemVideoStatus(videoData),
+                  updatedAt: new Date(),
+                },
+              });
+
+              this.logger.debug(
+                `[syncAdVideoError] Single-fallback: Updated video ${videoId} successfully`,
+              );
+            } catch (singleErr: any) {
+              this.logger.warn(
+                `[syncAdVideoError] Single-fallback failed for ${videoId}: ${singleErr.message}. Marking as SYSTEM_ERROR.`,
+              );
+              await this.prisma.adVideo.update({
+                where: { id: videoId },
+                data: { status: 'SYSTEM_ERROR', updatedAt: new Date() },
+              });
+            }
+          }
+        }
+      }
+
+      return true;
+    } catch (err: any) {
+      this.logger.error('[syncAdVideoError CRON ERROR]', err?.message);
       return false;
     }
   }

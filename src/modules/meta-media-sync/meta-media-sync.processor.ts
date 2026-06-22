@@ -27,6 +27,13 @@ export class MetaMediaSyncProcessor {
     this.logger.log('✨ [JOB FINISHED] Sync Ad Video Data');
   }
 
+  @Process({ name: META_MEDIA_SYNC_JOBS.SYNC_AD_VIDEO_ERROR_DATA, concurrency: 1 })
+  async handleSyncAdVideoErrorData(job: Job) {
+    this.logger.log('🚀 [JOB START] Sync Ad Video Error Data');
+    await this.service.syncAdVideoError();
+    this.logger.log('✨ [JOB FINISHED] Sync Ad Video Error Data');
+  }
+
   @Process({
     name: META_MEDIA_SYNC_JOBS.RECALCULATE_LOCAL_URL_EXPIRED,
     concurrency: 1,

@@ -60,6 +60,25 @@ export class MetaMediaSyncScheduler implements OnModuleInit {
   }
 
   /**
+   * 🎥 AD VIDEO ERROR DATA (20:15, 21:15, 22:15)
+   */
+  @Cron('15 20,21,22 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async scheduleAdVideoErrorSync() {
+    this.logger.log('📅 Scheduling Ad Video Error Data Sync...');
+    const bucket = new Date().toISOString().slice(0, 13);
+    await this.mediaSyncQueue.add(
+      META_MEDIA_SYNC_JOBS.SYNC_AD_VIDEO_ERROR_DATA,
+      {},
+      {
+        jobId: `${META_MEDIA_SYNC_JOBS.SYNC_AD_VIDEO_ERROR_DATA}:${bucket}`,
+        removeOnComplete: true,
+        attempts: 3,
+        backoff: { type: 'exponential' },
+      },
+    );
+  }
+
+  /**
    * ⏰ RECALCULATE LOCAL URL EXPIRED (Daily at 00:00 AM)
    */
   @Cron('0 0 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })

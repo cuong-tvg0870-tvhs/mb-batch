@@ -59,6 +59,7 @@
   - `meta-sync`: Incremental campaigns core sync (hourly).
   - `insight-sync`: Sync Meta performance insights (TODAY hourly, 3D 6h/once, 7D 8h/once, MAX daily, Audience daily).
   - `media-sync`: Folders, creative assets, source URLs from Drive to Meta.
+  - `meta-media-sync`: Đồng bộ hình ảnh/video hàng ngày, kèm cronjob riêng xử lý các video lỗi (status = ERROR/hệ thống) bằng System config token/cookies qua lô truy vấn (batch query) và fallback tự động lùi hàng chờ.
   - `lark-sync`: Fetch Lark records & Drive Permission Audit (every 30m).
   - `draft-automation`: Generate drafts from templates based on schedule.
 
