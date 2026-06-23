@@ -2620,6 +2620,34 @@ model HelpAiKnowledgeSnapshot {
   updatedAt   DateTime @updatedAt
 }
 
+model HelpAiApiKey {
+  id                   String    @id @default(uuid())
+  provider             String    @default("gemini")
+  label                String?
+  apiKey               String    @db.Text
+  keyHash              String    @unique
+  status               String    @default("ACTIVE")
+  blockedUntil         DateTime?
+  blockedReason        String?   @db.Text
+  quotaResetAt         DateTime?
+  requestsUsed         Int       @default(0)
+  tokensUsed           Int       @default(0)
+  usageWindowStartedAt DateTime?
+  usageWindowResetAt   DateTime?
+  dailyRequestLimit    Int?
+  dailyTokenLimit      Int?
+  lastUsedAt           DateTime?
+  lastSuccessAt        DateTime?
+  lastFailureAt        DateTime?
+  lastErrorCode        String?
+  lastErrorMessage     String?   @db.Text
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  @@index([provider, status, blockedUntil])
+  @@index([usageWindowResetAt])
+}
+
 model HelpChatSession {
   id        String    @id @default(uuid())
   userId    String

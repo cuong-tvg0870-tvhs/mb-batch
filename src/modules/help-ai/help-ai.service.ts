@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { createHash, randomUUID } from 'crypto';
 import { access, readdir, readFile } from 'fs/promises';
 import { basename, extname, join } from 'path';
+import { GeminiApiKeyManager } from './gemini-api-key-manager.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 type HelpKnowledgeSnapshotSource = {
@@ -21,12 +22,11 @@ export class HelpAiService {
     join(__dirname, 'knowledge'),
     join(process.cwd(), 'src/modules/help-ai/knowledge'),
   ];
-  private readonly keys = (process.env.GEMINI_API_KEYS || '')
-    .split(',')
-    .map((key) => key.trim())
-    .filter(Boolean);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly geminiKeyManager: GeminiApiKeyManager,
+  ) {}
 
   async refreshHelpKnowledge() {
     const dbChapters = await this.prisma.helpChapter.findMany({
@@ -117,9 +117,9 @@ export class HelpAiService {
   ) {
     const localSnapshot = this.buildLocalSnapshot(chapters);
 
-    if (this.keys.length === 0) {
+    if (!(await this.geminiKeyManager.hasConfiguredKeys())) {
       this.logger.warn(
-        'GEMINI_API_KEYS is not configured; using local help snapshot',
+        'Gemini API keys are not configured in DB or GEMINI_API_KEYS; using local help snapshot',
       );
       return localSnapshot;
     }
@@ -150,39 +150,84 @@ export class HelpAiService {
   }
 
   private async callGeminiForSnapshot(source: string) {
-    const key = this.keys[Math.floor(Math.random() * this.keys.length)];
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${encodeURIComponent(
-      key,
-    )}`;
-
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        systemInstruction: {
-          parts: [
-            {
-              text: 'Tạo bản tóm tắt tri thức ngắn gọn bằng tiếng Việt cho chatbot hỗ trợ dashboard MB Auto. Giữ các màn hình, đường dẫn, khái niệm, quy trình và trạng thái quan trọng.',
-            },
-          ],
-        },
-        contents: [
+    const body = {
+      systemInstruction: {
+        parts: [
           {
-            role: 'user',
-            parts: [{ text: source.slice(0, 60000) }],
+            text: 'Tạo bản tóm tắt tri thức ngắn gọn bằng tiếng Việt cho chatbot hỗ trợ dashboard MB Auto. Giữ các màn hình, đường dẫn, khái niệm, quy trình và trạng thái quan trọng.',
           },
         ],
-        generationConfig: {
-          temperature: 0.1,
+      },
+      contents: [
+        {
+          role: 'user',
+          parts: [{ text: source.slice(0, 60000) }],
         },
-      }),
-    });
+      ],
+      generationConfig: {
+        temperature: 0.1,
+      },
+    };
 
-    if (!res.ok) {
-      throw new Error(`Gemini snapshot request failed with ${res.status}`);
+    let lastError: Error | null = null;
+    const triedKeyHashes: string[] = [];
+
+    while (true) {
+      const keys = await this.geminiKeyManager.getKeyOrder(triedKeyHashes);
+      if (keys.length === 0) break;
+
+      for (const key of keys) {
+        triedKeyHashes.push(key.keyHash);
+        await this.geminiKeyManager.recordAttempt(key);
+
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${encodeURIComponent(
+          key.apiKey,
+        )}`;
+
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+
+        if (!res.ok) {
+          const error = await this.geminiKeyManager.readGeminiError(res);
+          lastError = new Error(error.message);
+
+          if (this.geminiKeyManager.isQuotaError(error)) {
+            await this.geminiKeyManager.freezeForQuota(key, error);
+            continue;
+          }
+
+          await this.geminiKeyManager.recordFailure(key, error);
+
+          if (this.geminiKeyManager.isAuthError(error)) {
+            await this.geminiKeyManager.disableKey(key, error);
+            continue;
+          }
+
+          if (this.geminiKeyManager.isRetryableStatus(res.status)) {
+            continue;
+          }
+
+          throw lastError;
+        }
+
+        const json = await res.json();
+        await this.geminiKeyManager.recordSuccess(key, json);
+        return this.extractCandidateText(json);
+      }
     }
 
-    const json = await res.json();
+    throw (
+      lastError ||
+      new Error(
+        'All Gemini API keys are quota-limited, near configured limits, or cooling down',
+      )
+    );
+  }
+
+  private extractCandidateText(json: any) {
     const parts = json?.candidates?.[0]?.content?.parts;
     if (!Array.isArray(parts)) {
       return '';

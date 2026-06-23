@@ -1,10 +1,12 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import {
+  HELP_AI_API_KEY_THAW_CRON,
   HELP_AI_KNOWLEDGE_REFRESH_CRON,
   HELP_AI_TIME_ZONE,
   HELP_AI_TRIAGE_CRON,
 } from './help-ai.constants';
+import { GeminiApiKeyManager } from './gemini-api-key-manager.service';
 import { HelpAiService } from './help-ai.service';
 
 @Injectable()
@@ -12,8 +14,12 @@ export class HelpAiScheduler implements OnModuleInit {
   private readonly logger = new Logger(HelpAiScheduler.name);
   private refreshingKnowledge = false;
   private triaging = false;
+  private thawingApiKeys = false;
 
-  constructor(private readonly helpAiService: HelpAiService) {}
+  constructor(
+    private readonly helpAiService: HelpAiService,
+    private readonly geminiKeyManager: GeminiApiKeyManager,
+  ) {}
 
   async onModuleInit() {
     this.logger.log('HelpAiScheduler initialized');
@@ -23,7 +29,9 @@ export class HelpAiScheduler implements OnModuleInit {
   @Cron(HELP_AI_KNOWLEDGE_REFRESH_CRON, { timeZone: HELP_AI_TIME_ZONE })
   async refreshHelpKnowledge() {
     if (this.refreshingKnowledge) {
-      this.logger.warn('Help knowledge refresh skipped because a run is active');
+      this.logger.warn(
+        'Help knowledge refresh skipped because a run is active',
+      );
       return;
     }
 
@@ -47,6 +55,21 @@ export class HelpAiScheduler implements OnModuleInit {
       await this.helpAiService.triagePendingContributions();
     } finally {
       this.triaging = false;
+    }
+  }
+
+  @Cron(HELP_AI_API_KEY_THAW_CRON, { timeZone: HELP_AI_TIME_ZONE })
+  async thawExpiredApiKeys() {
+    if (this.thawingApiKeys) {
+      this.logger.warn('Gemini API key thaw skipped because a run is active');
+      return;
+    }
+
+    this.thawingApiKeys = true;
+    try {
+      await this.geminiKeyManager.thawExpiredKeys();
+    } finally {
+      this.thawingApiKeys = false;
     }
   }
 }

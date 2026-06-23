@@ -48,6 +48,7 @@
   - `draft-campaign` (94KB): CRUD drafts, templates, logic publish to Meta.
   - `data-sync`, `medias`, `drive`, `larkbase`, `data-export`, `export-presets`: Sync, export and manage media assets & insights (Google Sheets & Drive integration), and manage saved export presets.
   - `auth`, `user`, `permission` (RBAC), `accounts`, `project`, `account-proposal`: User management, access control & account allocation proposals.
+  - `help`: Chatbot hướng dẫn sử dụng dashboard, lưu hội thoại và dùng Gemini API key pool trong DB để tự chuyển key khi quota/rate limit.
 - **Auth Guard**: `@UseGuards(JwtAuthGuard)` + `@CurrentUser()`.
 - **Export Endpoints**: `POST /cids/export-sheet` (Lark content records), `POST /insights/admin/creatives/export-sheet` (Creative performance insights), `POST /data-export/drive-sheet` (quản lý xuất động Insights và Creative Assets ra Google Sheet), và các API CRUD cho cấu hình xuất `/export-presets` (GET, POST, DELETE).
 
@@ -62,6 +63,7 @@
   - `meta-media-sync`: Đồng bộ hình ảnh/video hàng ngày, kèm cronjob riêng xử lý các video lỗi (status = ERROR/hệ thống) bằng System config token/cookies qua lô truy vấn (batch query) và fallback tự động lùi hàng chờ.
   - `lark-sync`: Fetch Lark records & Drive Permission Audit (every 30m).
   - `draft-automation`: Generate drafts from templates based on schedule.
+  - `help-ai`: Build knowledge snapshot cho chatbot helper và thaw/reset trạng thái Gemini API key định kỳ.
 
 ---
 
@@ -89,6 +91,7 @@
 10. **Google Sheets Export & Cache Optimization & Presets & Spreadsheet ID constraint & Relative Dates & Custom Fields/Formulas**: Hỗ trợ xuất dữ liệu ra Google Sheets quy mô lớn (lên tới 10k-20k dòng) bằng cách tối ưu hóa hiệu năng, sử dụng bộ nhớ đệm thư mục cha, hỗ trợ đổi tên/sắp xếp cột kéo thả từ client, tự động chèn base metrics cần thiết để tính toán chỉ số tự định nghĩa (Custom Metrics) thông qua công thức động (Google Sheets Formulas) thay vì số tĩnh, cho phép người dùng tự định nghĩa cột trích xuất dữ liệu từ `rawPayload` qua JSON Path hoặc cột công thức số học dựa trên 2 cột số khác, hỗ trợ lọc dữ liệu linh hoạt (Dynamic Filters), lưu/phục hồi các cấu hình xuất file (Export Presets) của người dùng hỗ trợ cả Ngày tương đối (Relative Dates - tự động tính toán lại mốc thời gian động theo ngày hiện hành khi load preset), đồng thời bắt buộc luôn xuất dữ liệu vào một file Google Sheet duy nhất theo cấu hình `GOOGLE_EXPORT_SPREADSHEET_ID` (mặc định ID `1JcElzgCbvte63MuT_d9n_li6jkgdja4biW7pAbxvuY8`) dưới dạng ghi đè hoặc tạo tab (trang tính) mới trong chính file đó.
 11. **AdVideo Sync & Active Prioritization & System Fallback**: Ưu tiên đồng bộ các video thuộc chiến dịch/nhóm quảng cáo/quảng cáo/creative đang hoạt động (`ACTIVE`) trước các video lỗi/hết hạn khác. Luồng đồng bộ video lỗi chạy qua token/cookies hệ thống kết hợp batch query và fallback lẻ, hỗ trợ trigger qua API `POST /data-sync/ad-videos-error` truyền limit và hiển thị card đồng bộ riêng trên UI Dashboard.
 12. **UI Truncation & Layout Stability & Premium Card/Tooltip Layout**: Tự động thu gọn các tên tài sản Meta/Google Drive khi hiển thị trực tiếp và đặc biệt là chuyển đổi các dòng cấu hình phân quyền bật/tắt thành cấu hình dạng Card Layout hai phần (Switch + Tên tự động xuống dòng ở trên, thông tin Quyền/Trạng thái ở dưới) kết hợp `Tooltip` của `shadcn` và thuộc tính `title` để hiển thị đầy đủ thông tin nhất cho người dùng trên mọi màn hình phân quyền và tạo dự án.
+13. **Help AI Gemini Key Pool**: Gemini API keys được lưu trong bảng `HelpAiApiKey` thay vì chỉ xoay vòng từ env. Mỗi request ghi usage/trạng thái key, tự chuyển sang key khác khi gặp quota/rate limit, đóng băng key đến `blockedUntil`, và tự mở lại khi qua giờ reset/cooldown.
 
 ---
 
