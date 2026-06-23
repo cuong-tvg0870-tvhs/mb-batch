@@ -17,7 +17,14 @@ type HelpKnowledgeSnapshotSource = {
 @Injectable()
 export class HelpAiService {
   private readonly logger = new Logger(HelpAiService.name);
-  private readonly model = process.env.HELP_CHAT_MODEL || 'gemini-2.5-flash';
+  private readonly geminiModel =
+    process.env.HELP_CHAT_GEMINI_MODEL ||
+    process.env.HELP_CHAT_MODEL ||
+    'gemini-2.5-flash';
+  private readonly deepSeekModel =
+    process.env.HELP_CHAT_DEEPSEEK_MODEL || 'deepseek-v4-flash';
+  private readonly deepSeekBaseUrl =
+    process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
   private readonly staticKnowledgeDirs = [
     join(__dirname, 'knowledge'),
     join(process.cwd(), 'src/modules/help-ai/knowledge'),
@@ -119,7 +126,7 @@ export class HelpAiService {
 
     if (!(await this.geminiKeyManager.hasConfiguredKeys())) {
       this.logger.warn(
-        'Gemini API keys are not configured in DB or GEMINI_API_KEYS; using local help snapshot',
+        'AI API keys are not configured in DB or environment; using local help snapshot',
       );
       return localSnapshot;
     }
@@ -129,7 +136,7 @@ export class HelpAiService {
       return aiSnapshot || localSnapshot;
     } catch (error: any) {
       this.logger.warn(
-        `Gemini help snapshot generation failed; using local snapshot: ${error?.message}`,
+        `AI help snapshot generation failed; using local snapshot: ${error?.message}`,
       );
       return localSnapshot;
     }
@@ -180,7 +187,45 @@ export class HelpAiService {
         triedKeyHashes.push(key.keyHash);
         await this.geminiKeyManager.recordAttempt(key);
 
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${encodeURIComponent(
+        if (key.provider === 'deepseek') {
+          const res = await fetch(this.deepSeekChatCompletionUrl(), {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${key.apiKey}`,
+            },
+            body: JSON.stringify(this.buildDeepSeekSnapshotBody(source)),
+          });
+
+          if (!res.ok) {
+            const error = await this.geminiKeyManager.readAiError(res);
+            lastError = new Error(error.message);
+
+            if (this.geminiKeyManager.isQuotaError(error)) {
+              await this.geminiKeyManager.freezeForQuota(key, error);
+              continue;
+            }
+
+            await this.geminiKeyManager.recordFailure(key, error);
+
+            if (this.geminiKeyManager.isAuthError(error)) {
+              await this.geminiKeyManager.disableKey(key, error);
+              continue;
+            }
+
+            if (this.geminiKeyManager.isRetryableStatus(res.status)) {
+              continue;
+            }
+
+            throw lastError;
+          }
+
+          const json = await res.json();
+          await this.geminiKeyManager.recordSuccess(key, json);
+          return this.extractDeepSeekText(json);
+        }
+
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.geminiModel}:generateContent?key=${encodeURIComponent(
           key.apiKey,
         )}`;
 
@@ -222,7 +267,7 @@ export class HelpAiService {
     throw (
       lastError ||
       new Error(
-        'All Gemini API keys are quota-limited, near configured limits, or cooling down',
+        'All AI API keys are quota-limited, near configured limits, or cooling down',
       )
     );
   }
@@ -237,6 +282,36 @@ export class HelpAiService {
       .map((part) => (typeof part?.text === 'string' ? part.text : ''))
       .join('')
       .trim();
+  }
+
+  private extractDeepSeekText(json: any) {
+    return String(json?.choices?.[0]?.message?.content || '').trim();
+  }
+
+  private buildDeepSeekSnapshotBody(source: string) {
+    return {
+      model: this.deepSeekModel,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'Tạo bản tóm tắt tri thức ngắn gọn bằng tiếng Việt cho chatbot hỗ trợ dashboard MB Auto. Giữ các màn hình, đường dẫn, khái niệm, quy trình và trạng thái quan trọng.',
+        },
+        {
+          role: 'user',
+          content: source.slice(0, 60000),
+        },
+      ],
+      temperature: 0.1,
+      stream: false,
+      thinking: {
+        type: 'disabled',
+      },
+    };
+  }
+
+  private deepSeekChatCompletionUrl() {
+    return `${this.deepSeekBaseUrl.replace(/\/+$/, '')}/chat/completions`;
   }
 
   private async getStaticKnowledgeSources(): Promise<

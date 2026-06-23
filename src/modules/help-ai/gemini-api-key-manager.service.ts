@@ -2,8 +2,17 @@ import { Injectable, Logger } from '@nestjs/common';
 import { createHash, randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 
+export type AiApiProvider = 'gemini' | 'deepseek';
+
+const SUPPORTED_AI_PROVIDERS: AiApiProvider[] = ['gemini', 'deepseek'];
+const PROVIDER_DISPLAY_NAMES: Record<AiApiProvider, string> = {
+  gemini: 'Gemini',
+  deepseek: 'DeepSeek',
+};
+
 export type GeminiApiKeyLease = {
   id: string;
+  provider: AiApiProvider;
   apiKey: string;
   keyHash: string;
   redacted: string;
@@ -11,6 +20,7 @@ export type GeminiApiKeyLease = {
 
 type GeminiApiKeyRow = {
   id: string;
+  provider: AiApiProvider;
   apiKey: string;
   keyHash: string;
 };
@@ -49,7 +59,6 @@ const parseRatio = (value: string | undefined, defaultValue: number) => {
 export class GeminiApiKeyManager {
   private readonly logger = new Logger(GeminiApiKeyManager.name);
   private ensureTablePromise?: Promise<void>;
-  private readonly provider = 'gemini';
   private readonly usageThreshold = parseRatio(
     process.env.HELP_AI_API_KEY_USAGE_THRESHOLD,
     0.9,
@@ -86,8 +95,8 @@ export class GeminiApiKeyManager {
   async hasConfiguredKeys() {
     await this.prepareKeyState();
     const rows = await this.prisma.$queryRawUnsafe<Array<{ count: number }>>(
-      'SELECT COUNT(*)::int AS "count" FROM "HelpAiApiKey" WHERE "provider" = $1 AND "status" != $2',
-      this.provider,
+      'SELECT COUNT(*)::int AS "count" FROM "HelpAiApiKey" WHERE "provider" = ANY($1::text[]) AND "status" != $2',
+      SUPPORTED_AI_PROVIDERS,
       'DISABLED',
     );
     return Number(rows[0]?.count || 0) > 0;
@@ -98,9 +107,9 @@ export class GeminiApiKeyManager {
 
     const rows = await this.prisma.$queryRawUnsafe<GeminiApiKeyRow[]>(
       `
-        SELECT "id", "apiKey", "keyHash"
+        SELECT "id", "provider", "apiKey", "keyHash"
         FROM "HelpAiApiKey"
-        WHERE "provider" = $1
+        WHERE "provider" = ANY($1::text[])
           AND "status" = 'ACTIVE'
           AND NOT ("keyHash" = ANY($3::text[]))
           AND ("blockedUntil" IS NULL OR "blockedUntil" <= CURRENT_TIMESTAMP)
@@ -114,15 +123,23 @@ export class GeminiApiKeyManager {
             OR "dailyTokenLimit" <= 0
             OR "tokensUsed" < GREATEST(1, FLOOR("dailyTokenLimit" * $2::double precision))::int
           )
-        ORDER BY "lastUsedAt" ASC NULLS FIRST, "createdAt" ASC
+        ORDER BY
+          CASE "provider"
+            WHEN 'gemini' THEN 1
+            WHEN 'deepseek' THEN 2
+            ELSE 3
+          END,
+          "lastUsedAt" ASC NULLS FIRST,
+          "createdAt" ASC
       `,
-      this.provider,
+      SUPPORTED_AI_PROVIDERS,
       this.usageThreshold,
       excludeKeyHashes,
     );
 
     return rows.map((row) => ({
       id: row.id,
+      provider: this.normalizeProvider(row.provider),
       apiKey: row.apiKey,
       keyHash: row.keyHash,
       redacted: this.redact(row.apiKey),
@@ -200,7 +217,7 @@ export class GeminiApiKeyManager {
     );
 
     this.logger.warn(
-      `Gemini API key ${key.redacted} quota/rate-limited. Cooling down until ${blockedUntil.toISOString()}`,
+      `${this.providerDisplayName(key.provider)} API key ${key.redacted} quota/rate-limited. Cooling down until ${blockedUntil.toISOString()}`,
     );
   }
 
@@ -234,18 +251,16 @@ export class GeminiApiKeyManager {
             "blockedReason" = NULL,
             "quotaResetAt" = NULL,
             "updatedAt" = CURRENT_TIMESTAMP
-        WHERE "provider" = $1
+        WHERE "provider" = ANY($1::text[])
           AND "status" = 'COOLDOWN'
           AND "blockedUntil" IS NOT NULL
           AND "blockedUntil" <= CURRENT_TIMESTAMP
       `,
-      this.provider,
+      SUPPORTED_AI_PROVIDERS,
     );
   }
 
-  async readGeminiError(
-    response: globalThis.Response,
-  ): Promise<GeminiErrorInfo> {
+  async readAiError(response: globalThis.Response): Promise<GeminiErrorInfo> {
     const status = response.status;
     const text = await response.text();
     let body: any = null;
@@ -260,9 +275,15 @@ export class GeminiApiKeyManager {
     return {
       status,
       code: apiError?.status || apiError?.code || String(status),
-      message: apiError?.message || text || `Gemini error ${status}`,
+      message: apiError?.message || text || `AI provider error ${status}`,
       body,
     };
+  }
+
+  async readGeminiError(
+    response: globalThis.Response,
+  ): Promise<GeminiErrorInfo> {
+    return this.readAiError(response);
   }
 
   isQuotaError(error: GeminiErrorInfo) {
@@ -283,7 +304,6 @@ export class GeminiApiKeyManager {
     const message = error.message.toLowerCase();
 
     return (
-      error.status === 400 ||
       error.status === 401 ||
       error.status === 403 ||
       status === 'PERMISSION_DENIED' ||
@@ -352,7 +372,23 @@ export class GeminiApiKeyManager {
   }
 
   private async seedEnvKeys() {
-    const keys = (process.env.GEMINI_API_KEYS || '')
+    await this.seedProviderEnvKeys('gemini', [
+      process.env.GEMINI_API_KEY,
+      process.env.GEMINI_API_KEYS,
+    ]);
+    await this.seedProviderEnvKeys('deepseek', [
+      process.env.DEEPSEEK_API_KEY,
+      process.env.DEEPSEEK_API_KEYS,
+    ]);
+  }
+
+  private async seedProviderEnvKeys(
+    provider: AiApiProvider,
+    envValues: Array<string | undefined>,
+  ) {
+    const keys = envValues
+      .filter(Boolean)
+      .join(',')
       .split(',')
       .map((key) => key.trim())
       .filter(Boolean);
@@ -378,8 +414,8 @@ export class GeminiApiKeyManager {
           ON CONFLICT ("keyHash") DO NOTHING
         `,
         randomUUID(),
-        this.provider,
-        `Gemini ${this.redact(key)}`,
+        provider,
+        `${this.providerDisplayName(provider)} ${this.redact(key)}`,
         key,
         this.hashKey(key),
         this.getNextDailyResetAt(new Date()),
@@ -398,10 +434,10 @@ export class GeminiApiKeyManager {
             "usageWindowStartedAt" = CURRENT_TIMESTAMP,
             "usageWindowResetAt" = $2,
             "updatedAt" = CURRENT_TIMESTAMP
-        WHERE "provider" = $1
+        WHERE "provider" = ANY($1::text[])
           AND ("usageWindowResetAt" IS NULL OR "usageWindowResetAt" <= CURRENT_TIMESTAMP)
       `,
-      this.provider,
+      SUPPORTED_AI_PROVIDERS,
       this.getNextDailyResetAt(new Date()),
     );
   }
@@ -448,11 +484,30 @@ export class GeminiApiKeyManager {
   }
 
   private extractTotalTokens(responseJson: any) {
-    const total = Number(responseJson?.usageMetadata?.totalTokenCount || 0);
+    const total = Number(
+      responseJson?.usageMetadata?.totalTokenCount ||
+        responseJson?.usage?.total_tokens ||
+        0,
+    );
     return Number.isFinite(total) && total > 0 ? Math.floor(total) : 0;
   }
 
   private hashKey(key: string) {
     return createHash('sha256').update(key).digest('hex');
+  }
+
+  private normalizeProvider(provider?: string): AiApiProvider {
+    const normalized = String(provider || 'gemini')
+      .toLowerCase()
+      .trim();
+    if (normalized === 'gemini' || normalized === 'deepseek') {
+      return normalized;
+    }
+
+    return 'gemini';
+  }
+
+  private providerDisplayName(provider: AiApiProvider) {
+    return PROVIDER_DISPLAY_NAMES[provider] || provider;
   }
 }
