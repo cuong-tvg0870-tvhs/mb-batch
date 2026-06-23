@@ -52,6 +52,7 @@ RUN apk add --no-cache dumb-init \
 
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/src/modules/help-ai/knowledge ./dist/src/modules/help-ai/knowledge
 COPY --from=builder /app/prisma ./prisma
 COPY package.json ./
 

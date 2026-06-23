@@ -1,19 +1,26 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { createHash, randomUUID } from 'crypto';
+import { access, readdir, readFile } from 'fs/promises';
+import { basename, extname, join } from 'path';
 import { PrismaService } from '../prisma/prisma.service';
 
-type HelpChapterSnapshotSource = {
+type HelpKnowledgeSnapshotSource = {
   slug: string;
   title: string;
   content: string;
   order: number;
   updatedAt: Date;
+  source: 'database' | 'static';
 };
 
 @Injectable()
 export class HelpAiService {
   private readonly logger = new Logger(HelpAiService.name);
   private readonly model = process.env.HELP_CHAT_MODEL || 'gemini-2.5-flash';
+  private readonly staticKnowledgeDirs = [
+    join(__dirname, 'knowledge'),
+    join(process.cwd(), 'src/modules/help-ai/knowledge'),
+  ];
   private readonly keys = (process.env.GEMINI_API_KEYS || '')
     .split(',')
     .map((key) => key.trim())
@@ -22,7 +29,7 @@ export class HelpAiService {
   constructor(private readonly prisma: PrismaService) {}
 
   async refreshHelpKnowledge() {
-    const chapters = await this.prisma.helpChapter.findMany({
+    const dbChapters = await this.prisma.helpChapter.findMany({
       select: {
         slug: true,
         title: true,
@@ -32,13 +39,23 @@ export class HelpAiService {
       },
       orderBy: { order: 'asc' },
     });
+    const staticChapters = await this.getStaticKnowledgeSources();
+    const sources = [
+      ...dbChapters.map((chapter) => ({
+        ...chapter,
+        source: 'database' as const,
+      })),
+      ...staticChapters,
+    ].sort((left, right) => left.order - right.order);
 
-    if (chapters.length === 0) {
-      this.logger.warn('No HelpChapter records found for AI knowledge refresh');
+    if (sources.length === 0) {
+      this.logger.warn(
+        'No help knowledge sources found for AI knowledge refresh',
+      );
       return;
     }
 
-    const sourceHash = this.hashChapters(chapters);
+    const sourceHash = this.hashChapters(sources);
     await this.ensureSnapshotTable();
     const latest = await this.getLatestSnapshot();
 
@@ -47,10 +64,10 @@ export class HelpAiService {
       return;
     }
 
-    const content = await this.buildKnowledgeSnapshot(chapters);
+    const content = await this.buildKnowledgeSnapshot(sources);
     await this.persistSnapshot(sourceHash, content);
     this.logger.log(
-      `Help AI knowledge snapshot refreshed from ${chapters.length} chapters`,
+      `Help AI knowledge snapshot refreshed from ${dbChapters.length} DB chapters and ${staticChapters.length} static documents`,
     );
   }
 
@@ -82,19 +99,22 @@ export class HelpAiService {
     );
   }
 
-  private hashChapters(chapters: HelpChapterSnapshotSource[]) {
+  private hashChapters(chapters: HelpKnowledgeSnapshotSource[]) {
     const payload = chapters.map((chapter) => ({
       slug: chapter.slug,
       title: chapter.title,
       content: chapter.content,
       order: chapter.order,
       updatedAt: chapter.updatedAt.toISOString(),
+      source: chapter.source,
     }));
 
     return createHash('sha256').update(JSON.stringify(payload)).digest('hex');
   }
 
-  private async buildKnowledgeSnapshot(chapters: HelpChapterSnapshotSource[]) {
+  private async buildKnowledgeSnapshot(
+    chapters: HelpKnowledgeSnapshotSource[],
+  ) {
     const localSnapshot = this.buildLocalSnapshot(chapters);
 
     if (this.keys.length === 0) {
@@ -115,17 +135,18 @@ export class HelpAiService {
     }
   }
 
-  private buildLocalSnapshot(chapters: HelpChapterSnapshotSource[]) {
+  private buildLocalSnapshot(chapters: HelpKnowledgeSnapshotSource[]) {
     return chapters
       .map((chapter) =>
         [
           `# ${chapter.title}`,
           `Slug: ${chapter.slug}`,
-          chapter.content.slice(0, 2400),
+          `Source: ${chapter.source}`,
+          chapter.content.slice(0, 12000),
         ].join('\n'),
       )
       .join('\n\n---\n\n')
-      .slice(0, 24000);
+      .slice(0, 60000);
   }
 
   private async callGeminiForSnapshot(source: string) {
@@ -148,7 +169,7 @@ export class HelpAiService {
         contents: [
           {
             role: 'user',
-            parts: [{ text: source.slice(0, 28000) }],
+            parts: [{ text: source.slice(0, 60000) }],
           },
         ],
         generationConfig: {
@@ -171,6 +192,81 @@ export class HelpAiService {
       .map((part) => (typeof part?.text === 'string' ? part.text : ''))
       .join('')
       .trim();
+  }
+
+  private async getStaticKnowledgeSources(): Promise<
+    HelpKnowledgeSnapshotSource[]
+  > {
+    for (const knowledgeDir of this.staticKnowledgeDirs) {
+      try {
+        await access(knowledgeDir);
+        return await this.readStaticKnowledgeSources(knowledgeDir);
+      } catch {
+        continue;
+      }
+    }
+
+    this.logger.warn(
+      `Static help knowledge directories not found: ${this.staticKnowledgeDirs.join(', ')}`,
+    );
+    return [];
+  }
+
+  private async readStaticKnowledgeSources(
+    knowledgeDir: string,
+  ): Promise<HelpKnowledgeSnapshotSource[]> {
+    const fileNames = (await readdir(knowledgeDir))
+      .filter((fileName) => fileName.endsWith('.md'))
+      .sort();
+
+    const sources = await Promise.all(
+      fileNames.map(async (fileName, index) => {
+        const content = await readFile(join(knowledgeDir, fileName), 'utf8');
+
+        return {
+          slug: this.slugFromFileName(fileName),
+          title: this.titleFromMarkdown(fileName, content),
+          content: this.normalizeMarkdownKnowledge(content),
+          order: 10000 + index,
+          updatedAt: new Date(0),
+          source: 'static' as const,
+        };
+      }),
+    );
+
+    return sources;
+  }
+
+  private titleFromMarkdown(fileName: string, content: string) {
+    const heading = content.match(/^#\s+(.+)$/m)?.[1]?.trim();
+    if (heading) {
+      return this.unescapeMarkdownText(heading);
+    }
+
+    return this.slugFromFileName(fileName)
+      .split('-')
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(' ');
+  }
+
+  private slugFromFileName(fileName: string) {
+    return basename(fileName, extname(fileName))
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/(^-|-$)/g, '');
+  }
+
+  private normalizeMarkdownKnowledge(content: string) {
+    return this.unescapeMarkdownText(content)
+      .replace(/!\[[^\]]*]\([^)]+\)/g, '')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  private unescapeMarkdownText(content: string) {
+    return content.replace(/\\([().\-&>])/g, '$1');
   }
 
   private async ensureSnapshotTable() {
