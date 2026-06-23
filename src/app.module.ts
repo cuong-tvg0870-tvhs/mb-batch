@@ -5,6 +5,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { configLoads } from './config';
 import { DraftAutomationModule } from './modules/draft-automation/draft-automation.module';
 import { InsightSyncModule } from './modules/insight-sync/insight-sync.module';
+import { HelpAiModule } from './modules/help-ai/help-ai.module';
 import { LarkSyncModule } from './modules/lark-sync/lark-sync.module';
 import { MediaSyncModule } from './modules/media-sync/media-sync.module';
 import { MetaApiModule } from './modules/meta-api/meta-api.module';
@@ -43,6 +44,7 @@ export const global_modules = [
     DraftAutomationModule,
     MetaMediaSyncModule,
     MetaMediaUploadModule,
+    HelpAiModule,
   ],
 })
 export class AppModule implements OnModuleInit {
