@@ -107,12 +107,12 @@ export class GeminiApiKeyManager {
           AND (
             "dailyRequestLimit" IS NULL
             OR "dailyRequestLimit" <= 0
-            OR "requestsUsed" < GREATEST(1, FLOOR("dailyRequestLimit" * $2))::int
+            OR "requestsUsed" < GREATEST(1, FLOOR("dailyRequestLimit" * $2::double precision))::int
           )
           AND (
             "dailyTokenLimit" IS NULL
             OR "dailyTokenLimit" <= 0
-            OR "tokensUsed" < GREATEST(1, FLOOR("dailyTokenLimit" * $2))::int
+            OR "tokensUsed" < GREATEST(1, FLOOR("dailyTokenLimit" * $2::double precision))::int
           )
         ORDER BY "lastUsedAt" ASC NULLS FIRST, "createdAt" ASC
       `,
