@@ -141,7 +141,7 @@ export class MediaSyncService implements OnModuleInit {
 
   private shouldDeleteMissingMetaAsset(err: any) {
     const metaError = parseMetaError(err);
-    return Number(metaError.subcode) === 33;
+    return Number(metaError.code) === 100 || Number(metaError.subcode) === 33;
   }
 
   private async refreshVideoCreativeAsset(asset: {
@@ -654,6 +654,13 @@ export class MediaSyncService implements OnModuleInit {
 
     this.logger.log(`Refreshing URLs for ${assets.length} assets...`);
 
+    const fieldsVideo = [
+      'id',
+      'name',
+      'last_updated_time',
+      'parent_folder_id',
+      'video{id,source,length,thumbnails}',
+    ];
     const fieldsImage = [
       'id',
       'name',
@@ -668,56 +675,137 @@ export class MediaSyncService implements OnModuleInit {
     let totalUpdated = 0;
     let totalDeleted = 0;
 
-    for (const [index, asset] of assets.entries()) {
+    const batchSize = 50;
+
+    const deleteMissingAsset = async (
+      asset: (typeof assets)[number],
+      err?: any,
+    ) => {
       this.logger.log(
-        `[${index + 1}/${assets.length}] Đang xử lý asset: ${asset.id} (Type: ${asset.type})...`,
+        `Asset ${asset.id} not found on Meta. Deleting... (${err ? this.formatMetaError(err) : 'batch object error'})`,
       );
+      await this.prisma.creativeAsset.delete({ where: { id: asset.id } });
+      totalDeleted++;
+    };
 
-      const isVideo = asset.type === AssetType.VIDEO;
+    const updateImageAssetFromResponse = async (
+      asset: (typeof assets)[number],
+      res: any,
+    ) => {
+      if (!res) {
+        this.logger.warn(`No Meta response found for asset ${asset.id}`);
+        return;
+      }
 
+      if (res.error) {
+        if (this.shouldDeleteMissingMetaAsset(res)) {
+          await deleteMissingAsset(asset, res);
+        } else {
+          this.logger.error(
+            `Failed to refresh asset ${asset.id}: ${this.formatMetaError(res)}`,
+          );
+        }
+        return;
+      }
+
+      if (!res.id) {
+        this.logger.warn(`Meta response for asset ${asset.id} has no id`);
+        return;
+      }
+
+      await this.prisma.creativeAsset.update({
+        where: { id: asset.id },
+        data: {
+          name: res.name || asset.name,
+          creation_time: res.last_updated_time || asset.creation_time,
+          folderId: res.parent_folder_id || asset.folderId,
+          imageUrl: res.url || asset.imageUrl,
+          thumbnail: res.url || asset.thumbnail,
+          imageHash: res.hash || asset.imageHash,
+          height: res.height || asset.height,
+          width: res.width || asset.width,
+          urlExpiredAt: parseMetaUrlExpireTime(res.url),
+        },
+      });
+      totalUpdated++;
+      this.logger.log(`✅ Cập nhật thành công URL mới cho asset ${asset.id}`);
+    };
+
+    const updateVideoAssetFromResponse = async (
+      asset: (typeof assets)[number],
+      res: any,
+    ) => {
+      if (!res) {
+        this.logger.warn(`No Meta response found for asset ${asset.id}`);
+        return;
+      }
+
+      if (res.error) {
+        if (this.shouldDeleteMissingMetaAsset(res)) {
+          await deleteMissingAsset(asset, res);
+        } else {
+          this.logger.error(
+            `Failed to refresh asset ${asset.id}: ${this.formatMetaError(res)}`,
+          );
+        }
+        return;
+      }
+
+      const videoPayload = res.video;
+      if (!videoPayload?.id) {
+        this.logger.warn(
+          `Missing video payload for creative asset ${asset.id}`,
+        );
+        return;
+      }
+
+      const thumbnail = this.getPreferredThumbnail(videoPayload.thumbnails);
+      await this.prisma.creativeAsset.update({
+        where: { id: asset.id },
+        data: {
+          name: res.name || asset.name,
+          creation_time: res.last_updated_time || asset.creation_time,
+          folderId: res.parent_folder_id || asset.folderId,
+          video_id: videoPayload.id || asset.video_id,
+          thumbnail: thumbnail?.uri || asset.thumbnail,
+          height: thumbnail?.height || asset.height,
+          width: thumbnail?.width || asset.width,
+          duration: videoPayload.length || asset.duration,
+          video_source: videoPayload.source || asset.video_source,
+          video_thumbnails: videoPayload.thumbnails || asset.video_thumbnails,
+          urlExpiredAt: parseMetaUrlExpireTime([
+            videoPayload.source,
+            ...(videoPayload.thumbnails?.data?.map((t: any) => t.uri) || []),
+          ]),
+        },
+      });
+      totalUpdated++;
+      this.logger.log(`✅ Cập nhật thành công URL mới cho asset ${asset.id}`);
+    };
+
+    const refreshSingleAsset = async (
+      asset: (typeof assets)[number],
+      isVideo: boolean,
+    ) => {
       try {
         if (isVideo) {
           await this.refreshVideoCreativeAsset(asset);
           totalUpdated++;
           this.logger.log(
-            `[${index + 1}/${assets.length}] ✅ Cập nhật thành công URL mới cho asset ${asset.id}`,
+            `✅ Cập nhật thành công URL mới cho asset ${asset.id}`,
           );
           await sleep(this.expiredUrlAssetSleepMs);
-          continue;
+          return;
         }
 
         await this.waitForMetaAssetFetchSlot();
         const res = await this.metaApi.request('get', asset.id, {
           fields: fieldsImage.join(','),
         });
-
-        if (res.id) {
-          await this.prisma.creativeAsset.update({
-            where: { id: asset.id },
-            data: {
-              name: res.name || asset.name,
-              creation_time: res.last_updated_time || asset.creation_time,
-              folderId: res.parent_folder_id || asset.folderId,
-              imageUrl: res.url || asset.imageUrl,
-              thumbnail: res.url || asset.thumbnail,
-              imageHash: res.hash || asset.imageHash,
-              height: res.height || asset.height,
-              width: res.width || asset.width,
-              urlExpiredAt: parseMetaUrlExpireTime(res.url),
-            },
-          });
-          totalUpdated++;
-          this.logger.log(
-            `[${index + 1}/${assets.length}] ✅ Cập nhật thành công URL mới cho asset ${asset.id}`,
-          );
-        }
+        await updateImageAssetFromResponse(asset, res);
       } catch (err: any) {
         if (this.shouldDeleteMissingMetaAsset(err)) {
-          this.logger.log(
-            `Asset ${asset.id} not found on Meta. Deleting... (${this.formatMetaError(err)})`,
-          );
-          await this.prisma.creativeAsset.delete({ where: { id: asset.id } });
-          totalDeleted++;
+          await deleteMissingAsset(asset, err);
         } else {
           this.logger.error(
             `Failed to refresh asset ${asset.id} (type=${asset.type}, video_id=${asset.video_id || '-'}): ${this.formatMetaError(err)}`,
@@ -726,6 +814,59 @@ export class MediaSyncService implements OnModuleInit {
       }
 
       await sleep(this.expiredUrlAssetSleepMs);
+    };
+
+    const assetGroups = [
+      {
+        label: AssetType.VIDEO,
+        fields: fieldsVideo,
+        items: assets.filter((asset) => asset.type === AssetType.VIDEO),
+        updater: updateVideoAssetFromResponse,
+        isVideo: true,
+      },
+      {
+        label: 'IMAGE',
+        fields: fieldsImage,
+        items: assets.filter((asset) => asset.type !== AssetType.VIDEO),
+        updater: updateImageAssetFromResponse,
+        isVideo: false,
+      },
+    ];
+
+    for (const group of assetGroups) {
+      for (let i = 0; i < group.items.length; i += batchSize) {
+        const batch = group.items.slice(i, i + batchSize);
+        const ids = batch.map((asset) => asset.id);
+        if (!ids.length) continue;
+
+        this.logger.log(
+          `[${group.label}] Refreshing batch ${i / batchSize + 1} (${batch.length} assets)...`,
+        );
+
+        try {
+          await this.waitForMetaAssetFetchSlot();
+          const response = await this.metaApi.request(
+            'get',
+            'https://graph.facebook.com/v24.0/',
+            {
+              ids: ids.join(','),
+              fields: group.fields.join(','),
+            },
+          );
+
+          await Promise.all(
+            batch.map((asset) => group.updater(asset, response?.[asset.id])),
+          );
+        } catch (err: any) {
+          this.logger.error(
+            `[${group.label}] Failed to refresh batch ${i / batchSize + 1}: ${this.formatMetaError(err)}. Falling back to single asset requests...`,
+          );
+
+          for (const asset of batch) {
+            await refreshSingleAsset(asset, group.isVideo);
+          }
+        }
+      }
     }
 
     this.logger.log(
