@@ -92,6 +92,11 @@ export class MetaMediaUploadService {
   private readonly checkMetaExistingAssetBeforeUpload =
     process.env.META_MEDIA_UPLOAD_CHECK_META_EXISTING_ASSET === 'true';
   private readonly uploadingClaimTtlMs = 6 * 60 * 60 * 1000;
+  private readonly minLarkRecordAgeMinutes = parseEnvInteger(
+    process.env.META_MEDIA_UPLOAD_MIN_LARK_RECORD_AGE_MINUTES,
+    30,
+    0,
+  );
   private readonly maxFailedUploadRetries = parseEnvInteger(
     process.env.META_MEDIA_UPLOAD_FAILED_RETRY_MAX,
     10,
@@ -247,7 +252,11 @@ export class MetaMediaUploadService {
       const cooldown = await this.getBlockingMetaApiCooldown();
       if (cooldown) {
         await this.markRecordsMetaCooldownPending(
-          [record, ...fileRecords, ...records.slice(records.indexOf(record) + 1)],
+          [
+            record,
+            ...fileRecords,
+            ...records.slice(records.indexOf(record) + 1),
+          ],
           uploadBatchId,
           cooldown,
         );
@@ -528,17 +537,12 @@ export class MetaMediaUploadService {
   ) {
     const activeCooldown =
       cooldown || (await this.metaApi.getActiveMetaApiCooldown());
-    await this.markRecordStatus(
-      record,
-      'PENDING',
-      errorInfo?.message || null,
-      {
-        ...(errorInfo?.raw || {}),
-        sync_meta_cooldown: true,
-        sync_meta_cooldown_until: activeCooldown?.blockedUntil || null,
-        ...(uploadBatchId ? { sync_upload_batch_id: uploadBatchId } : {}),
-      },
-    );
+    await this.markRecordStatus(record, 'PENDING', errorInfo?.message || null, {
+      ...(errorInfo?.raw || {}),
+      sync_meta_cooldown: true,
+      sync_meta_cooldown_until: activeCooldown?.blockedUntil || null,
+      ...(uploadBatchId ? { sync_upload_batch_id: uploadBatchId } : {}),
+    });
   }
 
   private async markRecordsMetaCooldownPending(
@@ -547,8 +551,9 @@ export class MetaMediaUploadService {
     cooldown?: any,
   ) {
     const uniqueRecords = Array.from(
-      new Map(records.filter(Boolean).map((record) => [record.id, record]))
-        .values(),
+      new Map(
+        records.filter(Boolean).map((record) => [record.id, record]),
+      ).values(),
     );
     if (uniqueRecords.length === 0) return;
 
@@ -1504,12 +1509,26 @@ export class MetaMediaUploadService {
   }
 
   private buildEligibleRecordWhere(): Prisma.LarkRecordWhereInput {
+    const filters: Prisma.LarkRecordWhereInput[] = [
+      { drive: { drive_permission: true } },
+      this.buildNotUploadedRecordWhere(),
+      this.buildAutoUploadStatusEligibleWhere(),
+    ];
+    const minimumAgeWhere = this.buildMinimumLarkRecordAgeWhere();
+    if (minimumAgeWhere) filters.push(minimumAgeWhere);
+
     return {
-      AND: [
-        { drive: { drive_permission: true } },
-        this.buildNotUploadedRecordWhere(),
-        this.buildAutoUploadStatusEligibleWhere(),
-      ],
+      AND: filters,
+    };
+  }
+
+  private buildMinimumLarkRecordAgeWhere(): Prisma.LarkRecordWhereInput | null {
+    if (this.minLarkRecordAgeMinutes <= 0) return null;
+
+    return {
+      createdAt: {
+        lte: new Date(Date.now() - this.minLarkRecordAgeMinutes * 60 * 1000),
+      },
     };
   }
 
