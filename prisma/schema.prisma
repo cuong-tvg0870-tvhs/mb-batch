@@ -154,9 +154,9 @@ model User {
   deletedAt   DateTime?
   deletedById String?
 
-  activities UserActivity[]
-  contributions          Contribution[] @relation("UserContributions")
-  processedContributions Contribution[] @relation("ProcessedContributions")
+  activities             UserActivity[]
+  contributions          Contribution[]    @relation("UserContributions")
+  processedContributions Contribution[]    @relation("ProcessedContributions")
   proposals              AccountProposal[] @relation("UserProposals")
   processedProposals     AccountProposal[] @relation("ProcessedProposals")
   helpChatSessions       HelpChatSession[] @relation("UserHelpChatSessions")
@@ -2105,14 +2105,164 @@ model ExportPreset {
   userId       String
   user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   name         String
-  exportType   String   // e.g. campaign, adset, ad, creative, asset
-  filterConfig Json     // dateRange, adAccountIds, dynamicFilters
-  columnConfig Json     // fieldsToExport array
+  exportType   String // e.g. campaign, adset, ad, creative, asset
+  filterConfig Json // dateRange, adAccountIds, dynamicFilters
+  columnConfig Json // fieldsToExport array
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
   @@unique([userId, exportType, name])
   @@index([userId, exportType])
+}
+
+enum ContributionType {
+  PRAISE
+  CRITICISM
+  SUGGESTION
+}
+
+enum ContributionStatus {
+  PENDING
+  RECEIVED
+  PROCESSED
+  FEEDBACKED
+  REJECTED
+  CLOSED
+  REOPENED
+}
+
+model Contribution {
+  id                  String             @id @default(uuid())
+  userId              String
+  user                User               @relation("UserContributions", fields: [userId], references: [id], onDelete: Cascade)
+  type                ContributionType
+  title               String
+  content             String             @db.Text
+  attachments         String[]           @default([])
+  status              ContributionStatus @default(PENDING)
+  adminFeedback       String?            @db.Text
+  processedById       String?
+  processedBy         User?              @relation("ProcessedContributions", fields: [processedById], references: [id], onDelete: SetNull)
+  processedAt         DateTime?
+  expectedProcessedAt DateTime?
+  userFeedback        Json?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+
+  @@index([userId])
+  @@index([type])
+  @@index([status])
+}
+
+model HelpChapter {
+  id        String   @id @default(uuid())
+  slug      String   @unique
+  title     String
+  content   String   @db.Text
+  subItems  Json // Array of sub-sections: [{ "title": "...", "anchor": "..." }]
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model HelpAiKnowledgeSnapshot {
+  id          String   @id @default(uuid())
+  sourceHash  String   @unique
+  content     String   @db.Text
+  status      String   @default("READY")
+  generatedBy String   @default("mb-batch")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model HelpAiApiKey {
+  id                   String    @id @default(uuid())
+  provider             String    @default("gemini")
+  label                String?
+  apiKey               String    @db.Text
+  keyHash              String    @unique
+  status               String    @default("ACTIVE")
+  blockedUntil         DateTime?
+  blockedReason        String?   @db.Text
+  quotaResetAt         DateTime?
+  requestsUsed         Int       @default(0)
+  tokensUsed           Int       @default(0)
+  usageWindowStartedAt DateTime?
+  usageWindowResetAt   DateTime?
+  dailyRequestLimit    Int?
+  dailyTokenLimit      Int?
+  lastUsedAt           DateTime?
+  lastSuccessAt        DateTime?
+  lastFailureAt        DateTime?
+  lastErrorCode        String?
+  lastErrorMessage     String?   @db.Text
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  @@index([provider, status, blockedUntil])
+  @@index([usageWindowResetAt])
+}
+
+model HelpChatSession {
+  id        String            @id @default(uuid())
+  userId    String
+  user      User              @relation("UserHelpChatSessions", fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  messages  HelpChatMessage[]
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+  deletedAt DateTime?
+
+  @@index([userId, deletedAt])
+  @@index([updatedAt])
+}
+
+model HelpChatMessage {
+  id        String          @id @default(uuid())
+  sessionId String
+  session   HelpChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  role      String
+  content   String          @db.Text
+  createdAt DateTime        @default(now())
+
+  @@index([sessionId, createdAt])
+}
+
+enum ProposalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model AccountProposal {
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation("UserProposals", fields: [userId], references: [id], onDelete: Cascade)
+
+  targetUserEmail String
+  targetUserName  String
+  employeeId      String?
+  rank            String?
+  project         String?
+
+  adAccounts Json?
+  fanpages   Json?
+  pixels     Json?
+  bms        Json?
+
+  status        ProposalStatus @default(PENDING)
+  checkResult   Json?
+  adminFeedback String?        @db.Text
+
+  processedById String?
+  processedBy   User?     @relation("ProcessedProposals", fields: [processedById], references: [id], onDelete: SetNull)
+  processedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([status])
 }
 
 // ==========================================================================
@@ -2527,6 +2677,79 @@ model AutomationRuleRunItem {
   @@index([status, createdAt(sort: Desc)])
 }
 
+// ==========================================================================
+// AUTOMATION INSIGHT CACHE
+// Persistent historical insight cache để giảm tải Meta API.
+// Granularity = apiLevel (adset|ad); rollup lên campaign chạy ở read-time.
+// Scalar accountId (không @relation sang Account legacy). Migration:
+// `add_automation_insight_cache` (raw SQL — KHÔNG dùng `prisma migrate dev`).
+// ==========================================================================
+
+enum AutomationInsightApiLevel {
+  ADSET
+  AD
+}
+
+enum AutomationInsightBackfillStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+/// Daily settled insight bucket (1 dòng/entity/ngày). Chỉ lưu ngày đã "đóng
+/// băng" (date < boundary B = today − freezeDays). `metrics` (Json) giữ raw
+/// additive inputs cần cho merge (spend/impressions/clicks/inline_link_clicks/
+/// outbound_clicks/results + actions[]/action_values[]/video_*_watched_actions).
+/// KHÔNG lưu ratio (recompute từ input) và KHÔNG lưu reach/frequency (dedup
+/// theo cửa sổ → cộng ngày sẽ sai). Một ngày fetch DUY NHẤT 1 lần (immutable).
+model AutomationInsightDaily {
+  id        String                    @id @default(uuid())
+  accountId String
+  apiLevel  AutomationInsightApiLevel
+  entityId  String
+  date      String // YYYY-MM-DD (date_start == date_stop)
+  metrics   Json
+  createdAt DateTime                  @default(now())
+
+  @@unique([accountId, apiLevel, entityId, date])
+  @@index([accountId, apiLevel, date])
+}
+
+/// Tiến độ/observability của backfill per (account, apiLevel). KHÔNG phải nguồn
+/// sự thật về coverage — nguồn sự thật là các ngày thực có trong
+/// AutomationInsightDaily. Job gap-driven tự reconcile required vs present.
+model AutomationInsightBackfillState {
+  id                String                          @id @default(uuid())
+  accountId         String
+  apiLevel          AutomationInsightApiLevel
+  status            AutomationInsightBackfillStatus @default(PENDING)
+  targetSinceDate   String
+  oldestSettledDate String?
+  lastSettledDate   String?
+  lastRevalidatedAt DateTime?
+  errorMessage      String?
+  updatedAt         DateTime                        @updatedAt
+
+  @@unique([accountId, apiLevel])
+}
+
+/// (PHASE 2) Aggregate đóng băng cho quá khứ sâu của timeframe `maximum`
+/// (lifetime): gộp các ngày [creation .. throughDate] vào 1 dòng để khỏi lưu
+/// daily cho toàn bộ lifetime. `maximum` = deepAggregate + Σ daily + live.
+model AutomationInsightDeepAggregate {
+  id          String                    @id @default(uuid())
+  accountId   String
+  apiLevel    AutomationInsightApiLevel
+  entityId    String
+  throughDate String
+  metrics     Json
+  createdAt   DateTime                  @default(now())
+  updatedAt   DateTime                  @updatedAt
+
+  @@unique([accountId, apiLevel, entityId])
+}
+
 enum MetaConnectionStatus {
   ACTIVE
   REVOKED
@@ -2557,155 +2780,5 @@ model MetaConnection {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@index([status])
-}
-
-enum ContributionType {
-  PRAISE
-  CRITICISM
-  SUGGESTION
-}
-
-enum ContributionStatus {
-  PENDING
-  RECEIVED
-  PROCESSED
-  FEEDBACKED
-  REJECTED
-  CLOSED
-  REOPENED
-}
-
-model Contribution {
-  id            String             @id @default(uuid())
-  userId        String
-  user          User               @relation("UserContributions", fields: [userId], references: [id], onDelete: Cascade)
-  type          ContributionType
-  title         String
-  content       String             @db.Text
-  attachments   String[]           @default([])
-  status        ContributionStatus @default(PENDING)
-  adminFeedback String?            @db.Text
-  processedById String?
-  processedBy   User?              @relation("ProcessedContributions", fields: [processedById], references: [id], onDelete: SetNull)
-  processedAt         DateTime?
-  expectedProcessedAt DateTime?
-  userFeedback        Json?
-  createdAt           DateTime           @default(now())
-  updatedAt     DateTime           @updatedAt
-
-  @@index([userId])
-  @@index([type])
-  @@index([status])
-}
-
-model HelpChapter {
-  id        String   @id @default(uuid())
-  slug      String   @unique
-  title     String
-  content   String   @db.Text
-  subItems  Json     // Array of sub-sections: [{ "title": "...", "anchor": "..." }]
-  order     Int      @default(0)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}
-
-model HelpAiKnowledgeSnapshot {
-  id          String   @id @default(uuid())
-  sourceHash  String   @unique
-  content     String   @db.Text
-  status      String   @default("READY")
-  generatedBy String   @default("mb-batch")
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-}
-
-model HelpAiApiKey {
-  id                   String    @id @default(uuid())
-  provider             String    @default("gemini")
-  label                String?
-  apiKey               String    @db.Text
-  keyHash              String    @unique
-  status               String    @default("ACTIVE")
-  blockedUntil         DateTime?
-  blockedReason        String?   @db.Text
-  quotaResetAt         DateTime?
-  requestsUsed         Int       @default(0)
-  tokensUsed           Int       @default(0)
-  usageWindowStartedAt DateTime?
-  usageWindowResetAt   DateTime?
-  dailyRequestLimit    Int?
-  dailyTokenLimit      Int?
-  lastUsedAt           DateTime?
-  lastSuccessAt        DateTime?
-  lastFailureAt        DateTime?
-  lastErrorCode        String?
-  lastErrorMessage     String?   @db.Text
-  createdAt            DateTime  @default(now())
-  updatedAt            DateTime  @updatedAt
-
-  @@index([provider, status, blockedUntil])
-  @@index([usageWindowResetAt])
-}
-
-model HelpChatSession {
-  id        String    @id @default(uuid())
-  userId    String
-  user      User      @relation("UserHelpChatSessions", fields: [userId], references: [id], onDelete: Cascade)
-  title     String
-  messages  HelpChatMessage[]
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  deletedAt DateTime?
-
-  @@index([userId, deletedAt])
-  @@index([updatedAt])
-}
-
-model HelpChatMessage {
-  id        String          @id @default(uuid())
-  sessionId String
-  session   HelpChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  role      String
-  content   String          @db.Text
-  createdAt DateTime        @default(now())
-
-  @@index([sessionId, createdAt])
-}
-
-enum ProposalStatus {
-  PENDING
-  APPROVED
-  REJECTED
-}
-
-model AccountProposal {
-  id              String         @id @default(uuid())
-  userId          String
-  user            User           @relation("UserProposals", fields: [userId], references: [id], onDelete: Cascade)
-  
-  targetUserEmail String
-  targetUserName  String
-  employeeId      String?
-  rank            String?
-  project         String?
-  
-  adAccounts      Json?
-  fanpages        Json?
-  pixels          Json?
-  bms             Json?
-  
-  status          ProposalStatus @default(PENDING)
-  checkResult     Json?
-  adminFeedback   String?        @db.Text
-  
-  processedById   String?
-  processedBy     User?          @relation("ProcessedProposals", fields: [processedById], references: [id], onDelete: SetNull)
-  processedAt     DateTime?
-  
-  createdAt       DateTime       @default(now())
-  updatedAt       DateTime       @updatedAt
-
-  @@index([userId])
   @@index([status])
 }
