@@ -200,8 +200,10 @@ export class InsightSyncScheduler implements OnModuleInit {
         { accountId: account.id },
         {
           jobId: `${INSIGHT_SYNC_JOBS.SYNC_MISSING_DAILY}:${account.id}:${bucket}`,
-          attempts: 2,
-          backoff: { type: 'exponential', delay: 0 }, // 5 mins
+          attempts: 3,
+          // Real backoff (was delay:0, which retried instantly and usually hit
+          // the same transient Meta error). 5 min, doubling.
+          backoff: { type: 'exponential', delay: 300000 },
           removeOnComplete: true,
           removeOnFail: false,
         },
