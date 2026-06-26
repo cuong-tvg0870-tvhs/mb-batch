@@ -6,17 +6,28 @@ import {
   Prisma,
 } from '@prisma/client';
 import dayjs from 'dayjs';
+import utc from 'dayjs/plugin/utc';
+import timezone from 'dayjs/plugin/timezone';
 import { PrismaBatchHelper } from '../../common/helpers/prisma-batch.helper';
 import {
   chunk,
   executeDbWithRetry,
   extractCampaignMetrics,
+  isPermissionError,
   parseMetaError,
   sleep,
 } from '../../common/utils';
 import { MetaApiService } from '../meta-api/meta-api.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { InsightSyncLevel, InsightSyncRange } from './insight-sync.constants';
+
+dayjs.extend(utc);
+dayjs.extend(timezone);
+
+// Default ad-account timezone (matches the cron timeZone). Used when an account
+// has no timezone stored, so date windows align with how Meta keys date_start.
+const DEFAULT_ACCOUNT_TZ = 'Asia/Ho_Chi_Minh';
+const MAX_SENTINEL_DATE = '1975-01-01';
 
 @Injectable()
 export class InsightSyncService {
@@ -45,26 +56,117 @@ export class InsightSyncService {
 
     if (targetLevels.length === 0) return;
 
+    const tz = await this.getAccountTimezone(accountId);
+
     // Only the near-real-time TODAY job should call Meta. Other range jobs
     // rebuild materialized rollups locally from DAILY records.
     if (ranges.includes(InsightSyncRange.TODAY)) {
       for (const level of targetLevels) {
-        await this.syncRecentDailyInsights(accountId, level);
+        // Isolate the Meta fetch per level: one level failing (or a token
+        // problem) must NOT skip the local rollups below, which rebuild every
+        // range from whatever DAILY data already exists in the DB.
+        try {
+          await this.syncRecentDailyInsights(accountId, level, tz);
+        } catch (error) {
+          if (isPermissionError(error)) {
+            this.logger.warn(
+              `[${accountId}] 🔑 Permission/token error fetching ${level} DAILY. Marking account for reauth.`,
+            );
+            await executeDbWithRetry(() =>
+              this.prisma.account.update({
+                where: { id: accountId },
+                data: { needsReauth: true },
+              }),
+            );
+          } else {
+            this.logger.error(
+              `[${accountId}] ❌ DAILY fetch failed for ${level}: ${parseMetaError(error).message}. Continuing with local rollups.`,
+            );
+          }
+        }
       }
     }
 
     for (const level of targetLevels) {
-      await this.rollupLevelInsights(accountId, level, ranges);
+      try {
+        await this.rollupLevelInsights(accountId, level, ranges, tz);
+      } catch (error) {
+        this.logger.error(
+          `[${accountId}] ❌ Rollup failed for ${level}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
 
     if (targetLevels.includes(InsightSyncLevel.AD)) {
-      await this.aggregateCreativeInsights(accountId, ranges);
+      try {
+        await this.aggregateCreativeInsights(accountId, ranges, tz);
+      } catch (error) {
+        this.logger.error(
+          `[${accountId}] ❌ Creative aggregation failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
   }
 
-  private getWindowForRange(range: InsightSyncRange | InsightRange) {
-    const todayStr = dayjs().format('YYYY-MM-DD');
-    const yesterdayStr = dayjs().subtract(1, 'day').format('YYYY-MM-DD');
+  /**
+   * Resolves the ad-account timezone so date windows (today/3d/7d/max) align
+   * with how Meta keys date_start for that account. Falls back to the default
+   * cron timezone when the account has none stored.
+   */
+  private async getAccountTimezone(accountId: string): Promise<string> {
+    try {
+      const account = await this.prisma.account.findUnique({
+        where: { id: accountId },
+        select: { timezone: true },
+      });
+      return this.normalizeTimezone(account?.timezone);
+    } catch {
+      return DEFAULT_ACCOUNT_TZ;
+    }
+  }
+
+  private normalizeTimezone(tz?: string | null): string {
+    if (!tz) return DEFAULT_ACCOUNT_TZ;
+    // Validate against the IANA db; an invalid name throws in dayjs.tz().
+    try {
+      dayjs().tz(tz);
+      return tz;
+    } catch {
+      return DEFAULT_ACCOUNT_TZ;
+    }
+  }
+
+  private nowInTz(tz: string) {
+    return dayjs().tz(tz);
+  }
+
+  private shouldSkipMaxRollup(
+    existingMax: { dateStart?: string | null } | null | undefined,
+    matchingDaily: Array<{ dateStart?: string | null }>,
+  ): boolean {
+    // No authoritative existing MAX -> always (re)compute.
+    if (!existingMax?.dateStart) return false;
+    // A sentinel/placeholder MAX (never had real DAILY) is NOT authoritative;
+    // allow it to be recomputed so a previously-zeroed MAX can self-heal.
+    if (existingMax.dateStart === MAX_SENTINEL_DATE) return false;
+
+    const firstDailyDate = matchingDaily
+      .map((insight) => insight.dateStart)
+      .filter(Boolean)
+      .sort()[0];
+
+    // Shrink-protection: if the DAILY currently loaded doesn't reach as far back
+    // as the existing MAX, keep the existing (wider) MAX instead of truncating.
+    return !firstDailyDate || firstDailyDate > existingMax.dateStart;
+  }
+
+  private getWindowForRange(
+    range: InsightSyncRange | InsightRange,
+    tz: string = DEFAULT_ACCOUNT_TZ,
+  ) {
+    const now = this.nowInTz(tz);
+    const todayStr = now.format('YYYY-MM-DD');
+    const yesterdayStr = now.subtract(1, 'day').format('YYYY-MM-DD');
 
     if (range === InsightSyncRange.TODAY || range === InsightRange.TODAY) {
       return {
@@ -77,7 +179,7 @@ export class InsightSyncService {
     if (range === InsightSyncRange.LAST_3D || range === InsightRange.DAY_3) {
       return {
         range: InsightRange.DAY_3,
-        dateStart: dayjs().subtract(3, 'day').format('YYYY-MM-DD'),
+        dateStart: now.subtract(3, 'day').format('YYYY-MM-DD'),
         dateStop: yesterdayStr,
       };
     }
@@ -85,7 +187,7 @@ export class InsightSyncService {
     if (range === InsightSyncRange.LAST_7D || range === InsightRange.DAY_7) {
       return {
         range: InsightRange.DAY_7,
-        dateStart: dayjs().subtract(7, 'day').format('YYYY-MM-DD'),
+        dateStart: now.subtract(7, 'day').format('YYYY-MM-DD'),
         dateStop: yesterdayStr,
       };
     }
@@ -97,8 +199,11 @@ export class InsightSyncService {
     };
   }
 
-  private getRequestedWindows(ranges: InsightSyncRange[]) {
-    return ranges.map((range) => this.getWindowForRange(range));
+  private getRequestedWindows(
+    ranges: InsightSyncRange[],
+    tz: string = DEFAULT_ACCOUNT_TZ,
+  ) {
+    return ranges.map((range) => this.getWindowForRange(range, tz));
   }
 
   private getRangePointerField(range: InsightRange): string | null {
@@ -319,6 +424,7 @@ export class InsightSyncService {
   private async syncRecentDailyInsights(
     accountId: string,
     level: InsightSyncLevel,
+    tz: string = DEFAULT_ACCOUNT_TZ,
   ) {
     this.logger.log(`[${accountId}] Syncing recent DAILY ${level} insights...`);
 
@@ -329,8 +435,9 @@ export class InsightSyncService {
     const levelEnum = this.mapLevelToEnum(level);
     const prismaHelper = new PrismaBatchHelper(this.prisma);
 
-    const since = dayjs().subtract(7, 'day').format('YYYY-MM-DD');
-    const until = dayjs().format('YYYY-MM-DD');
+    const now = this.nowInTz(tz);
+    const since = now.subtract(7, 'day').format('YYYY-MM-DD');
+    const until = now.format('YYYY-MM-DD');
 
     const entities = (await executeDbWithRetry(() =>
       (this.prisma[parentModel] as any).findMany({
@@ -357,64 +464,77 @@ export class InsightSyncService {
     const chunkSize = this.getDefaultInsightChunkSize(level);
     const idChunks = chunk(entityIds, chunkSize) as string[][];
 
+    let failedChunks = 0;
     for (let i = 0; i < idChunks.length; i++) {
       const idChunk = idChunks[i];
       this.logger.log(
         `[${accountId}] Fetching DAILY ${level}: chunk ${i + 1}/${idChunks.length}.`,
       );
 
-      const insights = await this.fetchDailyInsightsAdaptive(
-        accountId,
-        level,
-        idChunk,
-        { since, until },
-      );
+      try {
+        const insights = await this.fetchDailyInsightsAdaptive(
+          accountId,
+          level,
+          idChunk,
+          { since, until },
+        );
 
-      const dailyData = (insights || [])
-        .filter((insight: any) => insight[entityIdField])
-        .map((insight: any) => {
-          const metrics = extractCampaignMetrics(insight);
-          const { toPrismaJson } = require('../../common/utils');
-          return {
-            [relationFieldId]: insight[entityIdField],
-            level: levelEnum,
-            range: InsightRange.DAILY,
-            dateStart: insight.date_start,
-            dateStop: insight.date_stop,
-            ...metrics,
-            rawPayload: toPrismaJson(insight),
-          };
-        });
+        const dailyData = (insights || [])
+          .filter((insight: any) => insight[entityIdField])
+          .map((insight: any) => {
+            const metrics = extractCampaignMetrics(insight);
+            const { toPrismaJson } = require('../../common/utils');
+            return {
+              [relationFieldId]: insight[entityIdField],
+              level: levelEnum,
+              range: InsightRange.DAILY,
+              dateStart: insight.date_start,
+              dateStop: insight.date_stop,
+              ...metrics,
+              rawPayload: toPrismaJson(insight),
+            };
+          });
 
-      if (dailyData.length > 0) {
-        await executeDbWithRetry(async () => {
-          await prismaHelper.upsertMany(
-            dailyData,
-            (item: any) => {
-              const {
-                [relationFieldId]: rId,
-                dateStart,
-                range,
-                ...data
-              } = item;
-              return (this.prisma[prismaModel] as any).upsert({
-                where: {
-                  [`${relationFieldId}_dateStart_range`]: {
-                    [relationFieldId]: rId,
-                    dateStart,
-                    range,
+        if (dailyData.length > 0) {
+          await executeDbWithRetry(async () => {
+            await prismaHelper.upsertMany(
+              dailyData,
+              (item: any) => {
+                const {
+                  [relationFieldId]: rId,
+                  dateStart,
+                  range,
+                  ...data
+                } = item;
+                return (this.prisma[prismaModel] as any).upsert({
+                  where: {
+                    [`${relationFieldId}_dateStart_range`]: {
+                      [relationFieldId]: rId,
+                      dateStart,
+                      range,
+                    },
                   },
-                },
-                update: data,
-                create: item,
-              });
-            },
-            50,
-          );
-        });
+                  update: data,
+                  create: item,
+                });
+              },
+              50,
+            );
+          });
 
-        this.logger.log(
-          `[${accountId}] Saved ${dailyData.length} DAILY ${level} records.`,
+          this.logger.log(
+            `[${accountId}] Saved ${dailyData.length} DAILY ${level} records.`,
+          );
+        }
+      } catch (error) {
+        // Permission/token errors affect the whole account -> bubble up so the
+        // caller flags needsReauth. Other (transient/too-much-data) chunk
+        // failures are isolated: skip this chunk and keep the rest so the local
+        // rollups still rebuild from the data we did get. The hourly job heals.
+        if (isPermissionError(error)) throw error;
+        failedChunks++;
+        this.logger.error(
+          `[${accountId}] ❌ DAILY ${level} chunk ${i + 1}/${idChunks.length} failed: ${parseMetaError(error).message}. Skipping chunk.`,
         );
       }
 
@@ -422,14 +542,21 @@ export class InsightSyncService {
         await sleep(Number(process.env.INSIGHT_SYNC_CHUNK_SLEEP_MS || 750));
       }
     }
+
+    if (failedChunks > 0) {
+      this.logger.warn(
+        `[${accountId}] ⚠️ ${level}: ${failedChunks}/${idChunks.length} DAILY chunks failed (partial fetch). Rollups will use available DAILY rows.`,
+      );
+    }
   }
 
   private async rollupLevelInsights(
     accountId: string,
     level: InsightSyncLevel,
     ranges: InsightSyncRange[],
+    tz: string = DEFAULT_ACCOUNT_TZ,
   ) {
-    const windows = this.getRequestedWindows(ranges);
+    const windows = this.getRequestedWindows(ranges, tz);
     if (windows.length === 0) return;
 
     this.logger.log(
@@ -548,15 +675,13 @@ export class InsightSyncService {
           );
 
           if (window.range === InsightRange.MAX) {
-            const existingMax = existingMaxMap.get(parent.id);
-            const firstDailyDate = matchingDaily
-              .map((insight) => insight.dateStart)
-              .sort()[0];
+            // Never write a zeroed sentinel MAX row when there is no DAILY to
+            // sum: that placeholder ('1975-01-01') would permanently freeze MAX
+            // at 0 via the shrink-protection guard. Leave the existing MAX as-is.
+            if (matchingDaily.length === 0) continue;
 
-            if (
-              existingMax &&
-              (!firstDailyDate || firstDailyDate > existingMax.dateStart)
-            ) {
+            const existingMax = existingMaxMap.get(parent.id);
+            if (this.shouldSkipMaxRollup(existingMax, matchingDaily)) {
               continue;
             }
           }
@@ -570,7 +695,7 @@ export class InsightSyncService {
           const dateStart =
             window.range === InsightRange.MAX
               ? matchingDaily.map((insight) => insight.dateStart).sort()[0] ||
-                '1975-01-01'
+                MAX_SENTINEL_DATE
               : window.dateStart;
 
           const dateStop =
@@ -1188,11 +1313,12 @@ export class InsightSyncService {
       InsightSyncRange.LAST_7D,
       InsightSyncRange.MAX,
     ],
+    tz: string = DEFAULT_ACCOUNT_TZ,
   ) {
     this.logger.log(`[${accountId}] Starting CreativeInsight local rollup...`);
     const start = Date.now();
     const prismaHelper = new PrismaBatchHelper(this.prisma);
-    const windows = this.getRequestedWindows(ranges);
+    const windows = this.getRequestedWindows(ranges, tz);
 
     if (windows.length === 0) return;
 
@@ -1314,15 +1440,12 @@ export class InsightSyncService {
           );
 
           if (window.range === InsightRange.MAX) {
-            const existingMax = existingMaxMap.get(creative.id);
-            const firstDailyDate = matchingDaily
-              .map((insight) => insight.dateStart)
-              .sort()[0];
+            // Don't write a zeroed sentinel MAX row when there is no DAILY to
+            // sum (it would permanently freeze creative MAX at 0).
+            if (matchingDaily.length === 0) continue;
 
-            if (
-              existingMax &&
-              (!firstDailyDate || firstDailyDate > existingMax.dateStart)
-            ) {
+            const existingMax = existingMaxMap.get(creative.id);
+            if (this.shouldSkipMaxRollup(existingMax, matchingDaily)) {
               continue;
             }
           }
@@ -1337,7 +1460,7 @@ export class InsightSyncService {
           const dateStart =
             window.range === InsightRange.MAX
               ? matchingDaily.map((insight) => insight.dateStart).sort()[0] ||
-                '1975-01-01'
+                MAX_SENTINEL_DATE
               : window.dateStart;
 
           const dateStop =
@@ -1671,6 +1794,8 @@ export class InsightSyncService {
       InsightSyncLevel.AD,
     ];
 
+    const tz = await this.getAccountTimezone(accountId);
+
     try {
       for (const level of levels) {
         const parentModel = this.getParentModel(level);
@@ -1678,8 +1803,10 @@ export class InsightSyncService {
         const entityIdField = this.getEntityIdField(level);
         const prismaModel = this.getPrismaModel(level);
 
-        const todayStr = dayjs().format('YYYY-MM-DD');
-        const backfillSince = dayjs().subtract(30, 'day').format('YYYY-MM-DD');
+        const todayStr = this.nowInTz(tz).format('YYYY-MM-DD');
+        const backfillSince = this.nowInTz(tz)
+          .subtract(30, 'day')
+          .format('YYYY-MM-DD');
 
         // 1. Fetch all relevant entities for recent bounded backfill.
         const selectFields: Record<string, boolean> = {
@@ -1825,7 +1952,7 @@ export class InsightSyncService {
                 });
 
               // Filter only records that are actually missing or recent (last 3 days to resolve attribution lag)
-              const threeDaysAgoStr = dayjs()
+              const threeDaysAgoStr = this.nowInTz(tz)
                 .subtract(2, 'day')
                 .format('YYYY-MM-DD');
 
@@ -1886,9 +2013,9 @@ export class InsightSyncService {
         InsightSyncRange.MAX,
       ];
       for (const level of levels) {
-        await this.rollupLevelInsights(accountId, level, rollupRanges);
+        await this.rollupLevelInsights(accountId, level, rollupRanges, tz);
       }
-      await this.aggregateCreativeInsights(accountId, rollupRanges);
+      await this.aggregateCreativeInsights(accountId, rollupRanges, tz);
 
       const duration = ((Date.now() - start) / 1000).toFixed(2);
       this.logger.log(
@@ -1919,14 +2046,15 @@ export class InsightSyncService {
     });
 
     for (const account of rollupAccounts) {
+      const tz = await this.getAccountTimezone(account.id);
       for (const level of [
         InsightSyncLevel.CAMPAIGN,
         InsightSyncLevel.ADSET,
         InsightSyncLevel.AD,
       ]) {
-        await this.rollupLevelInsights(account.id, level, shortRanges);
+        await this.rollupLevelInsights(account.id, level, shortRanges, tz);
       }
-      await this.aggregateCreativeInsights(account.id, shortRanges);
+      await this.aggregateCreativeInsights(account.id, shortRanges, tz);
     }
 
     const rollupDuration = ((Date.now() - start) / 1000).toFixed(2);

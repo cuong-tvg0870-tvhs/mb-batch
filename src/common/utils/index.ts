@@ -455,17 +455,20 @@ export async function fetchAll(
           continue;
         }
 
-        // Với các lỗi khác (bao gồm Fatal): Log lại và thoát vòng lặp để trả về result hiện có
+        // Với các lỗi khác (bao gồm "reduce the amount of data", code 1/2, permission):
+        // KHÔNG nuốt lỗi rồi trả về result từng phần (gây thiếu DAILY -> blank/sai trên màn hình).
+        // Ném lỗi gốc ra ngoài để caller xử lý: adaptive splitter chia nhỏ request,
+        // per-chunk handler bỏ qua chunk lỗi, hoặc đánh dấu needsReauth khi permission.
         console.error(
-          `[Meta Fetch Error] Dừng fetch tại cursor. Lỗi: ${metaErr.message}`,
+          `[Meta Fetch Error] Surfacing error after ${retry} retries: ${metaErr.message}`,
           metaErr,
         );
-        break;
+        throw err;
       }
     }
   } catch (globalErr) {
-    // Catch này dùng cho các lỗi logic bên ngoài vòng try-catch nhỏ
-    console.error('[Meta Global Error]', globalErr);
+    // Không nuốt lỗi: propagate để BullMQ retry / caller xử lý thay vì trả về result thiếu.
+    throw globalErr;
   }
 
   return result;
