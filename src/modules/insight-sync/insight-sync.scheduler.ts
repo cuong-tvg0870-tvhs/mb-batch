@@ -53,11 +53,9 @@ export class InsightSyncScheduler implements OnModuleInit {
   }
 
   private async triggerAllSyncsSequentially() {
-    this.logger.log('📢 Triggering all insight syncs sequentially (Today, 3D, 7D, Max, Missing Daily, Audience, Inactive Sliding)...');
+    this.logger.log('📢 Triggering all insight syncs sequentially (Today/3D/7D, Max, Missing Daily, Audience, Inactive Sliding)...');
     try {
       await this.scheduleTodaySync();
-      await this.schedule3DSync();
-      await this.schedule7DSync();
       await this.scheduleMaxSync();
       await this.scheduleMissingDailySync();
       await this.scheduleAudienceSync();
@@ -69,41 +67,22 @@ export class InsightSyncScheduler implements OnModuleInit {
   }
 
   /**
-   * 🔵 TODAY SYNC
-   * Runs every 1 hour
+   * 🔵 NEAR-REAL-TIME SYNC (Today + 3D + 7D)
+   * Runs every 1 hour. Only TODAY triggers a Meta fetch (last-7-day DAILY); the
+   * 3D/7D rollups are rebuilt locally from that same DAILY in the same pass — no
+   * extra Meta calls — so every short range stays fresh hourly and they never
+   * drift apart. (Replaces the former separate 6h/8h crons.)
    */
   @Cron('0 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async scheduleTodaySync() {
-    this.logger.log('📅 Scheduling Today Insights Sync (1h)...');
+    this.logger.log('📅 Scheduling Near-Real-Time Insights Sync (Today/3D/7D, 1h)...');
     await this.queueSyncForAllAccounts(
       [InsightSyncLevel.CAMPAIGN, InsightSyncLevel.ADSET, InsightSyncLevel.AD],
-      [InsightSyncRange.TODAY],
-    );
-  }
-
-  /**
-   * 🟢 LAST 3D SYNC
-   * Runs every 6 hours
-   */
-  @Cron('0 */6 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  async schedule3DSync() {
-    this.logger.log('📅 Scheduling Last 3D Insights Sync (6h)...');
-    await this.queueSyncForAllAccounts(
-      [InsightSyncLevel.CAMPAIGN, InsightSyncLevel.ADSET, InsightSyncLevel.AD],
-      [InsightSyncRange.LAST_3D],
-    );
-  }
-
-  /**
-   * 🟡 LAST 7D SYNC
-   * Runs every 8 hours
-   */
-  @Cron('0 */8 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  async schedule7DSync() {
-    this.logger.log('📅 Scheduling Last 7D Insights Sync (8h)...');
-    await this.queueSyncForAllAccounts(
-      [InsightSyncLevel.CAMPAIGN, InsightSyncLevel.ADSET, InsightSyncLevel.AD],
-      [InsightSyncRange.LAST_7D],
+      [
+        InsightSyncRange.TODAY,
+        InsightSyncRange.LAST_3D,
+        InsightSyncRange.LAST_7D,
+      ],
     );
   }
 
