@@ -2106,4 +2106,267 @@ export class InsightSyncService {
       `✅ Finished local sliding window rollup job in ${rollupDuration}s.`,
     );
   }
+
+  /**
+   * 🟣 LIFETIME DAILY BACKFILL (gradual)
+   *
+   * Fills the gap between an entity's start (campaign/adset startTime, ad
+   * createdAt) and its earliest DAILY row in the DB, so MAX reflects true
+   * lifetime spend instead of only the recent 7/30-day window. Designed to run
+   * as a low-frequency cron that processes a BOUNDED number of entities per run
+   * (INSIGHT_LIFETIME_BACKFILL_ENTITIES_PER_RUN), so the historical fill spreads
+   * over several runs without spiking the Meta API quota.
+   *
+   * Convergence without a schema watermark: after backfilling an entity we make
+   * sure a DAILY row exists at its floor date (a single synthesized zero row if
+   * Meta returned nothing for that day). Once a row exists at-or-before the
+   * floor, the entity no longer shows a gap and is skipped on subsequent runs —
+   * so it never re-fetches its whole lifetime.
+   */
+  async backfillLifetimeDailyInsights(accountId: string) {
+    this.logger.log(
+      `[${accountId}] 🟣 Starting gradual lifetime DAILY backfill...`,
+    );
+    const start = Date.now();
+
+    const tz = await this.getAccountTimezone(accountId);
+    const todayStr = this.nowInTz(tz).format('YYYY-MM-DD');
+    const maxEntitiesPerRun = Number(
+      process.env.INSIGHT_LIFETIME_BACKFILL_ENTITIES_PER_RUN || 50,
+    );
+    const subWindowDays = Number(
+      process.env.INSIGHT_LIFETIME_BACKFILL_WINDOW_DAYS || 90,
+    );
+
+    const levels = [
+      InsightSyncLevel.CAMPAIGN,
+      InsightSyncLevel.ADSET,
+      InsightSyncLevel.AD,
+    ];
+    const touchedLevels: InsightSyncLevel[] = [];
+
+    try {
+      for (const level of levels) {
+        const parentModel = this.getParentModel(level);
+        const relationFieldId = this.getRelationField(level);
+        const entityIdField = this.getEntityIdField(level);
+        const prismaModel = this.getPrismaModel(level);
+        const levelEnum = this.mapLevelToEnum(level);
+        const prismaHelper = new PrismaBatchHelper(this.prisma);
+
+        const selectFields: Record<string, boolean> = {
+          id: true,
+          createdAt: true,
+        };
+        if (level !== InsightSyncLevel.AD) selectFields.startTime = true;
+
+        const entities = (await executeDbWithRetry(() =>
+          (this.prisma[parentModel] as any).findMany({
+            where: {
+              accountId,
+              status: { in: ['ACTIVE', 'IN_PROCESS', 'PAUSED', 'ARCHIVED'] },
+            },
+            select: selectFields,
+          }),
+        )) as Array<{ id: string; createdAt: Date; startTime?: Date | null }>;
+
+        if (entities.length === 0) continue;
+
+        // Earliest existing DAILY date per entity (single grouped query).
+        const grouped = (await (this.prisma[prismaModel] as any).groupBy({
+          by: [relationFieldId],
+          where: {
+            [relationFieldId]: { in: entities.map((e) => e.id) },
+            range: InsightRange.DAILY,
+          },
+          _min: { dateStart: true },
+        })) as Array<Record<string, any>>;
+
+        const earliestMap = new Map<string, string>();
+        for (const g of grouped) {
+          if (g._min?.dateStart) earliestMap.set(g[relationFieldId], g._min.dateStart);
+        }
+
+        // Entities whose lifetime is not yet covered: no DAILY at all, or the
+        // earliest DAILY starts after the entity's floor date.
+        const gapEntities: Array<{ id: string; floor: string; until: string }> =
+          [];
+        for (const entity of entities) {
+          const floorDate = dayjs(entity.startTime || entity.createdAt).format(
+            'YYYY-MM-DD',
+          );
+          if (floorDate > todayStr) continue;
+
+          const earliest = earliestMap.get(entity.id);
+          if (!earliest) {
+            gapEntities.push({ id: entity.id, floor: floorDate, until: todayStr });
+          } else if (earliest > floorDate) {
+            const until = dayjs(earliest)
+              .subtract(1, 'day')
+              .format('YYYY-MM-DD');
+            gapEntities.push({ id: entity.id, floor: floorDate, until });
+          }
+
+          if (gapEntities.length >= maxEntitiesPerRun) break;
+        }
+
+        if (gapEntities.length === 0) {
+          this.logger.log(
+            `[${accountId}] ${level}: no lifetime gaps to backfill.`,
+          );
+          continue;
+        }
+
+        touchedLevels.push(level);
+        this.logger.log(
+          `[${accountId}] ${level}: backfilling ${gapEntities.length} entities (bounded ${maxEntitiesPerRun}/run).`,
+        );
+
+        for (const ent of gapEntities) {
+          // Build sequential sub-windows [floor .. until] of subWindowDays each.
+          const segments: Array<{ since: string; until: string }> = [];
+          let cursor = ent.floor;
+          while (cursor <= ent.until) {
+            let segUntil = dayjs(cursor)
+              .add(subWindowDays - 1, 'day')
+              .format('YYYY-MM-DD');
+            if (segUntil > ent.until) segUntil = ent.until;
+            segments.push({ since: cursor, until: segUntil });
+            cursor = dayjs(segUntil).add(1, 'day').format('YYYY-MM-DD');
+          }
+
+          let hasRowAtFloor = false;
+          for (const seg of segments) {
+            try {
+              const insights = await this.fetchDailyInsightsAdaptive(
+                accountId,
+                level,
+                [ent.id],
+                { since: seg.since, until: seg.until },
+              );
+
+              const dailyData = (insights || [])
+                .filter((insight: any) => insight[entityIdField])
+                .map((insight: any) => {
+                  const metrics = extractCampaignMetrics(insight);
+                  const { toPrismaJson } = require('../../common/utils');
+                  return {
+                    [relationFieldId]: insight[entityIdField],
+                    level: levelEnum,
+                    range: InsightRange.DAILY,
+                    dateStart: insight.date_start,
+                    dateStop: insight.date_stop,
+                    ...metrics,
+                    rawPayload: toPrismaJson(insight),
+                  };
+                });
+
+              if (dailyData.some((d) => d.dateStart <= ent.floor)) {
+                hasRowAtFloor = true;
+              }
+
+              if (dailyData.length > 0) {
+                await executeDbWithRetry(async () => {
+                  await prismaHelper.upsertMany(
+                    dailyData,
+                    (item: any) => {
+                      const {
+                        [relationFieldId]: rId,
+                        dateStart,
+                        range,
+                        ...data
+                      } = item;
+                      return (this.prisma[prismaModel] as any).upsert({
+                        where: {
+                          [`${relationFieldId}_dateStart_range`]: {
+                            [relationFieldId]: rId,
+                            dateStart,
+                            range,
+                          },
+                        },
+                        update: data,
+                        create: item,
+                      });
+                    },
+                    50,
+                  );
+                });
+              }
+            } catch (error) {
+              if (isPermissionError(error)) throw error;
+              this.logger.error(
+                `[${accountId}] ❌ Lifetime backfill ${level} ${ent.id} [${seg.since}..${seg.until}] failed: ${parseMetaError(error).message}. Skipping segment.`,
+              );
+            }
+
+            await sleep(
+              Number(process.env.INSIGHT_LIFETIME_BACKFILL_SLEEP_MS || 1000),
+            );
+          }
+
+          // Watermark: ensure a DAILY row exists at the floor so this entity is
+          // not re-detected as a gap next run. A zero row is truthful (no
+          // activity that day) and contributes 0 to MAX.
+          if (!hasRowAtFloor) {
+            await executeDbWithRetry(() =>
+              (this.prisma[prismaModel] as any).upsert({
+                where: {
+                  [`${relationFieldId}_dateStart_range`]: {
+                    [relationFieldId]: ent.id,
+                    dateStart: ent.floor,
+                    range: InsightRange.DAILY,
+                  },
+                },
+                update: {},
+                create: {
+                  [relationFieldId]: ent.id,
+                  level: levelEnum,
+                  range: InsightRange.DAILY,
+                  dateStart: ent.floor,
+                  dateStop: ent.floor,
+                },
+              }),
+            );
+          }
+        }
+      }
+
+      // Rebuild rollups (esp. MAX) for the levels we touched so the newly
+      // backfilled history is reflected immediately.
+      if (touchedLevels.length > 0) {
+        const ranges = [
+          InsightSyncRange.TODAY,
+          InsightSyncRange.LAST_3D,
+          InsightSyncRange.LAST_7D,
+          InsightSyncRange.MAX,
+        ];
+        for (const level of touchedLevels) {
+          await this.rollupLevelInsights(accountId, level, ranges, tz);
+        }
+        await this.aggregateCreativeInsights(accountId, ranges, tz);
+      }
+
+      const duration = ((Date.now() - start) / 1000).toFixed(2);
+      this.logger.log(
+        `[${accountId}] ✨ Lifetime DAILY backfill finished in ${duration}s (levels: ${touchedLevels.join(',') || 'none'}).`,
+      );
+    } catch (error) {
+      if (isPermissionError(error)) {
+        this.logger.warn(
+          `[${accountId}] 🔑 Permission error during lifetime backfill. Marking needsReauth.`,
+        );
+        await executeDbWithRetry(() =>
+          this.prisma.account.update({
+            where: { id: accountId },
+            data: { needsReauth: true },
+          }),
+        );
+        return;
+      }
+      this.logger.error(
+        `[${accountId}] ❌ Lifetime backfill error: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      throw error;
+    }
+  }
 }

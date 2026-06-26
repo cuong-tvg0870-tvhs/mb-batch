@@ -119,6 +119,21 @@ export class InsightSyncScheduler implements OnModuleInit {
   }
 
   /**
+   * 🟣 LIFETIME DAILY BACKFILL (gradual)
+   * Runs every 4 hours and backfills a BOUNDED slice of entities per account per
+   * run (INSIGHT_LIFETIME_BACKFILL_ENTITIES_PER_RUN) so historical MAX fills in
+   * over several runs without spiking the Meta API quota. Idempotent: once an
+   * entity's lifetime is covered it is skipped on subsequent runs.
+   */
+  @Cron('45 */4 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async scheduleLifetimeBackfill() {
+    this.logger.log(
+      '📅 Scheduling Lifetime DAILY Backfill (every 4h, bounded slice)...',
+    );
+    await this.queueLifetimeBackfillForAllAccounts();
+  }
+
+  /**
    * 👥 AUDIENCE SYNC
    * Runs once a day at 04:35 AM
    */
@@ -195,6 +210,38 @@ export class InsightSyncScheduler implements OnModuleInit {
 
     this.logger.log(
       `✅ Successfully queued missing daily jobs for ${accounts.length} accounts.`,
+    );
+  }
+
+  private async queueLifetimeBackfillForAllAccounts() {
+    const accounts = await this.prisma.account.findMany({
+      where: { needsReauth: false, accountType: 'AD_ACCOUNT' as any },
+      select: { id: true },
+    });
+
+    this.logger.log(
+      `Found ${accounts.length} accounts for lifetime backfill.`,
+    );
+    // Hour bucket so each 4-hourly run enqueues a fresh bounded slice instead of
+    // being de-duplicated away for the rest of the day.
+    const bucket = new Date().toISOString().slice(0, 13);
+
+    for (const account of accounts) {
+      await this.syncQueue.add(
+        INSIGHT_SYNC_JOBS.SYNC_LIFETIME_BACKFILL,
+        { accountId: account.id },
+        {
+          jobId: `${INSIGHT_SYNC_JOBS.SYNC_LIFETIME_BACKFILL}:${account.id}:${bucket}`,
+          attempts: 2,
+          backoff: { type: 'exponential', delay: 60000 },
+          removeOnComplete: true,
+          removeOnFail: false,
+        },
+      );
+    }
+
+    this.logger.log(
+      `✅ Successfully queued lifetime backfill jobs for ${accounts.length} accounts.`,
     );
   }
 
