@@ -89,4 +89,30 @@ export class InsightSyncProcessor {
       throw error;
     }
   }
+
+  @Process({
+    name: INSIGHT_SYNC_JOBS.SYNC_LIFETIME_BACKFILL,
+    concurrency: Number(process.env.INSIGHT_LIFETIME_BACKFILL_CONCURRENCY || 1),
+  })
+  async handleLifetimeBackfill(job: Job<{ accountId: string }>) {
+    const { accountId } = job.data;
+    const start = Date.now();
+
+    this.logger.log(
+      `🚀 [JOB START] Lifetime backfill for Account: ${accountId}`,
+    );
+
+    try {
+      await this.syncService.backfillLifetimeDailyInsights(accountId);
+      const duration = ((Date.now() - start) / 1000).toFixed(2);
+      this.logger.log(
+        `✨ [JOB FINISHED] Lifetime backfill for Account: ${accountId} | Duration: ${duration}s`,
+      );
+    } catch (error) {
+      this.logger.error(
+        `❌ [JOB FAILED] Lifetime backfill for Account: ${accountId} | Error: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      throw error;
+    }
+  }
 }

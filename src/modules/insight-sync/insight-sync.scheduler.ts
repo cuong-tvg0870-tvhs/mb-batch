@@ -88,14 +88,21 @@ export class InsightSyncScheduler implements OnModuleInit {
 
   /**
    * 🔴 MAX SYNC
-   * Runs once a day. MAX is expensive and should not compete with near-real-time ranges.
+   * Runs once a day. MAX is expensive and should not compete with near-real-time
+   * ranges. 3D/7D are bundled in (local rollup only, no extra Meta call) so the
+   * daily creative performanceStatus is computed with real roas7d/roas3d buckets
+   * — otherwise a pure-MAX run leaves them empty and SCALE_P1/P2 is unreachable.
    */
   @Cron('15 2 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async scheduleMaxSync() {
-    this.logger.log('📅 Scheduling Max Insights Sync (daily)...');
+    this.logger.log('📅 Scheduling Max Insights Sync (daily, +3D/7D for status)...');
     await this.queueSyncForAllAccounts(
       [InsightSyncLevel.CAMPAIGN, InsightSyncLevel.ADSET, InsightSyncLevel.AD],
-      [InsightSyncRange.MAX],
+      [
+        InsightSyncRange.MAX,
+        InsightSyncRange.LAST_3D,
+        InsightSyncRange.LAST_7D,
+      ],
     );
   }
 
@@ -109,6 +116,21 @@ export class InsightSyncScheduler implements OnModuleInit {
       '📅 Scheduling Missing Daily Insights Sync (Daily 03:00 AM)...',
     );
     await this.queueMissingDailySyncForAllAccounts();
+  }
+
+  /**
+   * 🟣 LIFETIME DAILY BACKFILL (gradual)
+   * Runs every 4 hours and backfills a BOUNDED slice of entities per account per
+   * run (INSIGHT_LIFETIME_BACKFILL_ENTITIES_PER_RUN) so historical MAX fills in
+   * over several runs without spiking the Meta API quota. Idempotent: once an
+   * entity's lifetime is covered it is skipped on subsequent runs.
+   */
+  @Cron('45 */4 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async scheduleLifetimeBackfill() {
+    this.logger.log(
+      '📅 Scheduling Lifetime DAILY Backfill (every 4h, bounded slice)...',
+    );
+    await this.queueLifetimeBackfillForAllAccounts();
   }
 
   /**
@@ -188,6 +210,38 @@ export class InsightSyncScheduler implements OnModuleInit {
 
     this.logger.log(
       `✅ Successfully queued missing daily jobs for ${accounts.length} accounts.`,
+    );
+  }
+
+  private async queueLifetimeBackfillForAllAccounts() {
+    const accounts = await this.prisma.account.findMany({
+      where: { needsReauth: false, accountType: 'AD_ACCOUNT' as any },
+      select: { id: true },
+    });
+
+    this.logger.log(
+      `Found ${accounts.length} accounts for lifetime backfill.`,
+    );
+    // Hour bucket so each 4-hourly run enqueues a fresh bounded slice instead of
+    // being de-duplicated away for the rest of the day.
+    const bucket = new Date().toISOString().slice(0, 13);
+
+    for (const account of accounts) {
+      await this.syncQueue.add(
+        INSIGHT_SYNC_JOBS.SYNC_LIFETIME_BACKFILL,
+        { accountId: account.id },
+        {
+          jobId: `${INSIGHT_SYNC_JOBS.SYNC_LIFETIME_BACKFILL}:${account.id}:${bucket}`,
+          attempts: 2,
+          backoff: { type: 'exponential', delay: 60000 },
+          removeOnComplete: true,
+          removeOnFail: false,
+        },
+      );
+    }
+
+    this.logger.log(
+      `✅ Successfully queued lifetime backfill jobs for ${accounts.length} accounts.`,
     );
   }
 

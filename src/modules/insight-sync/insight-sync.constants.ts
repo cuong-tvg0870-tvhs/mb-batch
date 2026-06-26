@@ -24,4 +24,5 @@ export const INSIGHT_SYNC_JOBS = {
   SYNC_ACCOUNT: 'sync-account-insights',
   SYNC_AUDIENCE: 'sync-audience-insights',
   SYNC_MISSING_DAILY: 'sync-missing-daily-insights',
+  SYNC_LIFETIME_BACKFILL: 'sync-lifetime-backfill-insights',
 };
