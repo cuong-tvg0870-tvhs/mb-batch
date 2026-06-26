@@ -2180,12 +2180,28 @@ export class InsightSyncService {
 
     const tz = await this.getAccountTimezone(accountId);
     const todayStr = this.nowInTz(tz).format('YYYY-MM-DD');
+    // Meta's insights API only serves data within ~37 months of today. Use 36
+    // months as the hard floor (1-month safety margin) so entities with a
+    // null/epoch start date (e.g. 1970) or a start older than the window don't
+    // generate dozens of segments that all fail with Meta error #3018.
+    const metaFloorStr = this.nowInTz(tz)
+      .subtract(36, 'month')
+      .format('YYYY-MM-DD');
     const maxEntitiesPerRun = Number(
       process.env.INSIGHT_LIFETIME_BACKFILL_ENTITIES_PER_RUN || 50,
     );
     const subWindowDays = Number(
       process.env.INSIGHT_LIFETIME_BACKFILL_WINDOW_DAYS || 90,
     );
+
+    // Ops kill-switch: set INSIGHT_LIFETIME_BACKFILL_ENTITIES_PER_RUN=0 to pause
+    // the backfill without a redeploy.
+    if (!Number.isFinite(maxEntitiesPerRun) || maxEntitiesPerRun <= 0) {
+      this.logger.log(
+        `[${accountId}] Lifetime backfill disabled (ENTITIES_PER_RUN<=0). Skipping.`,
+      );
+      return;
+    }
 
     const levels = [
       InsightSyncLevel.CAMPAIGN,
@@ -2221,6 +2237,20 @@ export class InsightSyncService {
 
         if (entities.length === 0) continue;
 
+        // One-off cleanup: remove implausibly-old DAILY rows (e.g. 1970 epoch
+        // watermarks left by the earlier unclamped backfill). Meta never returns
+        // data older than ~37 months, so anything before 2015 is junk; deleting
+        // it lets the next rollup recompute MAX.dateStart correctly.
+        await executeDbWithRetry(() =>
+          (this.prisma[prismaModel] as any).deleteMany({
+            where: {
+              range: InsightRange.DAILY,
+              dateStart: { lt: '2015-01-01' },
+              [parentModel]: { accountId },
+            },
+          }),
+        );
+
         // Earliest existing DAILY date per entity (single grouped query).
         const grouped = (await (this.prisma[prismaModel] as any).groupBy({
           by: [relationFieldId],
@@ -2241,9 +2271,18 @@ export class InsightSyncService {
         const gapEntities: Array<{ id: string; floor: string; until: string }> =
           [];
         for (const entity of entities) {
-          const floorDate = dayjs(entity.startTime || entity.createdAt).format(
+          let floorDate = dayjs(entity.startTime || entity.createdAt).format(
             'YYYY-MM-DD',
           );
+          // Clamp the floor up to Meta's 37-month window. Catches null/epoch
+          // (1970) and dates older than the window, which Meta rejects (#3018).
+          if (
+            !floorDate ||
+            floorDate === 'Invalid Date' ||
+            floorDate < metaFloorStr
+          ) {
+            floorDate = metaFloorStr;
+          }
           if (floorDate > todayStr) continue;
 
           const earliest = earliestMap.get(entity.id);
