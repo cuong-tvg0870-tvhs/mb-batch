@@ -30,6 +30,7 @@ type FolderUploadStats = {
   uploadedCount: number;
   skippedCount: number;
   unsupportedCount: number;
+  cidMismatchCount: number;
   limitReached: boolean;
   assetIds: string[];
 };
@@ -51,6 +52,16 @@ const parseEnvInteger = (
 ) => {
   const parsed = Number(value ?? defaultValue);
   return Number.isFinite(parsed) ? Math.max(minValue, parsed) : defaultValue;
+};
+
+// Mốc áp dụng quy tắc CID: chỉ auto-upload record tạo từ mốc này trở đi,
+// đóng băng backlog cũ (vẫn upload được thủ công). Đặt 'none' để tắt cutoff.
+const CID_RULE_DEFAULT_EFFECTIVE_FROM = '2026-06-26T00:00:00+07:00';
+const parseMinCreatedAt = (value: string | undefined): Date | null => {
+  const raw = value ?? CID_RULE_DEFAULT_EFFECTIVE_FROM;
+  if (!raw || raw.toLowerCase() === 'none') return null;
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 };
 
 @Injectable()
@@ -92,10 +103,26 @@ export class MetaMediaUploadService {
   private readonly checkMetaExistingAssetBeforeUpload =
     process.env.META_MEDIA_UPLOAD_CHECK_META_EXISTING_ASSET === 'true';
   private readonly uploadingClaimTtlMs = 6 * 60 * 60 * 1000;
+  // Re-arm các record SKIPPED (CID lệch) khi tên file Drive đổi: giới hạn số
+  // file refetch mỗi lần chạy + cooldown để không tốn Drive API.
+  private readonly skipRecheckBatchSize = parseEnvInteger(
+    process.env.META_MEDIA_UPLOAD_SKIP_RECHECK_BATCH,
+    20,
+    1,
+  );
+  private readonly skipRecheckCooldownMs = parseEnvInteger(
+    process.env.META_MEDIA_UPLOAD_SKIP_RECHECK_COOLDOWN_MS,
+    60 * 60 * 1000,
+    60 * 1000,
+  );
   private readonly minLarkRecordAgeMinutes = parseEnvInteger(
     process.env.META_MEDIA_UPLOAD_MIN_LARK_RECORD_AGE_MINUTES,
     30,
     0,
+  );
+  // Chỉ auto-upload record có createdAt >= mốc này (đóng băng backlog cũ).
+  private readonly autoUploadMinCreatedAt = parseMinCreatedAt(
+    process.env.META_MEDIA_UPLOAD_MIN_CREATED_AT,
   );
   private readonly maxFailedUploadRetries = parseEnvInteger(
     process.env.META_MEDIA_UPLOAD_FAILED_RETRY_MAX,
@@ -113,6 +140,9 @@ export class MetaMediaUploadService {
     60 * 1000,
   );
   private readonly driveFolderMimeType = 'application/vnd.google-apps.folder';
+  // CID là cấu trúc đặt tên nội bộ của công ty, vd: CID00046478
+  // Chỉ upload file khi CID trong tên trùng đúng CID của Lark record.
+  private readonly cidPattern = /CID\d+/i;
   private readonly rootFolderId =
     process.env.META_CREATIVE_ROOT_FOLDER_ID || '4303729193176038';
   private readonly folderEnsurePromises = new Map<string, Promise<any>>();
@@ -141,6 +171,7 @@ export class MetaMediaUploadService {
 
   async autoUpload() {
     await this.releaseStaleUploadingRecords();
+    await this.reEvaluateSkippedRecords();
 
     const activeUploadingCount = await this.countActiveUploadingRecords();
     if (activeUploadingCount > 0) {
@@ -603,7 +634,7 @@ export class MetaMediaUploadService {
       record.product_name || record.product_code,
     );
 
-    const driveFile: DriveFileEntry = {
+    let driveFile: DriveFileEntry = {
       id: record.drive_id || record.drive.id,
       name: record.drive.name,
       mimeType: record.drive.mimeType,
@@ -613,6 +644,26 @@ export class MetaMediaUploadService {
       capabilities: (record.drive.raw as any)?.capabilities || null,
       raw: record.drive.raw,
     };
+
+    // Lấy lại metadata mới nhất từ Drive (tên file có thể đã đổi) trước khi
+    // đối chiếu CID, để quyết định upload/skip dựa trên dữ liệu hiện tại.
+    if (driveFile.id) {
+      const fresh = await this.refreshDriveFileMetadata(driveFile.id);
+      if (fresh) {
+        driveFile = {
+          ...driveFile,
+          name: fresh.name ?? driveFile.name,
+          mimeType: fresh.mimeType ?? driveFile.mimeType,
+          webContentLink: fresh.webContentLink ?? driveFile.webContentLink,
+          webViewLink: fresh.webViewLink || driveFile.webViewLink,
+          size: fresh.size ?? driveFile.size,
+          capabilities: fresh.capabilities ?? driveFile.capabilities,
+          raw: fresh.raw ?? driveFile.raw,
+        };
+      }
+    }
+
+    const expectedCid = record.cid;
 
     if (driveFile.mimeType === this.driveFolderMimeType) {
       if (!driveFile.id) throw new Error('Missing Drive folder ID');
@@ -636,6 +687,7 @@ export class MetaMediaUploadService {
         driveFile.id,
         targetFolder.id,
         budget,
+        expectedCid,
       );
       if (stats.assetIds[0]) {
         await this.prisma.larkRecord.update({
@@ -644,17 +696,35 @@ export class MetaMediaUploadService {
         });
       }
 
+      const folderHasNothingToUpload =
+        !stats.limitReached &&
+        stats.uploadedCount === 0 &&
+        stats.assetIds.length === 0;
+      const folderStatus = stats.limitReached
+        ? 'PENDING'
+        : folderHasNothingToUpload && stats.cidMismatchCount > 0
+          ? 'SKIPPED'
+          : 'SUCCESS';
+
       return {
-        status: stats.limitReached ? 'PENDING' : 'SUCCESS',
+        status: folderStatus,
         raw: {
           sync_meta_folder_id: targetFolder.id,
           sync_meta_folder_name: targetFolder.name,
           sync_uploaded_count: stats.uploadedCount,
           sync_skipped_count: stats.skippedCount,
           sync_unsupported_count: stats.unsupportedCount,
+          sync_cid_mismatch_count: stats.cidMismatchCount,
           sync_creative_asset_ids: stats.assetIds,
           sync_creative_asset_count: stats.assetIds.length,
           sync_limit_reached: stats.limitReached,
+          ...(folderStatus === 'SKIPPED'
+            ? {
+                sync_skip_reason: 'CID_MISMATCH',
+                sync_skip_drive_name: driveFile.name ?? null,
+                sync_skip_rechecked_at: new Date().toISOString(),
+              }
+            : {}),
         },
       };
     }
@@ -663,11 +733,25 @@ export class MetaMediaUploadService {
       driveFile,
       productFolder.id,
       budget,
+      expectedCid,
     );
     if (asset.reason === 'LIMIT_REACHED') {
       return {
         status: 'PENDING',
         raw: { sync_limit_reached: true },
+      };
+    }
+
+    if (asset.reason === 'CID_MISMATCH') {
+      return {
+        status: 'SKIPPED',
+        raw: {
+          sync_skip_reason: 'CID_MISMATCH',
+          sync_cid_mismatch_count: 1,
+          sync_uploaded_count: 0,
+          sync_skip_drive_name: driveFile.name ?? null,
+          sync_skip_rechecked_at: new Date().toISOString(),
+        },
       };
     }
 
@@ -694,11 +778,13 @@ export class MetaMediaUploadService {
     driveFolderId: string,
     metaFolderId: string,
     budget: UploadBudget,
+    expectedCid: string | null | undefined,
   ): Promise<FolderUploadStats> {
     const stats: FolderUploadStats = {
       uploadedCount: 0,
       skippedCount: 0,
       unsupportedCount: 0,
+      cidMismatchCount: 0,
       limitReached: false,
       assetIds: [],
     };
@@ -718,9 +804,15 @@ export class MetaMediaUploadService {
       const childFolders = children.filter(
         (child) => child.mimeType === this.driveFolderMimeType,
       );
-      const mediaFiles = children.filter(
+      const allMediaFiles = children.filter(
         (child) => child.mimeType !== this.driveFolderMimeType,
       );
+      // Chỉ upload các file có CID trùng đúng CID của Lark record; còn lại bỏ qua.
+      const mediaFiles = allMediaFiles.filter((child) =>
+        this.fileMatchesRecordCid(child.name, expectedCid),
+      );
+      const mismatchedCid = allMediaFiles.length - mediaFiles.length;
+      if (mismatchedCid > 0) stats.cidMismatchCount += mismatchedCid;
 
       for (const child of childFolders) {
         if (!child.id) continue;
@@ -771,7 +863,12 @@ export class MetaMediaUploadService {
           queue,
           async (child) => {
             try {
-              return await this.uploadDriveFile(child, targetFolderId, budget);
+              return await this.uploadDriveFile(
+                child,
+                targetFolderId,
+                budget,
+                expectedCid,
+              );
             } catch (err) {
               if (this.isMetaCooldownError(err)) {
                 control.paused = true;
@@ -795,6 +892,8 @@ export class MetaMediaUploadService {
           if (result.uploaded) stats.uploadedCount += 1;
           else if (result.reason === 'UNSUPPORTED_TYPE')
             stats.unsupportedCount += 1;
+          else if (result.reason === 'CID_MISMATCH')
+            stats.cidMismatchCount += 1;
           else if (result.reason === 'LIMIT_REACHED') stats.limitReached = true;
           else if (result.reason === 'META_COOLDOWN') stats.limitReached = true;
           else stats.skippedCount += 1;
@@ -828,6 +927,7 @@ export class MetaMediaUploadService {
     file: DriveFileEntry,
     folderId: string,
     budget: UploadBudget,
+    expectedCid: string | null | undefined,
   ) {
     if (!file.id) throw new Error(`Drive file missing id: ${file.name}`);
 
@@ -836,6 +936,10 @@ export class MetaMediaUploadService {
     const type = this.getAssetType(file.mimeType, file.name);
     if (!type) {
       return { uploaded: false, reason: 'UNSUPPORTED_TYPE' as const };
+    }
+
+    if (!this.fileMatchesRecordCid(file.name, expectedCid)) {
+      return { uploaded: false, reason: 'CID_MISMATCH' as const };
     }
 
     if (this.isDriveDownloadBlocked(file)) {
@@ -1016,6 +1120,38 @@ export class MetaMediaUploadService {
       if (aIsFolder !== bIsFolder) return aIsFolder ? -1 : 1;
       return (a.name || '').localeCompare(b.name || '');
     });
+  }
+
+  private async refreshDriveFileMetadata(
+    fileId: string,
+  ): Promise<DriveFileEntry | null> {
+    try {
+      const res = await this.driveSA.files.get({
+        fileId,
+        fields:
+          'id,name,mimeType,parents,webViewLink,webContentLink,size,capabilities/canDownload',
+        supportsAllDrives: true,
+      });
+      const file = res.data;
+      const entry: DriveFileEntry = {
+        id: file.id,
+        name: file.name,
+        mimeType: file.mimeType,
+        parents: file.parents,
+        webViewLink: file.webViewLink,
+        webContentLink: file.webContentLink,
+        size: file.size,
+        capabilities: file.capabilities,
+        raw: file,
+      };
+      await this.upsertDriveFile(entry);
+      return entry;
+    } catch (err: any) {
+      this.logger.warn(
+        `Failed to refresh Drive metadata for ${fileId}: ${err.message}`,
+      );
+      return null;
+    }
   }
 
   private async downloadDriveFile(fileId: string) {
@@ -1501,6 +1637,7 @@ export class MetaMediaUploadService {
             this.buildSyncStatusNotWhere('UPLOADING'),
             this.buildSyncStatusNotWhere('FAILED'),
             this.buildSyncStatusNotWhere('SUCCESS'),
+            this.buildSyncStatusNotWhere('SKIPPED'),
           ],
         },
         this.buildRetryableFailedUploadWhere(),
@@ -1516,6 +1653,9 @@ export class MetaMediaUploadService {
     ];
     const minimumAgeWhere = this.buildMinimumLarkRecordAgeWhere();
     if (minimumAgeWhere) filters.push(minimumAgeWhere);
+    if (this.autoUploadMinCreatedAt) {
+      filters.push({ createdAt: { gte: this.autoUploadMinCreatedAt } });
+    }
 
     return {
       AND: filters,
@@ -1670,6 +1810,98 @@ export class MetaMediaUploadService {
     );
   }
 
+  // Re-arm các record đã SKIPPED (CID lệch): nếu tên file Drive đã đổi so với
+  // lúc skip (ai đó sửa lại CID trong tên), đưa về PENDING để cron upload lại.
+  // Giới hạn batch + cooldown để chỉ refetch tối đa N file/lần chạy.
+  private async reEvaluateSkippedRecords() {
+    const cutoff = new Date(
+      Date.now() - this.skipRecheckCooldownMs,
+    ).toISOString();
+
+    const recheckFilters: Prisma.LarkRecordWhereInput[] = [
+      { raw: { path: ['sync_status'], equals: 'SKIPPED' } },
+      { drive: { drive_permission: true } },
+      { creative_asset_id: null },
+      {
+        OR: [
+          {
+            raw: {
+              path: ['sync_skip_rechecked_at'],
+              equals: Prisma.DbNull,
+            },
+          },
+          {
+            raw: {
+              path: ['sync_skip_rechecked_at'],
+              equals: Prisma.JsonNull,
+            },
+          },
+          { raw: { path: ['sync_skip_rechecked_at'], lte: cutoff } },
+        ],
+      },
+    ];
+    if (this.autoUploadMinCreatedAt) {
+      recheckFilters.push({ createdAt: { gte: this.autoUploadMinCreatedAt } });
+    }
+
+    const records = await this.prisma.larkRecord.findMany({
+      where: { AND: recheckFilters },
+      include: { drive: true },
+      orderBy: { updatedAt: 'asc' },
+      take: this.skipRecheckBatchSize,
+    });
+
+    if (records.length === 0) return;
+
+    let rearmed = 0;
+    for (const record of records) {
+      const driveId = record.drive_id || record.drive?.id;
+      const fresh = driveId
+        ? await this.refreshDriveFileMetadata(driveId)
+        : null;
+      const currentName = fresh?.name ?? record.drive?.name ?? null;
+      const currentMime = fresh?.mimeType ?? record.drive?.mimeType ?? null;
+      const raw = this.normalizeRaw(record.raw);
+
+      // Folder: dò nội dung con xem đã có file nào khớp CID chưa.
+      // File đơn: chỉ cần tên file đã đổi so với lúc skip.
+      const shouldRearm =
+        currentMime === this.driveFolderMimeType
+          ? driveId
+            ? await this.folderHasMatchingCidFile(driveId, record.cid)
+            : false
+          : (currentName || '') !== (raw.sync_skip_drive_name || '');
+
+      if (shouldRearm) {
+        // Đưa về PENDING; luồng upload chính sẽ refetch + kiểm CID chính thức
+        // (khớp thì upload, vẫn lệch thì skip lại với tên mới).
+        await this.markRecordStatus(record, 'PENDING', null, {
+          sync_skip_reason: null,
+          sync_skip_rechecked_at: null,
+          sync_rearmed_at: new Date().toISOString(),
+        });
+        rearmed += 1;
+      } else {
+        // Chưa đổi → giữ SKIPPED, chỉ dời mốc recheck để qua cooldown mới xét lại.
+        await this.prisma.larkRecord.update({
+          where: { id: record.id },
+          data: {
+            raw: {
+              ...raw,
+              sync_skip_rechecked_at: new Date().toISOString(),
+            },
+          },
+        });
+      }
+    }
+
+    if (rearmed > 0) {
+      this.logger.log(
+        `Re-armed ${rearmed}/${records.length} SKIPPED Lark records (Drive file renamed) back to PENDING`,
+      );
+    }
+  }
+
   private async countActiveUploadingRecords() {
     return this.prisma.larkRecord.count({
       where: {
@@ -1716,6 +1948,60 @@ export class MetaMediaUploadService {
     return raw && typeof raw === 'object' && !Array.isArray(raw)
       ? (raw as Record<string, any>)
       : {};
+  }
+
+  private extractCidFromName(name?: string | null): string | null {
+    const match = (name || '').match(this.cidPattern);
+    return match ? match[0].toUpperCase() : null;
+  }
+
+  // Tên file chỉ hợp lệ khi chứa đúng CID của Lark record (CID00046478).
+  private fileMatchesRecordCid(
+    fileName: string | null | undefined,
+    recordCid: string | null | undefined,
+  ) {
+    const expected = (recordCid || '').trim().toUpperCase();
+    if (!expected) return false;
+    const found = this.extractCidFromName(fileName);
+    return found !== null && found === expected;
+  }
+
+  // Duyệt (đệ quy) một folder Drive, dừng sớm khi gặp file con khớp CID.
+  // Dùng để re-arm folder đã SKIPPED khi nội dung con thay đổi.
+  private async folderHasMatchingCidFile(
+    folderId: string,
+    expectedCid: string | null | undefined,
+  ): Promise<boolean> {
+    if (!(expectedCid || '').trim()) return false;
+
+    const queue: string[] = [folderId];
+    const visited = new Set<string>();
+
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      if (visited.has(current)) continue;
+      visited.add(current);
+
+      let children: drive_v3.Schema$File[];
+      try {
+        children = await this.listFolderChildren(current);
+      } catch (err: any) {
+        this.logger.warn(
+          `Failed to list folder ${current} during SKIPPED re-check: ${err.message}`,
+        );
+        continue;
+      }
+
+      for (const child of children) {
+        if (child.mimeType === this.driveFolderMimeType) {
+          if (child.id) queue.push(child.id);
+        } else if (this.fileMatchesRecordCid(child.name, expectedCid)) {
+          return true;
+        }
+      }
+    }
+
+    return false;
   }
 
   private getAssetType(mimeType?: string | null, name?: string | null) {
