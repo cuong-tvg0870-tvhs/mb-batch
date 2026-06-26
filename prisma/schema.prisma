@@ -2364,6 +2364,11 @@ model AutomationRule {
   useAdSetAttributionWindow Boolean @default(true)
   attributionWindow         String?
 
+  // When true, matched items are auto-confirmed by the runner and pushed to the
+  // executor in the same tick — no manual confirm step. Default false preserves
+  // the manual-confirm behaviour for every existing rule.
+  autoExecute Boolean @default(false)
+
   categoryId String
   category   AutomationCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
 
@@ -2728,6 +2733,11 @@ model AutomationInsightBackfillState {
   oldestSettledDate String?
   lastSettledDate   String?
   lastRevalidatedAt DateTime?
+  /// Last time an ACTIVE rule (run or warmer) confirmed this (account, apiLevel)
+  /// is still in use. The maintain scheduler skips states whose lastEvaluatedAt
+  /// is null or older than AUTOMATION_INSIGHT_STALE_DAYS so deleted/paused rules
+  /// stop being backfilled forever.
+  lastEvaluatedAt   DateTime?
   errorMessage      String?
   updatedAt         DateTime                        @updatedAt
 
@@ -2748,6 +2758,26 @@ model AutomationInsightDeepAggregate {
   updatedAt   DateTime                  @updatedAt
 
   @@unique([accountId, apiLevel, entityId])
+}
+
+/// Latest Meta rate-limit usage observed from response headers, persisted per
+/// (scope, bucket) so the per-account limit/throttle state is queryable (the
+/// Redis snapshot only lives ~1h and can't be listed). `scope` = Meta account id
+/// or the sentinel `__app__`; `bucket` = ads_management | ads_insights | app.
+/// `maxPct` = worst of call_count/cputime/total_time (0-100); `regainSec` =
+/// estimated_time_to_regain_access. Upserted (latest wins), throttled ~1/min.
+model AutomationMetaUsage {
+  id         String   @id @default(uuid())
+  scope      String
+  bucket     String
+  maxPct     Float    @default(0)
+  regainSec  Int      @default(0)
+  tier       String?
+  observedAt DateTime
+  updatedAt  DateTime @updatedAt
+
+  @@unique([scope, bucket])
+  @@index([scope])
 }
 
 enum MetaConnectionStatus {
