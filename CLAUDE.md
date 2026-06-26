@@ -33,16 +33,16 @@ yarn migration:generate # = npx prisma generate (regenerate Prisma client; does 
 1. **Never run database migrations.** Do not run `npx prisma migrate ...`, `prisma db push`, or any `migration:run`. The user applies migrations manually against the real DB. You may only edit `schema.prisma` and run `npx prisma generate`.
 2. **Keep `prisma/schema.prisma` in sync across all three backend repos** (`mb-ads`, `mb-batch`, `mb-database`) whenever you change it. Critical difference in the `generator client` block:
    - `mb-database/prisma/schema.prisma` **must** have `output = "../src/generated/prisma"`.
-   - `mb-ads` and `mb-batch` schemas **must NOT** have any `output` line (they generate to the default `node_modules/.prisma/client`).
+   - `mb-ads` and `mb-batch` schemas **must NOT** have any `output` line (they generate to the default `node_modules/.prisma/client`). *(mb-batch has a stale `src/generated/prisma/` dir left over from an earlier config — it is not the active client; leave the `output` line absent.)*
    - After syncing, run `npx prisma generate` in each repo that has `node_modules`.
 3. **Update the project overview after meaningful changes** (new/changed cron, schema change, new/removed module, sync-logic change, queue config, dependency change). Edit `.gemini/skills/mb-auto-project-overview.md`, then copy it to the sibling repos at `../mb-ads/.gemini/skills/` and `../mb-frontend/.gemini/skills/`. (Note: `GEMINI.md` lists stale Linux `/home/thispc/...` paths — the real siblings live next to this repo.)
 4. **Be a critical collaborator, not a yes-man** (per `GEMINI.md`): push back on flawed requests, surface hidden tech debt / perf / security trade-offs, and explain the reasoning before implementing.
 
 ## Architecture
 
-### The one pattern every sync module follows
+### The core pattern (most sync modules)
 
-`@Cron` **Scheduler** → enqueues a **Bull** job → **Processor** consumes it → **Service** does the real work. Each feature is a self-contained module under `src/modules/<name>/` with these files:
+`@Cron` **Scheduler** → enqueues a **Bull** job → **Processor** consumes it → **Service** does the real work. Six **Bull-backed** modules use this in full — `meta-sync`, `insight-sync`, `media-sync`, `meta-media-sync`, `meta-media-upload`, `lark-sync` (plus the dormant `creative-refresh`) — each a self-contained module under `src/modules/<name>/` with these files:
 
 - `*.module.ts` — imports `PrismaModule` + `BullModule.registerQueue(...)`, wires the trio
 - `*.scheduler.ts` — `@Cron(expr, { timeZone: 'Asia/Ho_Chi_Minh' })` methods that `queue.add(JOB, {}, opts)`
@@ -50,9 +50,19 @@ yarn migration:generate # = npx prisma generate (regenerate Prisma client; does 
 - `*.service.ts` — business logic (Meta/Drive/Lark calls + Prisma writes)
 - `*.constants.ts` — exports the `*_QUEUE` name and a `*_JOBS` map
 
+**Modules that deviate — don't assume the full pattern:**
+- `help-ai` — `@Cron` scheduler calls the service **directly (no Bull, no processor)**; AI key-pool logic lives in `gemini-api-key-manager.service.ts`.
+- `draft-automation` — **no processor, no `*.constants.ts`**; three schedulers (`draft-automation-cron.scheduler.ts`, main `draft-automation.scheduler.ts`, `draft-cleanup.scheduler.ts`) call services directly. Publishing is in `draft-automation-meta-publisher.service.ts`; CID helpers in `src/common/utils/cid.util.ts`. A lot of logic sits in the scheduler itself.
+- `meta-api` — a shared `@Global` client, not a scheduler module (see Globals below).
+
 Conventions that matter:
-- **All crons are pinned to `Asia/Ho_Chi_Minh`.** Keep new ones in that timezone.
-- **Idempotent enqueue**: jobs are added with `jobId: \`${JOB}:${hourBucket}\`` (hour bucket from `new Date().toISOString().slice(0,13)`), plus `removeOnComplete: true`, `attempts: 3`, and exponential backoff. This dedupes a job within its time window — preserve it.
+- **Crons are pinned to `Asia/Ho_Chi_Minh`** — pass `{ timeZone: 'Asia/Ho_Chi_Minh' }` to `@Cron` (help-ai uses the `HELP_AI_TIME_ZONE` constant). Keep new ones in that timezone; one existing cron (`draft-automation-cron.scheduler.ts`) omits it — don't copy that.
+- **Idempotent enqueue**: most jobs set a `jobId` so a duplicate enqueue within the same window is dropped, plus `removeOnComplete: true`, `attempts` (2–3), and exponential backoff. The `jobId` strategy **varies by job** — preserve whichever one a job already uses:
+  - **hour bucket** — `${JOB}:${bucket}` with `bucket = new Date().toISOString().slice(0,13)` (most hourly syncs)
+  - **day bucket** — `slice(0,10)` (e.g. insight-sync `SYNC_MISSING_DAILY`/`SYNC_AUDIENCE`, URL-expiry recalc jobs)
+  - **singleton** — `${JOB}:singleton`, at most one in flight (media-sync, meta-media-upload)
+  - **composite** — account id + levels + ranges folded into the id (insight-sync `SYNC_ACCOUNT`)
+  - a few (e.g. lark-sync) set **no `jobId`** at all.
 - Concurrency is controlled per-processor (`@Process({ concurrency })`) and via `p-limit` inside services.
 
 ### Globals — inject these anywhere
@@ -74,7 +84,7 @@ Conventions that matter:
 
 ### Data model
 
-`prisma/schema.prisma` is large (~90 models). Rough groupings:
+`prisma/schema.prisma` is large (~80 models). Rough groupings:
 - **Meta mirror**: `Campaign`, `AdSet`, `Ad`, `Creative`, `AdImage`, `AdVideo` + their `*Insight` and `*AudienceInsight` tables. Insights use composite-key upsert (`entityId`, `dateStart`, `range`) and an ID-reuse/overwrite strategy to avoid churn.
 - **Draft system**: `TemplateCampaign` → `SystemCampaign`/`SystemAdSet`/`SystemAd`/`SystemCreative`, `DraftAutomationHistory`, `PublishHistory`.
 - **Automation engine**: `AutomationRule`, `AutomationFilter*`, `AutomationTask*`, `AutomationRuleRun*`, `AutomationInsight*`.
