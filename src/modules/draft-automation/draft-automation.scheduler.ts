@@ -2,6 +2,10 @@ import { Injectable, Logger } from '@nestjs/common';
 import { AssetType, Status } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { DraftAutomationMetaPublisherService } from './draft-automation-meta-publisher.service';
+import {
+  applyCidToAdName,
+  extractCidFromName,
+} from '../../common/utils/cid.util';
 
 const DEFAULT_AUTOMATION_CRON = '*/30 * * * *';
 const DEFAULT_AUTOMATION_TIMEZONE = 'Asia/Ho_Chi_Minh';
@@ -38,22 +42,53 @@ function updateName(
   return updatedParts.join('|');
 }
 
-function extractMediaIdentifiersFromString(
-  jsonString: string,
+// Các key chứa định danh media THẬT của một asset (video/ảnh). Chỉ thu thập giá
+// trị tại các key này để xác định asset "đã được dùng", tránh gom nhầm mọi token
+// số/hex bất kỳ (page id, account id, budget, timestamp, post id...) như cách quét
+// chuỗi cũ — vốn loại oan asset mới và gây skip vĩnh viễn.
+const MEDIA_IDENTIFIER_KEYS = new Set([
+  'video_id',
+  'videoId',
+  'image_hash',
+  'imageHash',
+  'selected_thumbnail_id',
+  'image_id',
+]);
+
+function collectUsedMediaIdentifiers(
+  node: any,
   keys: Set<string> = new Set(),
   scopedIds: string[] = [],
 ): Set<string> {
-  if (!jsonString) return keys;
+  const walk = (value: any) => {
+    if (value === null || value === undefined) return;
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item);
+      return;
+    }
+    if (typeof value === 'object') {
+      for (const key of Object.keys(value)) {
+        const child = value[key];
+        if (
+          MEDIA_IDENTIFIER_KEYS.has(key) &&
+          (typeof child === 'string' || typeof child === 'number')
+        ) {
+          const id = String(child).trim();
+          if (id) keys.add(id);
+        } else {
+          walk(child);
+        }
+      }
+    }
+  };
+  walk(node);
 
-  const identifierRegex = /"([a-fA-F0-9]{32}|\d+)"/g;
-  let match: RegExpExecArray | null;
-  while ((match = identifierRegex.exec(jsonString)) !== null) {
-    keys.add(match[1]);
-  }
-
-  for (const id of scopedIds) {
-    if (id && jsonString.includes(id)) {
-      keys.add(id);
+  // Vẫn quét asset.id (cuid) theo kiểu substring vì id có thể nằm trong mảng
+  // automation_used_assets hoặc tham chiếu khác trong payload nháp.
+  if (scopedIds.length) {
+    const json = JSON.stringify(node);
+    for (const id of scopedIds) {
+      if (id && json.includes(id)) keys.add(id);
     }
   }
 
@@ -224,14 +259,14 @@ function replacePlaceholders(obj: any, videos: any[], images: any[]): any {
     const videoMatch = obj.match(/^VIDEO_(\d+)$/);
     if (videoMatch) {
       const idx = parseInt(videoMatch[1], 10) - 1;
-      if (idx >= 0 && idx < videos.length) {
+      if (idx >= 0 && idx < videos.length && videos[idx]) {
         return videos[idx];
       }
     }
     const imageMatch = obj.match(/^IMAGE_(\d+)$/);
     if (imageMatch) {
       const idx = parseInt(imageMatch[1], 10) - 1;
-      if (idx >= 0 && idx < images.length) {
+      if (idx >= 0 && idx < images.length && images[idx]) {
         return images[idx];
       }
     }
@@ -253,7 +288,7 @@ function replacePlaceholders(obj: any, videos: any[], images: any[]): any {
         const imageMatch = val.match(/^IMAGE_(\d+)$/);
         if (videoMatch) {
           const idx = parseInt(videoMatch[1], 10) - 1;
-          if (idx >= 0 && idx < videos.length) {
+          if (idx >= 0 && idx < videos.length && videos[idx]) {
             const v = videos[idx];
             matchedVideo = v;
             if (key === 'id') {
@@ -283,7 +318,7 @@ function replacePlaceholders(obj: any, videos: any[], images: any[]): any {
           }
         } else if (imageMatch) {
           const idx = parseInt(imageMatch[1], 10) - 1;
-          if (idx >= 0 && idx < images.length) {
+          if (idx >= 0 && idx < images.length && images[idx]) {
             const img = images[idx];
             matchedImage = img;
             if (key === 'id') {
@@ -784,6 +819,32 @@ export class DraftAutomationScheduler {
       images,
     );
 
+    // Map mỗi ad -> CID của asset đã lấp slot của ad đó, để đặt tên CID theo TỪNG
+    // ad (clonedTemplateData vẫn giữ placeholder VIDEO_n/IMAGE_n vì replacePlaceholders
+    // không mutate input). Slot VIDEO_n -> videos[n-1], IMAGE_n -> images[n-1].
+    const adCidByPosition = new Map<string, string>();
+    if (Array.isArray(clonedTemplateData.ad_sets)) {
+      clonedTemplateData.ad_sets.forEach((adset: any, ai: number) => {
+        if (!Array.isArray(adset.ads)) return;
+        adset.ads.forEach((ad: any, di: number) => {
+          if (!ad?.creative) return;
+          const slotVideos = new Set<number>();
+          const slotImages = new Set<number>();
+          findExistingSlots(ad.creative, slotVideos, slotImages);
+          const firstVideo = [...slotVideos].sort((a, b) => a - b)[0];
+          const firstImage = [...slotImages].sort((a, b) => a - b)[0];
+          let asset: any;
+          if (firstVideo && videos[firstVideo - 1]) {
+            asset = videos[firstVideo - 1];
+          } else if (firstImage && images[firstImage - 1]) {
+            asset = images[firstImage - 1];
+          }
+          const cid = asset ? extractCidFromName(asset.name) : null;
+          if (cid) adCidByPosition.set(`${ai}:${di}`, cid);
+        });
+      });
+    }
+
     const employeeId = creator.employee_id;
     const employeeName = creator.name;
 
@@ -797,14 +858,17 @@ export class DraftAutomationScheduler {
 
     if (Array.isArray(substitutedValues.ad_sets)) {
       substitutedValues.ad_sets = substitutedValues.ad_sets.map(
-        (adset: any) => {
+        (adset: any, ai: number) => {
           if (adset.name) {
             adset.name = updateName(adset.name, employeeId, employeeName);
           }
           if (Array.isArray(adset.ads)) {
-            adset.ads = adset.ads.map((ad: any) => {
+            adset.ads = adset.ads.map((ad: any, di: number) => {
               if (ad.name) {
-                ad.name = updateName(ad.name, employeeId, employeeName);
+                let nextName = updateName(ad.name, employeeId, employeeName);
+                const cid = adCidByPosition.get(`${ai}:${di}`);
+                if (cid) nextName = applyCidToAdName(nextName, cid);
+                ad.name = nextName;
               }
               return ad;
             });
@@ -814,17 +878,19 @@ export class DraftAutomationScheduler {
       );
     }
 
+    const filledVideos = videos.filter(Boolean);
+    const filledImages = images.filter(Boolean);
     substitutedValues.automation_used_assets = [
-      ...videos.map((v) => v.id),
-      ...images.map((i) => i.id),
+      ...filledVideos.map((v) => v.id),
+      ...filledImages.map((i) => i.id),
     ];
     substitutedValues.automation_progress = {
       templateId: template.id,
       templateName: template.name,
       requiredVideos,
       requiredImages,
-      currentVideos: videos.length,
-      currentImages: images.length,
+      currentVideos: filledVideos.length,
+      currentImages: filledImages.length,
       isComplete,
       runMode: automation.runMode,
       publishMode,
@@ -1127,8 +1193,8 @@ export class DraftAutomationScheduler {
 
         const usedDraftIdentifiers = new Set<string>();
         for (const draft of reservedDrafts) {
-          extractMediaIdentifiersFromString(
-            JSON.stringify(draft),
+          collectUsedMediaIdentifiers(
+            draft,
             usedDraftIdentifiers,
             folderAssetIds,
           );
@@ -1160,8 +1226,8 @@ export class DraftAutomationScheduler {
           : [];
         const usedSystemCampaignIdentifiers = new Set<string>();
         for (const campaign of launchedSystemCampaigns) {
-          extractMediaIdentifiersFromString(
-            JSON.stringify(campaign),
+          collectUsedMediaIdentifiers(
+            campaign,
             usedSystemCampaignIdentifiers,
             folderAssetIds,
           );
@@ -1220,6 +1286,7 @@ export class DraftAutomationScheduler {
           alreadyUsedBySystemOrPublished: 0,
           usedInDraft: 0,
           nameRuleMismatch: 0,
+          noCid: 0,
         };
 
         const eligibleAssets = folderAssets.filter((asset) => {
@@ -1243,15 +1310,21 @@ export class DraftAutomationScheduler {
             (asset.name || '')
               .toLowerCase()
               .includes(automation.nameRule.toLowerCase());
+          // Yêu cầu: chỉ lấy content có chứa mã CID trong tên (vd CID00046478).
+          const hasCid = !!extractCidFromName(asset.name);
 
           if (isUsedBySystemOrPublished) {
             exclusionCounts.alreadyUsedBySystemOrPublished += 1;
           }
           if (isUsedInDraft) exclusionCounts.usedInDraft += 1;
           if (!matchesNameRule) exclusionCounts.nameRuleMismatch += 1;
+          if (!hasCid) exclusionCounts.noCid += 1;
 
           return (
-            !isUsedBySystemOrPublished && !isUsedInDraft && matchesNameRule
+            !isUsedBySystemOrPublished &&
+            !isUsedInDraft &&
+            matchesNameRule &&
+            hasCid
           );
         });
 
@@ -1332,45 +1405,82 @@ export class DraftAutomationScheduler {
         if (requiredImages < templateImageCount) {
           requiredImages = templateImageCount;
         }
+        // Rule theo TỪNG slot: { VIDEO_1: 'hook', IMAGE_2: 'demo' }. Mỗi slot lấy
+        // content có TÊN chứa dấu hiệu của slot; không có dấu hiệu thì lấy content
+        // đủ điều kiện cũ nhất bất kỳ; không có content khớp thì để trống slot.
+        const slotRules =
+          automation.slotRules && typeof automation.slotRules === 'object'
+            ? (automation.slotRules as Record<string, string>)
+            : {};
+        const matchesSlotRule = (asset: any, rule?: string) => {
+          const needle = (rule || '').trim().toLowerCase();
+          if (!needle) return true;
+          return (asset?.name || '').toLowerCase().includes(needle);
+        };
+        // Asset đang nằm trong nháp dở vẫn eligible (nháp dở bị loại khỏi danh
+        // sách "đã dùng ở nháp khác") nên tự được chọn lại đúng slot ở lượt sau.
+        const pickSlotAssets = (
+          eligible: any[],
+          required: number,
+          kind: 'VIDEO' | 'IMAGE',
+        ): any[] => {
+          const used = new Set<string>();
+          const slots: any[] = [];
+          for (let n = 1; n <= required; n++) {
+            const rule = slotRules[`${kind}_${n}`];
+            const pick = eligible.find(
+              (asset) => !used.has(asset.id) && matchesSlotRule(asset, rule),
+            );
+            if (pick) {
+              used.add(pick.id);
+              slots[n - 1] = pick;
+            } else {
+              slots[n - 1] = null;
+            }
+          }
+          return slots;
+        };
+        const slotVideos = pickSlotAssets(
+          eligibleVideos,
+          requiredVideos,
+          'VIDEO',
+        );
+        const slotImages = pickSlotAssets(
+          eligibleImages,
+          requiredImages,
+          'IMAGE',
+        );
+
+        const existingAssetIdSet = new Set(existingAssetIds);
+        const selectedVideos = slotVideos.filter(Boolean);
+        const selectedImages = slotImages.filter(Boolean);
+        const selectedNewVideos = selectedVideos.filter(
+          (asset) => !existingAssetIdSet.has(asset.id),
+        );
+        const selectedNewImages = selectedImages.filter(
+          (asset) => !existingAssetIdSet.has(asset.id),
+        );
         const remainingVideos = Math.max(
           0,
-          requiredVideos - existingAssetsByType.videos.length,
+          requiredVideos - selectedVideos.length,
         );
         const remainingImages = Math.max(
           0,
-          requiredImages - existingAssetsByType.images.length,
+          requiredImages - selectedImages.length,
         );
-        const selectedNewVideos = eligibleVideos.slice(0, remainingVideos);
-        const selectedNewImages = eligibleImages.slice(0, remainingImages);
-        const selectedVideos = [
-          ...existingAssetsByType.videos,
-          ...selectedNewVideos,
-        ].slice(0, requiredVideos);
-        const selectedImages = [
-          ...existingAssetsByType.images,
-          ...selectedNewImages,
-        ].slice(0, requiredImages);
-        const selectedNewAssetsWithLark = await this.getAssetsByIds([
-          ...selectedNewVideos.map((asset) => asset.id),
-          ...selectedNewImages.map((asset) => asset.id),
+        const selectedAssetsWithLark = await this.getAssetsByIds([
+          ...selectedVideos.map((asset) => asset.id),
+          ...selectedImages.map((asset) => asset.id),
         ]);
-        const selectedNewAssetWithLarkById = new Map(
-          selectedNewAssetsWithLark.map((asset) => [asset.id, asset]),
+        const selectedAssetWithLarkById = new Map(
+          selectedAssetsWithLark.map((asset) => [asset.id, asset]),
         );
-        const selectedNewVideosForHistory = selectedNewVideos.map(
-          (asset) => selectedNewAssetWithLarkById.get(asset.id) || asset,
-        );
-        const selectedNewImagesForHistory = selectedNewImages.map(
-          (asset) => selectedNewAssetWithLarkById.get(asset.id) || asset,
-        );
-        const selectedVideosForHistory = [
-          ...existingAssetsByType.videos,
-          ...selectedNewVideosForHistory,
-        ].slice(0, requiredVideos);
-        const selectedImagesForHistory = [
-          ...existingAssetsByType.images,
-          ...selectedNewImagesForHistory,
-        ].slice(0, requiredImages);
+        const withLark = (asset: any) =>
+          selectedAssetWithLarkById.get(asset.id) || asset;
+        const selectedNewVideosForHistory = selectedNewVideos.map(withLark);
+        const selectedNewImagesForHistory = selectedNewImages.map(withLark);
+        const selectedVideosForHistory = selectedVideos.map(withLark);
+        const selectedImagesForHistory = selectedImages.map(withLark);
         const isComplete =
           selectedVideos.length >= requiredVideos &&
           selectedImages.length >= requiredImages;
@@ -1467,6 +1577,12 @@ export class DraftAutomationScheduler {
               rule: automation.nameRule || null,
               excluded: exclusionCounts.nameRuleMismatch,
             },
+            {
+              key: 'has_cid',
+              label: 'Tên content có chứa mã CID',
+              status: 'passed',
+              excluded: exclusionCounts.noCid,
+            },
           ],
         };
 
@@ -1538,8 +1654,8 @@ export class DraftAutomationScheduler {
         const substitutedValues = this.buildSubstitutedValues({
           template,
           creator,
-          videos: selectedVideos,
-          images: selectedImages,
+          videos: slotVideos,
+          images: slotImages,
           publishMode,
           requiredVideos,
           requiredImages,
