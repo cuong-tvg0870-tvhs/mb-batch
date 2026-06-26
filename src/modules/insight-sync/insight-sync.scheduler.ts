@@ -88,14 +88,21 @@ export class InsightSyncScheduler implements OnModuleInit {
 
   /**
    * 🔴 MAX SYNC
-   * Runs once a day. MAX is expensive and should not compete with near-real-time ranges.
+   * Runs once a day. MAX is expensive and should not compete with near-real-time
+   * ranges. 3D/7D are bundled in (local rollup only, no extra Meta call) so the
+   * daily creative performanceStatus is computed with real roas7d/roas3d buckets
+   * — otherwise a pure-MAX run leaves them empty and SCALE_P1/P2 is unreachable.
    */
   @Cron('15 2 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async scheduleMaxSync() {
-    this.logger.log('📅 Scheduling Max Insights Sync (daily)...');
+    this.logger.log('📅 Scheduling Max Insights Sync (daily, +3D/7D for status)...');
     await this.queueSyncForAllAccounts(
       [InsightSyncLevel.CAMPAIGN, InsightSyncLevel.ADSET, InsightSyncLevel.AD],
-      [InsightSyncRange.MAX],
+      [
+        InsightSyncRange.MAX,
+        InsightSyncRange.LAST_3D,
+        InsightSyncRange.LAST_7D,
+      ],
     );
   }
 

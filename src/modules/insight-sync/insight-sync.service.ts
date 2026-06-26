@@ -1497,6 +1497,40 @@ export class InsightSyncService {
           });
         }
 
+        // Materialize per-day CreativeInsight rows (range=DAILY) by summing the
+        // creative's ads' DAILY ad-insights per date. The batch rollup never
+        // wrote these, so the creative detail DAILY chart was always empty.
+        // Upserted by the unique (creativeId, dateStart, range) key; DAILY rows
+        // carry no pointer field, so the cleanup step below never touches them.
+        const creativeDailyBuckets = new Map<
+          string,
+          { dateStop: string; data: Record<string, number> }
+        >();
+        for (const insight of creativeDaily) {
+          if (!insight.dateStart) continue;
+          if (!creativeDailyBuckets.has(insight.dateStart)) {
+            creativeDailyBuckets.set(insight.dateStart, {
+              dateStop: insight.dateStop || insight.dateStart,
+              data: {},
+            });
+          }
+          const current = creativeDailyBuckets.get(insight.dateStart)!;
+          const stop = insight.dateStop || insight.dateStart;
+          if (stop > current.dateStop) current.dateStop = stop;
+          this.sumMetrics(current.data, insight);
+        }
+        for (const [dateStart, dailyBucket] of creativeDailyBuckets.entries()) {
+          this.recalculateDerivedMetrics(dailyBucket.data);
+          rollupRecords.push({
+            creativeId: creative.id,
+            level: LevelInsight.AD,
+            range: InsightRange.DAILY,
+            dateStart,
+            dateStop: dailyBucket.dateStop,
+            ...dailyBucket.data,
+          });
+        }
+
         const maxBucket = rangeBuckets.get(InsightRange.MAX) || {};
         const day7Bucket = rangeBuckets.get(InsightRange.DAY_7) || {};
         const day3Bucket = rangeBuckets.get(InsightRange.DAY_3) || {};
@@ -1593,16 +1627,26 @@ export class InsightSyncService {
 
       if (rollupRecords.length === 0) continue;
 
-      const pointerRecords = await this.prisma.creativeInsight.findMany({
-        where: {
-          OR: rollupRecords.map((record) => ({
-            creativeId: record.creativeId,
-            range: record.range,
-            dateStart: record.dateStart,
-          })),
-        },
-        select: { id: true, creativeId: true, range: true },
-      });
+      // Only the pointer-backed ranges (today/3d/7d/max) need their ids resolved
+      // to update the Creative pointer fields. Exclude the many DAILY rows added
+      // above so this OR query stays small.
+      const pointerRollupRecords = rollupRecords.filter(
+        (record) => record.range !== InsightRange.DAILY,
+      );
+
+      const pointerRecords =
+        pointerRollupRecords.length > 0
+          ? await this.prisma.creativeInsight.findMany({
+              where: {
+                OR: pointerRollupRecords.map((record) => ({
+                  creativeId: record.creativeId,
+                  range: record.range,
+                  dateStart: record.dateStart,
+                })),
+              },
+              select: { id: true, creativeId: true, range: true },
+            })
+          : [];
 
       const pointerMap = new Map<string, Record<string, string>>();
       for (const insight of pointerRecords) {
