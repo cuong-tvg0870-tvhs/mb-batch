@@ -455,7 +455,29 @@ export class InsightSyncService {
       }),
     )) as Array<{ id: string }>;
 
-    const entityIds = entities.map((entity) => entity.id);
+    // Activity-based recency: also refresh entities that already have a DAILY
+    // row in the window, regardless of status/updatedAt. `updatedAt` is not
+    // bumped on Meta refresh for AdSet/Ad, so a recently-active entity that was
+    // paused/archived >7 days ago would otherwise stop getting its last days
+    // re-fetched while attribution is still settling.
+    const recentlyActive = (await executeDbWithRetry(() =>
+      (this.prisma[prismaModel] as any).findMany({
+        where: {
+          range: InsightRange.DAILY,
+          dateStart: { gte: since },
+          [parentModel]: { accountId },
+        },
+        select: { [relationFieldId]: true },
+        distinct: [relationFieldId],
+      }),
+    )) as Array<Record<string, string>>;
+
+    const entityIds = [
+      ...new Set([
+        ...entities.map((entity) => entity.id),
+        ...recentlyActive.map((row) => row[relationFieldId]),
+      ]),
+    ];
     if (entityIds.length === 0) {
       this.logger.log(`[${accountId}] No ${level} entities need DAILY sync.`);
       return;
@@ -1839,6 +1861,7 @@ export class InsightSyncService {
     ];
 
     const tz = await this.getAccountTimezone(accountId);
+    let chunkFailures = 0;
 
     try {
       for (const level of levels) {
@@ -1865,7 +1888,7 @@ export class InsightSyncService {
         const entities = await (this.prisma[parentModel] as any).findMany({
           where: {
             accountId,
-            status: { in: ['ACTIVE', 'IN_PROCESS', 'PAUSED'] },
+            status: { in: ['ACTIVE', 'IN_PROCESS', 'PAUSED', 'ARCHIVED'] },
           },
           select: selectFields,
         });
@@ -2043,6 +2066,12 @@ export class InsightSyncService {
               }
             }
           } catch (err: any) {
+            // Permission/token problems affect everything -> bubble up so the
+            // outer handler can flag needsReauth. Transient chunk failures are
+            // isolated but counted so we can fail the job at the end (engaging
+            // BullMQ retry) instead of reporting "finished" on partial data.
+            if (isPermissionError(err)) throw err;
+            chunkFailures++;
             this.logger.error(
               `[${accountId}] ❌ Error in missing daily chunk ${i + 1}: ${err.message}`,
             );
@@ -2063,9 +2092,29 @@ export class InsightSyncService {
 
       const duration = ((Date.now() - start) / 1000).toFixed(2);
       this.logger.log(
-        `[${accountId}] ✨ Missing Daily Insights sync finished in ${duration}s.`,
+        `[${accountId}] ✨ Missing Daily Insights sync finished in ${duration}s${chunkFailures > 0 ? ` (with ${chunkFailures} failed chunks)` : ''}.`,
       );
+
+      // Roll-ups ran on whatever we fetched, but surface the partial fetch so
+      // BullMQ retries and fills the remaining gaps next attempt.
+      if (chunkFailures > 0) {
+        throw new Error(
+          `Missing daily sync completed with ${chunkFailures} failed chunk(s); retrying to fill gaps.`,
+        );
+      }
     } catch (error) {
+      if (isPermissionError(error)) {
+        this.logger.warn(
+          `[${accountId}] 🔑 Permission error during missing daily sync. Marking needsReauth.`,
+        );
+        await executeDbWithRetry(() =>
+          this.prisma.account.update({
+            where: { id: accountId },
+            data: { needsReauth: true },
+          }),
+        );
+        return;
+      }
       this.logger.error(
         `[${accountId}] ❌ Error syncing missing daily insights: ${error instanceof Error ? error.message : String(error)}`,
       );
