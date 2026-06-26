@@ -125,6 +125,18 @@ const resolveCreativeMedia = (creative: any) => {
   };
 };
 
+/**
+ * Maps raw Meta API objects into Prisma rows for the synced core tables.
+ *
+ * INVARIANT — do not trim `rawPayload`. The draft-copy and detail flows in
+ * mb-ads/mb-frontend reconstruct campaigns and render previews almost entirely
+ * from the full Meta JSON stored here (creative.object_story_spec /
+ * asset_feed_spec, adset.targeting / promoted_object, campaign bid_strategy /
+ * special_ad_categories, etc.). The structured columns below are a convenience
+ * subset for listing/filtering; `rawPayload` is the contract. The fetch field
+ * lists in common/utils/meta-field.ts are what populate it, so keep those the
+ * superset and always store `toPrismaJson(<whole object>)`.
+ */
 export class MetaTransformHelper {
   static campaign(c: any, accountId: string) {
     return {

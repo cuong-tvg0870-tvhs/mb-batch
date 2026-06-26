@@ -21,6 +21,26 @@ import {
   CREATIVE_FIELDS,
 } from '../../common/utils/meta-field';
 import { PrismaService } from '../prisma/prisma.service';
+import { META_SYNC_CONFIG } from './meta-sync.constants';
+
+/** Models whose freshness/change is tracked by id + timestamp columns. */
+type CoreModel = 'campaign' | 'adSet' | 'ad' | 'creative';
+
+/**
+ * Narrow view over the four core Prisma delegates. They all expose id +
+ * lastFetchedAt + remoteUpdatedAt, so the change/hydration queries can be typed
+ * through one signature instead of an `any` cast at every call site.
+ */
+interface CoreModelDelegate {
+  findMany(args: {
+    where: { id: { in: string[] } };
+    select: { id: true; lastFetchedAt?: true; remoteUpdatedAt?: true };
+  }): Promise<
+    Array<{ id: string; lastFetchedAt?: Date | null; remoteUpdatedAt?: Date | null }>
+  >;
+}
+
+type EntityChanges<T> = { creates: T[]; updates: T[] };
 
 @Injectable()
 export class MetaSyncService {
@@ -28,20 +48,25 @@ export class MetaSyncService {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  private readonly hydrationMaxAgeMs = 6 * 60 * 60 * 1000;
+  /** Ad fields plus the nested creative sub-tree, built once and reused. */
+  private readonly adFieldsWithCreative = [
+    ...AD_FIELDS.filter((f) => f !== 'creative'),
+    `creative{${CREATIVE_FIELDS.join(',')}}`,
+  ];
 
-  private async findIdsNeedingHydration(
-    model: 'campaign' | 'adSet',
-    ids: string[],
-  ) {
+  private coreModel(model: CoreModel): CoreModelDelegate {
+    return this.prisma[model] as unknown as CoreModelDelegate;
+  }
+
+  private async findIdsNeedingHydration(model: CoreModel, ids: string[]) {
     if (!ids.length) return [];
 
-    const rows = (await (this.prisma[model] as any).findMany({
+    const rows = await this.coreModel(model).findMany({
       where: { id: { in: ids } },
       select: { id: true, lastFetchedAt: true },
-    })) as Array<{ id: string; lastFetchedAt: Date | null }>;
+    });
 
-    const freshCutoff = Date.now() - this.hydrationMaxAgeMs;
+    const freshCutoff = Date.now() - META_SYNC_CONFIG.hydrationMaxAgeMs;
     const rowMap = new Map(rows.map((row) => [row.id, row]));
 
     return ids.filter((id) => {
@@ -53,13 +78,13 @@ export class MetaSyncService {
 
   private async splitChangedRows<
     T extends { id: string; remoteUpdatedAt?: Date | null },
-  >(model: 'campaign' | 'adSet' | 'ad' | 'creative', rows: T[]) {
-    if (!rows.length) return { creates: [] as T[], updates: [] as T[] };
+  >(model: CoreModel, rows: T[]): Promise<EntityChanges<T>> {
+    if (!rows.length) return { creates: [], updates: [] };
 
-    const existing = (await (this.prisma[model] as any).findMany({
+    const existing = await this.coreModel(model).findMany({
       where: { id: { in: rows.map((row) => row.id) } },
       select: { id: true, remoteUpdatedAt: true },
-    })) as Array<{ id: string; remoteUpdatedAt: Date | null }>;
+    });
 
     const existingMap = new Map(existing.map((row) => [row.id, row]));
     const creates: T[] = [];
@@ -86,6 +111,154 @@ export class MetaSyncService {
     return { creates, updates };
   }
 
+  /** Fetch campaigns/adsets/ads changed since the given unix timestamp. */
+  private async fetchChangedSince(adAccount: AdAccount, sinceUnix: number) {
+    const baseFilter = {
+      limit: META_SYNC_CONFIG.pageLimit,
+      filtering: [
+        { field: 'updated_time', operator: 'GREATER_THAN', value: sinceUnix },
+      ],
+    };
+
+    const [campaignsCursor, adsetsCursor, adsCursor] = await Promise.all([
+      executeMetaApiWithRetry(
+        () => adAccount.getCampaigns(CAMPAIGN_FIELDS, baseFilter, true),
+        { logger: this.logger },
+      ),
+      executeMetaApiWithRetry(
+        () => adAccount.getAdSets(ADSET_FIELDS, baseFilter, true),
+        { logger: this.logger },
+      ),
+      executeMetaApiWithRetry(
+        () => adAccount.getAds(this.adFieldsWithCreative, baseFilter, true),
+        { logger: this.logger },
+      ),
+    ]);
+
+    const [campaigns, adsets, ads] = await Promise.all([
+      fetchAll(campaignsCursor),
+      fetchAll(adsetsCursor),
+      fetchAll(adsCursor),
+    ]);
+
+    return { campaigns, adsets, ads };
+  }
+
+  /**
+   * Fetch all adsets + ads belonging to the given campaigns. Used when a
+   * campaign itself changed, so the draft-copy UI gets a complete tree without
+   * waiting for each child's own updated_time to move.
+   */
+  private async hydrateChildrenOf(adAccount: AdAccount, campaignIds: string[]) {
+    const adsets: any[] = [];
+    const ads: any[] = [];
+
+    for (const chunkIds of chunk(campaignIds, META_SYNC_CONFIG.idChunkSize)) {
+      const filter = {
+        limit: META_SYNC_CONFIG.pageLimit,
+        filtering: [{ field: 'campaign.id', operator: 'IN', value: chunkIds }],
+      };
+
+      const [adsetsCursor, adsCursor] = await Promise.all([
+        executeMetaApiWithRetry(
+          () => adAccount.getAdSets(ADSET_FIELDS, filter, true),
+          { logger: this.logger },
+        ),
+        executeMetaApiWithRetry(
+          () => adAccount.getAds(this.adFieldsWithCreative, filter, true),
+          { logger: this.logger },
+        ),
+      ]);
+
+      const [adsetsData, adsData] = await Promise.all([
+        fetchAll(adsetsCursor),
+        fetchAll(adsCursor),
+      ]);
+      adsets.push(...adsetsData);
+      ads.push(...adsData);
+    }
+
+    return { adsets, ads };
+  }
+
+  /** Fetch campaigns or adsets by explicit id list (parent backfill). */
+  private async hydrateByIds(
+    adAccount: AdAccount,
+    entity: 'campaign' | 'adSet',
+    ids: string[],
+  ) {
+    const rows: any[] = [];
+
+    for (const chunkIds of chunk(ids, META_SYNC_CONFIG.idChunkSize)) {
+      const filter = {
+        limit: META_SYNC_CONFIG.pageLimit,
+        filtering: [{ field: 'id', operator: 'IN', value: chunkIds }],
+      };
+
+      const cursor = await executeMetaApiWithRetry(
+        () =>
+          entity === 'campaign'
+            ? adAccount.getCampaigns(CAMPAIGN_FIELDS, filter, true)
+            : adAccount.getAdSets(ADSET_FIELDS, filter, true),
+        { logger: this.logger },
+      );
+
+      rows.push(...(await fetchAll(cursor)));
+    }
+
+    return rows;
+  }
+
+  /**
+   * Backfill any adset referenced by a fetched ad but not yet present. Mutates
+   * `allAdSets` in place. Runs BEFORE campaign backfill so a freshly hydrated
+   * adset can contribute its campaign_id to the campaign requirement set.
+   */
+  private async hydrateMissingAdSets(
+    adAccount: AdAccount,
+    allAdSets: any[],
+    allAds: any[],
+  ) {
+    const fetched = new Set(allAdSets.map((as) => as.id));
+    const required = [...new Set(allAds.map((ad) => ad.adset_id))].filter(
+      (id) => id && !fetched.has(id),
+    );
+    if (!required.length) return;
+
+    const missing = await this.findIdsNeedingHydration('adSet', required);
+    if (!missing.length) return;
+
+    allAdSets.push(...(await this.hydrateByIds(adAccount, 'adSet', missing)));
+  }
+
+  /**
+   * Backfill any campaign referenced by a fetched adset/ad but not yet present.
+   * Mutates `allCampaigns` in place. Guarantees every adset's parent campaign
+   * exists before upsert, so the adset FK never fails.
+   */
+  private async hydrateMissingCampaigns(
+    adAccount: AdAccount,
+    allCampaigns: any[],
+    allAdSets: any[],
+    allAds: any[],
+  ) {
+    const fetched = new Set(allCampaigns.map((c) => c.id));
+    const required = [
+      ...new Set([
+        ...allAdSets.map((as) => as.campaign_id),
+        ...allAds.map((ad) => ad.campaign_id),
+      ]),
+    ].filter((id) => id && !fetched.has(id));
+    if (!required.length) return;
+
+    const missing = await this.findIdsNeedingHydration('campaign', required);
+    if (!missing.length) return;
+
+    allCampaigns.push(
+      ...(await this.hydrateByIds(adAccount, 'campaign', missing)),
+    );
+  }
+
   async syncCampaignData() {
     this.logger.log('⏰ Starting Batch Sync Campaign Data...');
 
@@ -95,189 +268,59 @@ export class MetaSyncService {
         select: { id: true, lastFetchedAt: true },
       });
 
-      const limit = pLimit(4);
+      const limit = pLimit(META_SYNC_CONFIG.accountConcurrency);
 
-      const syncTasks = accounts.map((account) => {
-        return limit(async () => {
+      const syncTasks = accounts.map((account) =>
+        limit(async () => {
           try {
             const adAccount = new AdAccount(account.id);
-            const lookbackDays = Number(
-              process.env.META_CORE_SYNC_LOOKBACK_DAYS || 14,
-            );
-            const overlapHours = Number(
-              process.env.META_CORE_SYNC_OVERLAP_HOURS || 6,
-            );
             const syncFrom = account.lastFetchedAt
               ? new Date(
                   account.lastFetchedAt.getTime() -
-                    overlapHours * 60 * 60 * 1000,
+                    META_SYNC_CONFIG.overlapHours * 60 * 60 * 1000,
                 )
-              : new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000);
+              : new Date(
+                  Date.now() -
+                    META_SYNC_CONFIG.lookbackDays * 24 * 60 * 60 * 1000,
+                );
             const lastSyncUnix = Math.floor(syncFrom.getTime() / 1000);
 
             this.logger.log(
-              `🔄 [${account.id}] Syncing data updated since ${dayjs.unix(lastSyncUnix).format('YYYY-MM-DD HH:mm:ss')}`,
+              `🔄 [${account.id}] Syncing data updated since ${dayjs
+                .unix(lastSyncUnix)
+                .format('YYYY-MM-DD HH:mm:ss')}`,
             );
 
-            const baseFilter = {
-              limit: 50,
-              filtering: [
-                {
-                  field: 'updated_time',
-                  operator: 'GREATER_THAN',
-                  value: lastSyncUnix,
-                },
-              ],
-            };
+            const {
+              campaigns: allCampaigns,
+              adsets: allAdSets,
+              ads: allAds,
+            } = await this.fetchChangedSince(adAccount, lastSyncUnix);
 
-            const adFields = [
-              ...AD_FIELDS.filter((f) => f !== 'creative'),
-              `creative{${CREATIVE_FIELDS.join(',')}}`,
-            ];
-
-            const [campaignsCursor, changedAdsetsCursor, changedAdsCursor] =
-              await Promise.all([
-                executeMetaApiWithRetry(
-                  () =>
-                    adAccount.getCampaigns(CAMPAIGN_FIELDS, baseFilter, true),
-                  { logger: this.logger },
-                ),
-                executeMetaApiWithRetry(
-                  () => adAccount.getAdSets(ADSET_FIELDS, baseFilter, true),
-                  { logger: this.logger },
-                ),
-                executeMetaApiWithRetry(
-                  () => adAccount.getAds(adFields, baseFilter, true),
-                  { logger: this.logger },
-                ),
-              ]);
-
-            const [allCampaigns, allAdSets, allAds] = await Promise.all([
-              fetchAll(campaignsCursor),
-              fetchAll(changedAdsetsCursor),
-              fetchAll(changedAdsCursor),
-            ]);
-            const campaignIds = allCampaigns.map((c) => c.id);
-
-            // If a campaign itself changed, hydrate its children so draft-copy UI
-            // has a complete tree without waiting for child updated_time changes.
-            if (campaignIds.length > 0) {
-              for (const chunkIds of chunk(campaignIds, 50)) {
-                const [asCursor, aCursor] = await Promise.all([
-                  executeMetaApiWithRetry(
-                    () =>
-                      adAccount.getAdSets(
-                        ADSET_FIELDS,
-                        {
-                          limit: 50,
-                          filtering: [
-                            {
-                              field: 'campaign.id',
-                              operator: 'IN',
-                              value: chunkIds,
-                            },
-                          ],
-                        },
-                        true,
-                      ),
-                    { logger: this.logger },
-                  ),
-                  executeMetaApiWithRetry(
-                    () =>
-                      adAccount.getAds(
-                        adFields,
-                        {
-                          limit: 50,
-                          filtering: [
-                            {
-                              field: 'campaign.id',
-                              operator: 'IN',
-                              value: chunkIds,
-                            },
-                          ],
-                        },
-                        true,
-                      ),
-                    { logger: this.logger },
-                  ),
-                ]);
-
-                const [asData, aData] = await Promise.all([
-                  fetchAll(asCursor),
-                  fetchAll(aCursor),
-                ]);
-                allAdSets.push(...asData);
-                allAds.push(...aData);
-              }
-            }
-
-            // Missing parent fetching logic
-            const fetchedCampaignIds = new Set(allCampaigns.map((c) => c.id));
-            const requiredCampaignIds = [
-              ...new Set([
-                ...allAdSets.map((as) => as.campaign_id),
-                ...allAds.map((ad) => ad.campaign_id),
-              ]),
-            ].filter((id) => id && !fetchedCampaignIds.has(id));
-
-            if (requiredCampaignIds.length > 0) {
-              const missingCampaignIds = await this.findIdsNeedingHydration(
-                'campaign',
-                requiredCampaignIds,
+            // If a campaign itself changed, hydrate its children so draft-copy
+            // UI has a complete tree without waiting for child updates.
+            const changedCampaignIds = allCampaigns.map((c) => c.id);
+            if (changedCampaignIds.length > 0) {
+              const children = await this.hydrateChildrenOf(
+                adAccount,
+                changedCampaignIds,
               );
-
-              if (missingCampaignIds.length > 0) {
-                for (const chunkIds of chunk(missingCampaignIds, 50)) {
-                  const cursor = await executeMetaApiWithRetry(() =>
-                    adAccount.getCampaigns(
-                      CAMPAIGN_FIELDS,
-                      {
-                        limit: 50,
-                        filtering: [
-                          { field: 'id', operator: 'IN', value: chunkIds },
-                        ],
-                      },
-                      true,
-                    ),
-                  );
-                  allCampaigns.push(...(await fetchAll(cursor)));
-                }
-              }
+              allAdSets.push(...children.adsets);
+              allAds.push(...children.ads);
             }
 
-            const fetchedAdSetIds = new Set(allAdSets.map((as) => as.id));
-            const requiredAdSetIds = [
-              ...new Set(allAds.map((ad) => ad.adset_id)),
-            ].filter((id) => id && !fetchedAdSetIds.has(id));
+            // Backfill missing parents in dependency order: adsets first (so a
+            // hydrated adset's campaign_id is known), then campaigns. This keeps
+            // every FK target present before the upsert.
+            await this.hydrateMissingAdSets(adAccount, allAdSets, allAds);
+            await this.hydrateMissingCampaigns(
+              adAccount,
+              allCampaigns,
+              allAdSets,
+              allAds,
+            );
 
-            if (requiredAdSetIds.length > 0) {
-              const missingAdSetIds = await this.findIdsNeedingHydration(
-                'adSet',
-                requiredAdSetIds,
-              );
-
-              if (missingAdSetIds.length > 0) {
-                for (const chunkIds of chunk(missingAdSetIds, 50)) {
-                  const cursor = await executeMetaApiWithRetry(
-                    () =>
-                      adAccount.getAdSets(
-                        ADSET_FIELDS,
-                        {
-                          limit: 50,
-                          filtering: [
-                            { field: 'id', operator: 'IN', value: chunkIds },
-                          ],
-                        },
-                        true,
-                      ),
-                    { logger: this.logger },
-                  );
-                  allAdSets.push(...(await fetchAll(cursor)));
-                }
-              }
-            }
-
-            await this.upsertFlatStructure(
+            const summary = await this.upsertFlatStructure(
               allCampaigns,
               allAdSets,
               allAds,
@@ -288,13 +331,21 @@ export class MetaSyncService {
               where: { id: account.id },
               data: { lastFetchedAt: new Date() },
             });
+
+            this.logger.log(
+              `✅ [${account.id}] campaigns +${summary.campaigns.created}/~${summary.campaigns.updated}, ` +
+                `adsets +${summary.adsets.created}/~${summary.adsets.updated}, ` +
+                `ads +${summary.ads.created}/~${summary.ads.updated}, ` +
+                `creatives +${summary.creatives.created}/~${summary.creatives.updated}, ` +
+                `images +${summary.images}, videos +${summary.videos}`,
+            );
           } catch (error) {
             this.logger.error(
               `❌ Account ${account.id}: ${parseMetaError(error).message}`,
             );
           }
-        });
-      });
+        }),
+      );
 
       await Promise.all(syncTasks);
       this.logger.log('✅ Batch Sync Campaign Data Completed.');
@@ -397,6 +448,9 @@ export class MetaSyncService {
           item.imageHash
         }`;
 
+        // Dedup the AdImage row, but always link THIS creative to it — every
+        // creative sharing an image hash must carry the imageId FK, not just
+        // the first one seen in the batch.
         if (!imageMap.has(key)) {
           imageMap.set(key, {
             id: key,
@@ -404,8 +458,8 @@ export class MetaSyncService {
             accountId: item.accountId,
             url: item?.thumbnailUrl,
           });
-          item.imageId = key;
         }
+        item.imageId = key;
       }
     }
 
@@ -503,5 +557,26 @@ export class MetaSyncService {
         }
       }
     }
+
+    return {
+      campaigns: {
+        created: campaignChanges.creates.length,
+        updated: campaignChanges.updates.length,
+      },
+      adsets: {
+        created: adsetChanges.creates.length,
+        updated: adsetChanges.updates.length,
+      },
+      ads: {
+        created: adChanges.creates.length,
+        updated: adChanges.updates.length,
+      },
+      creatives: {
+        created: creativeChanges.creates.length,
+        updated: creativeChanges.updates.length,
+      },
+      images: newImages.length,
+      videos: newVideos.length,
+    };
   }
 }

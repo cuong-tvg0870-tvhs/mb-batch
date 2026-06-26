@@ -494,13 +494,6 @@ export const CleanObjectOrArray = (value: any): any => {
   return value;
 };
 
-export const chunkArray = <T>(arr: T[], size: number): T[][] => {
-  const result: T[][] = [];
-  for (let i = 0; i < arr.length; i += size) {
-    result.push(arr.slice(i, i + size));
-  }
-  return result;
-};
 
 export function getDateRange(since: Date, until: Date): string[] {
   const dates: string[] = [];
