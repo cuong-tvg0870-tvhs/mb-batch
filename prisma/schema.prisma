@@ -212,12 +212,13 @@ model UserProductCatalog {
 
 // [{"id": "249650921563125", "name": "Seyoul Beauty - Malaysia"}, {"id": "111534788320800", "name": "Seyoul Smooth Skin - ผิวเรียบเนียนไร้กาลเวลา"}]
 model Fanpage {
-  id              String           @id
-  name            String?
-  rawPayload      Json?
-  userFanpages    UserFanpage[]
-  projectFanpages ProjectFanpage[]
-  creatives       Creative[]
+  id               String           @id
+  name             String?
+  rawPayload       Json?
+  messageTemplates Json?
+  userFanpages     UserFanpage[]
+  projectFanpages  ProjectFanpage[]
+  creatives        Creative[]
 }
 
 model Account {
