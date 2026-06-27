@@ -1710,16 +1710,29 @@ export class DraftAutomationScheduler {
           publishResult =
             await this.metaPublisher.publishDraftCampaign(generatedCampaignId);
 
-          successSteps[successSteps.length - 1] = {
-            key: 'publish_meta',
-            label: 'Đăng bản nháp chiến dịch lên Meta',
-            status: 'success',
-            metaCampaignId: publishResult.campaignId,
-            publishHistoryId: publishResult.publishHistoryId,
-          };
+          if (publishResult?.skipped) {
+            // Bị khóa chống trùng bỏ qua (tiến trình khác đang publish hoặc đã
+            // publish) — KHÔNG đánh dấu thành công và KHÔNG ghi nhận asset đã dùng
+            // ở lần chạy này, để tránh báo nhầm.
+            successSteps[successSteps.length - 1] = {
+              key: 'publish_meta',
+              label: 'Đăng bản nháp chiến dịch lên Meta',
+              status: 'skipped',
+              reason:
+                'Đang được publish bởi tiến trình khác hoặc đã được publish',
+            };
+          } else {
+            successSteps[successSteps.length - 1] = {
+              key: 'publish_meta',
+              label: 'Đăng bản nháp chiến dịch lên Meta',
+              status: 'success',
+              metaCampaignId: publishResult.campaignId,
+              publishHistoryId: publishResult.publishHistoryId,
+            };
 
-          for (const asset of [...selectedVideos, ...selectedImages]) {
-            publishedAssetIds.add(asset.id);
+            for (const asset of [...selectedVideos, ...selectedImages]) {
+              publishedAssetIds.add(asset.id);
+            }
           }
         } else if (publishRequested && !isComplete) {
           successSteps.push({

@@ -66,14 +66,26 @@ export class DraftAutomationMetaPublisherService {
 
     const adAccountId = this.normalizeAdAccountId(accountId);
     const adAccount = new AdAccount(adAccountId);
+
+    // Khóa chống trùng: chỉ MỘT tiến trình được publish một draft tại một thời điểm.
+    // updateMany đặt isPublishing=true một cách nguyên tử khi draft đang rảnh và
+    // CHƯA có meta_id. Nếu count=0 → đang có tiến trình khác publish hoặc campaign
+    // đã được publish rồi → bỏ qua, tránh tạo campaign Meta TRÙNG (tiêu ngân sách
+    // hai lần khi hai lần cron chồng nhau). Mirror chốt chặn của publish thủ công.
+    const claim = await this.prisma.systemCampaign.updateMany({
+      where: { id: campaignSystem.id, isPublishing: false, meta_id: null },
+      data: { isPublishing: true, errors: Prisma.DbNull },
+    });
+    if (claim.count === 0) {
+      this.logger.warn(
+        `Bỏ qua publish draft ${campaignSystem.id}: đang được publish bởi tiến trình khác hoặc đã có meta_id.`,
+      );
+      return { skipped: true, reason: 'ALREADY_PUBLISHING_OR_PUBLISHED' };
+    }
+
     const history = await this.createPublishHistory(campaignSystem.id);
     let currentStepKey = 'campaign';
     let campaignMetaId: string | undefined;
-
-    await this.prisma.systemCampaign.update({
-      where: { id: campaignSystem.id },
-      data: { isPublishing: true, errors: Prisma.DbNull },
-    });
 
     try {
       currentStepKey = 'campaign';
