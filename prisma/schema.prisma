@@ -147,6 +147,8 @@ model User {
   savedFilters   SavedFilter[]
   exportPresets  ExportPreset[]
 
+  messageTemplates MessageTemplate[] @relation("UserMessageTemplates")
+
   createdAt   DateTime  @default(now())
   createdById String?
   updatedAt   DateTime  @updatedAt
@@ -212,13 +214,53 @@ model UserProductCatalog {
 
 // [{"id": "249650921563125", "name": "Seyoul Beauty - Malaysia"}, {"id": "111534788320800", "name": "Seyoul Smooth Skin - ผิวเรียบเนียนไร้กาลเวลา"}]
 model Fanpage {
-  id               String           @id
-  name             String?
-  rawPayload       Json?
-  messageTemplates Json?
-  userFanpages     UserFanpage[]
-  projectFanpages  ProjectFanpage[]
-  creatives        Creative[]
+  id                     String            @id
+  name                   String?
+  rawPayload             Json?
+  messageTemplates       Json?
+  userFanpages           UserFanpage[]
+  projectFanpages        ProjectFanpage[]
+  creatives              Creative[]
+  messageTemplateLibrary MessageTemplate[] @relation("FanpageMessageTemplates")
+}
+
+/// Kênh của template tin nhắn lưu nội bộ (không submit Meta).
+enum MessageTemplateChannel {
+  MESSENGER
+  WHATSAPP
+}
+
+/// Thư viện template tin nhắn lưu trong hệ thống, gắn theo Fanpage.
+/// Dùng cho màn quản lý template "Conversations" (Messenger) và WhatsApp.
+model MessageTemplate {
+  id      String                 @id @default(uuid())
+  name    String
+  channel MessageTemplateChannel
+
+  fanpageId String
+  fanpage   Fanpage @relation("FanpageMessageTemplates", fields: [fanpageId], references: [id], onDelete: Cascade)
+
+  /// Người tạo — chỉ người này (hoặc ADMIN) mới được sửa/xoá; người khác chỉ dùng/sao chép.
+  /// null = bản seed hệ thống (chỉ ADMIN sửa được).
+  createdById String?
+  createdBy   User?   @relation("UserMessageTemplates", fields: [createdById], references: [id], onDelete: SetNull)
+
+  /// Payload thống nhất theo channel:
+  /// - MESSENGER: { greeting, mediaType, mediaUrl, actionType, actions[] }
+  /// - WHATSAPP : { id, name, status, category, language, components[] } (WaTemplateRaw)
+  spec Json
+
+  /// Nguồn gốc + khử trùng khi seed
+  source     String? // 'manual' | 'clone' | 'seed:creative' | 'seed:fanpage'
+  sourceHash String? // hash ổn định của spec đã chuẩn hoá, để dedupe khi seed
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([fanpageId, channel, sourceHash])
+  @@index([fanpageId, channel])
+  @@index([createdById])
 }
 
 model Account {
