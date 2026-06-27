@@ -869,6 +869,23 @@ export class DraftAutomationMetaPublisherService {
 
     void use_age_min_control;
 
+    // Meta: với Advantage+ Audience (targeting_automation.advantage_audience = 1)
+    // KHÔNG được đặt age_max làm "control" thấp hơn 65 — độ tuổi tối đa thấp hơn
+    // chỉ được dùng làm GỢI Ý. Nếu gửi age_max < 65 Meta sẽ trả lỗi:
+    // "you cannot set the audience control for maximum age lower than 65".
+    // → ép age_max về 65 (giữ nguyên giá trị người dùng chọn ở cấp gợi ý/UI).
+    // age_min control vẫn hợp lệ nên giữ nguyên.
+    const advantageAudienceOn =
+      (rest as any)?.targeting_automation?.advantage_audience === 1 ||
+      (rest as any)?.targeting_automation?.advantage_audience === true;
+    if (
+      advantageAudienceOn &&
+      typeof (rest as any).age_max === 'number' &&
+      (rest as any).age_max < 65
+    ) {
+      (rest as any).age_max = 65;
+    }
+
     if (!targeting || !geo_locations) return CleanObjectOrArray(rest) || rest;
 
     const processInclusion = (geo: any) => {
