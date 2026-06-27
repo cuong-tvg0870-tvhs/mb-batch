@@ -1081,7 +1081,7 @@ export class MetaMediaUploadService {
       parentId,
     };
 
-    return this.prisma.creativeFolder.upsert({
+    const saved = await this.prisma.creativeFolder.upsert({
       where: { id: folder.id },
       update: {
         name: folder.name,
@@ -1091,6 +1091,59 @@ export class MetaMediaUploadService {
       },
       create: folder,
     });
+
+    if (parentId) {
+      await this.inheritFolderPermissions(parentId, saved.id);
+    }
+
+    return saved;
+  }
+
+  // Folder con tạo tự động khi upload cần kế thừa quyền của folder cha:
+  // mọi member (FolderMember) và project (ProjectFolder) được phân quyền ở
+  // folder cha cũng có quyền tương ứng ở folder mới này.
+  private async inheritFolderPermissions(parentId: string, folderId: string) {
+    try {
+      const [parentMembers, parentProjects] = await Promise.all([
+        this.prisma.folderMember.findMany({
+          where: { folderId: parentId },
+          select: { userId: true, permission: true },
+        }),
+        this.prisma.projectFolder.findMany({
+          where: { folderId: parentId },
+          select: { projectId: true },
+        }),
+      ]);
+
+      await Promise.all([
+        parentMembers.length
+          ? this.prisma.folderMember.createMany({
+              data: parentMembers.map((m) => ({
+                userId: m.userId,
+                folderId,
+                permission: m.permission,
+              })),
+              skipDuplicates: true,
+            })
+          : Promise.resolve(),
+        parentProjects.length
+          ? this.prisma.projectFolder.createMany({
+              data: parentProjects.map((p) => ({
+                projectId: p.projectId,
+                folderId,
+              })),
+              skipDuplicates: true,
+            })
+          : Promise.resolve(),
+      ]);
+    } catch (err) {
+      // Không để lỗi phân quyền chặn việc upload media; chỉ ghi log để xử lý sau.
+      this.logger.warn(
+        `Không kế thừa được quyền từ folder cha ${parentId} sang ${folderId}: ${
+          (err as Error)?.message ?? err
+        }`,
+      );
+    }
   }
 
   private async listFolderChildren(
