@@ -26,19 +26,49 @@ export class DraftCleanupScheduler {
           sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
           // Find all draft campaigns (meta_id is null) that have not been updated in the last 7 days
-          // and are not used as templates
-          const campaignsToDelete = await this.prisma.systemCampaign.findMany({
+          // and are not used as templates. Loại trừ draft đang publish dở.
+          const candidates = await this.prisma.systemCampaign.findMany({
             where: {
               meta_id: null,
+              isPublishing: false,
               updatedAt: { lt: sevenDaysAgo },
               templateCampaigns: {
                 none: {},
               },
             },
-            select: { id: true },
+            select: {
+              id: true,
+              publishHistories: { select: { steps: true } },
+            },
           });
 
-          const campaignIds = campaignsToDelete.map((c) => c.id);
+          // An toàn orphan: nếu một publishHistory có bước 'campaign' kèm metaId thì
+          // chiến dịch ĐÃ được tạo trên Meta dù cột meta_id đang null (crash giữa
+          // createCampaign và ghi DB). Xoá CỨNG sẽ mất dấu vĩnh viễn campaign đang
+          // tiêu tiền → giữ lại để xử lý thủ công, chỉ xoá các draft không có dấu vết Meta.
+          const orphanIds: string[] = [];
+          const campaignIds = candidates
+            .filter((c) => {
+              const hasMetaFootprint = (c.publishHistories || []).some(
+                (h) =>
+                  Array.isArray(h.steps) &&
+                  (h.steps as any[]).some(
+                    (s) => s?.key === 'campaign' && s?.metaId,
+                  ),
+              );
+              if (hasMetaFootprint) {
+                orphanIds.push(c.id);
+                return false;
+              }
+              return true;
+            })
+            .map((c) => c.id);
+
+          if (orphanIds.length > 0) {
+            this.logger.warn(
+              `Bỏ qua xoá ${orphanIds.length} draft nghi orphan (đã tạo campaign Meta nhưng thiếu meta_id): ${orphanIds.join(', ')}`,
+            );
+          }
 
           if (campaignIds.length === 0) {
             this.logger.log('No old draft campaigns found for cleanup.');
