@@ -262,11 +262,30 @@ export class MetaSyncService {
   async syncCampaignData() {
     this.logger.log('⏰ Starting Batch Sync Campaign Data...');
 
+    // Run summary surfaced to the batch run log (accounts are the unit of work).
+    const stats = {
+      accountsTotal: 0,
+      accountsOk: 0,
+      accountsFailed: 0,
+      campaignsCreated: 0,
+      campaignsUpdated: 0,
+      adsetsCreated: 0,
+      adsetsUpdated: 0,
+      adsCreated: 0,
+      adsUpdated: 0,
+      creativesCreated: 0,
+      creativesUpdated: 0,
+      images: 0,
+      videos: 0,
+      errors: [] as string[],
+    };
+
     try {
       const accounts = await this.prisma.account.findMany({
         where: { needsReauth: false, accountType: 'AD_ACCOUNT' as any },
         select: { id: true, lastFetchedAt: true },
       });
+      stats.accountsTotal = accounts.length;
 
       const limit = pLimit(META_SYNC_CONFIG.accountConcurrency);
 
@@ -332,6 +351,18 @@ export class MetaSyncService {
               data: { lastFetchedAt: new Date() },
             });
 
+            stats.accountsOk += 1;
+            stats.campaignsCreated += summary.campaigns.created;
+            stats.campaignsUpdated += summary.campaigns.updated;
+            stats.adsetsCreated += summary.adsets.created;
+            stats.adsetsUpdated += summary.adsets.updated;
+            stats.adsCreated += summary.ads.created;
+            stats.adsUpdated += summary.ads.updated;
+            stats.creativesCreated += summary.creatives.created;
+            stats.creativesUpdated += summary.creatives.updated;
+            stats.images += summary.images;
+            stats.videos += summary.videos;
+
             this.logger.log(
               `✅ [${account.id}] campaigns +${summary.campaigns.created}/~${summary.campaigns.updated}, ` +
                 `adsets +${summary.adsets.created}/~${summary.adsets.updated}, ` +
@@ -340,6 +371,10 @@ export class MetaSyncService {
                 `images +${summary.images}, videos +${summary.videos}`,
             );
           } catch (error) {
+            stats.accountsFailed += 1;
+            stats.errors.push(
+              `${account.id}: ${parseMetaError(error).message}`,
+            );
             this.logger.error(
               `❌ Account ${account.id}: ${parseMetaError(error).message}`,
             );
@@ -349,6 +384,7 @@ export class MetaSyncService {
 
       await Promise.all(syncTasks);
       this.logger.log('✅ Batch Sync Campaign Data Completed.');
+      return stats;
     } catch (err) {
       this.logger.error('🔥 Critical Sync Failure', err);
       throw new InternalServerErrorException(parseMetaError(err));
