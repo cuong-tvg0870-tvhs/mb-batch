@@ -94,6 +94,54 @@ export const parseMetaError = (err: any) => {
   };
 };
 
+/**
+ * Chuyển lỗi Meta (thường tiếng Anh) sang hướng dẫn ngắn gọn tiếng Việt + cách
+ * khắc phục. Trả null nếu không khớp mẫu nào để caller fallback message gốc.
+ * Giữ song song với bản ở mb-ads (common/utils/index.ts).
+ */
+export const metaErrorToFriendly = (metaError: any): string | null => {
+  if (!metaError) return null;
+  const msg = String(
+    metaError.message || metaError.raw?.message || '',
+  ).toLowerCase();
+  const code = Number(metaError.code);
+  const has = (...keys: string[]) => keys.some((k) => msg.includes(k));
+
+  if (has('image hash', 'image_hash', 'invalid image', 'image is not'))
+    return 'Ảnh không hợp lệ hoặc đã hết hạn trên Meta. Vui lòng chọn lại ảnh/tài nguyên cho quảng cáo bị lỗi rồi publish lại.';
+  if (has('video', 'thumbnail') && has('not', 'invalid', 'missing'))
+    return 'Video chưa sẵn sàng hoặc thiếu ảnh đại diện trên Meta. Hãy chọn lại video có thumbnail rồi thử lại.';
+  if (
+    has('minimum budget', 'budget is too low', 'below the minimum') ||
+    (has('budget') && has('minimum', 'too low'))
+  )
+    return 'Ngân sách đang thấp hơn mức tối thiểu của Meta. Vui lòng tăng ngân sách ngày/trọn đời rồi publish lại.';
+  if (has('special ad', 'special_ad_categor'))
+    return 'Chiến dịch thuộc Danh mục quảng cáo đặc biệt — cần khai báo đúng danh mục và quốc gia điều chỉnh.';
+  if (has('pixel', 'dataset', 'promoted object', 'promoted_object'))
+    return 'Thiếu Pixel/Dataset hoặc đối tượng quảng bá (promoted object). Vui lòng chọn Pixel/Trang phù hợp với mục tiêu chiến dịch.';
+  if (has('audience', 'targeting') && has('control', 'expand', 'invalid'))
+    return 'Thiết lập đối tượng/nhắm mục tiêu chưa hợp lệ. Kiểm tra lại quốc gia, độ tuổi và vị trí quảng cáo.';
+  if (
+    (has('page', 'fanpage') && has('permission', 'access', 'not authorized')) ||
+    code === 190
+  )
+    return 'Tài khoản/token Meta chưa đủ quyền hoặc đã hết hạn với Trang được chọn. Vui lòng kết nối lại hoặc liên hệ admin cấp quyền.';
+  if (
+    code === 200 ||
+    code === 10 ||
+    has('do not have permission', 'not authorized', 'permissions error')
+  )
+    return 'Tài khoản chưa đủ quyền thực hiện thao tác này trên Meta. Vui lòng liên hệ admin.';
+  if (
+    code === 17 ||
+    code === 613 ||
+    has('rate limit', 'too many', 'reduce the amount', 'request limit')
+  )
+    return 'Meta đang giới hạn tần suất (rate limit). Vui lòng đợi vài phút rồi publish lại.';
+  return null;
+};
+
 export const ThrowErrorWithFormDatabase = (
   key?: PrismaErrorKey,
   driverAdapterError?: DriverAdapterError,

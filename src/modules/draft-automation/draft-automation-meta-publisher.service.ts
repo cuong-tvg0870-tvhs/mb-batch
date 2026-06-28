@@ -5,7 +5,12 @@ import {
   Campaign,
   FacebookAdsApi,
 } from 'facebook-nodejs-business-sdk';
-import { CleanObjectOrArray, parseMetaError, sleep } from '../../common/utils';
+import {
+  CleanObjectOrArray,
+  metaErrorToFriendly,
+  parseMetaError,
+  sleep,
+} from '../../common/utils';
 import {
   AD_FIELDS,
   ADSET_FIELDS,
@@ -13,7 +18,12 @@ import {
 } from '../../common/utils/meta-field';
 import { PrismaService } from '../prisma/prisma.service';
 
-type PublishStepStatus = 'pending' | 'processing' | 'success' | 'failed';
+type PublishStepStatus =
+  | 'pending'
+  | 'processing'
+  | 'success'
+  | 'failed'
+  | 'partial';
 
 @Injectable()
 export class DraftAutomationMetaPublisherService {
@@ -86,6 +96,10 @@ export class DraftAutomationMetaPublisherService {
     const history = await this.createPublishHistory(campaignSystem.id);
     let currentStepKey = 'campaign';
     let campaignMetaId: string | undefined;
+    // Kết quả publish per-adset/per-ad ở scope hàm để nhánh catch đọc lại, quyết
+    // định có rollback hay không (chỉ rollback khi KHÔNG có ad nào lên live).
+    const adSetResults: any[] = [];
+    const adResults: any[] = [];
 
     try {
       currentStepKey = 'campaign';
@@ -136,8 +150,6 @@ export class DraftAutomationMetaPublisherService {
 
       let adSetsProcessed = 0;
       let adsProcessed = 0;
-      const adSetResults: any[] = [];
-      const adResults: any[] = [];
 
       for (const adSetSystem of campaignSystem.ad_sets) {
         currentStepKey = 'adsets';
@@ -162,27 +174,64 @@ export class DraftAutomationMetaPublisherService {
             ...adSetData,
             status: this.normalizeMetaStatus(adSetData.status, 'PAUSED'),
           }) || {};
+        const adSetName = adSetPayload.name || adSetSystem.id;
 
-        const adSet = await adAccount.createAdSet(
-          ADSET_FIELDS,
-          this.buildAdSetCreatePayload(adSetPayload, campaignMetaId),
-        );
-        const adSetMetaId = adSet.id || adSet._data?.id;
+        let adSetMetaId: string;
+        try {
+          const adSet = await adAccount.createAdSet(
+            ADSET_FIELDS,
+            this.buildAdSetCreatePayload(adSetPayload, campaignMetaId),
+          );
+          adSetMetaId = adSet.id || adSet._data?.id;
 
-        await this.prisma.systemAdSet.update({
-          where: { id: adSetSystem.id },
-          data: {
-            meta_id: adSetMetaId,
-            status: (adSet._data?.status || adSetPayload.status) as any,
-            data: adSetData as any,
-          },
-        });
+          await this.prisma.systemAdSet.update({
+            where: { id: adSetSystem.id },
+            data: {
+              meta_id: adSetMetaId,
+              status: (adSet._data?.status || adSetPayload.status) as any,
+              data: adSetData as any,
+            },
+          });
+        } catch (err) {
+          // Lỗi tạo NHÓM quảng cáo → nhóm + ads của nó coi như lỗi, các nhóm KHÁC
+          // vẫn tiếp tục. Ad lỗi giữ meta_id=null nên lần chạy sau tạo lại đúng nó.
+          const metaError = parseMetaError(err);
+          const friendlyMsg =
+            metaErrorToFriendly(metaError) || metaError?.message || String(err);
+          this.logger.error(
+            `[createAdSet] adset ${adSetSystem.id} lỗi:`,
+            metaError,
+          );
+          adSetResults.push({
+            systemAdSetId: adSetSystem.id,
+            name: adSetName,
+            status: 'failed',
+            error: friendlyMsg,
+          });
+          for (const adSystem of adSetSystem.ads) {
+            adResults.push({
+              systemAdId: adSystem.id,
+              adName: (adSystem.data as any)?.name || adSystem.id,
+              adSetName,
+              status: 'failed',
+              error: `Nhóm quảng cáo lỗi: ${friendlyMsg}`,
+            });
+          }
+          adSetsProcessed += 1;
+          adsProcessed += adSetSystem.ads.length;
+          await this.updatePublishStep(history.id, 'adsets', {
+            status: 'processing',
+            current: adSetsProcessed,
+          });
+          continue;
+        }
 
         adSetsProcessed += 1;
         adSetResults.push({
           systemAdSetId: adSetSystem.id,
           metaId: adSetMetaId,
-          name: adSetPayload.name,
+          name: adSetName,
+          status: 'live',
         });
         await this.updatePublishStep(history.id, 'adsets', {
           status: 'processing',
@@ -191,53 +240,86 @@ export class DraftAutomationMetaPublisherService {
 
         currentStepKey = 'ads';
         for (const adSystem of adSetSystem.ads) {
-          const adData: any = this.clone(adSystem.data || {});
-          await this.prepareAdDataForPublish(adData, catalogProductSetId);
+          const adName = (adSystem.data as any)?.name || adSystem.id;
+          try {
+            const adData: any = this.clone(adSystem.data || {});
+            await this.prepareAdDataForPublish(adData, catalogProductSetId);
 
-          const adPayload =
-            CleanObjectOrArray({
-              ...adData,
-              status: this.normalizeMetaStatus(adData.status, 'PAUSED'),
-            }) || {};
+            const adPayload =
+              CleanObjectOrArray({
+                ...adData,
+                status: this.normalizeMetaStatus(adData.status, 'PAUSED'),
+              }) || {};
 
-          const creativeData = this.buildCreativeData(adPayload);
-          const creative =
-            await this.createAdCreativeWithOptionalDestinationFallback(
-              adAccount,
-              creativeData,
-            );
-          const creativeId = creative.id || creative._data?.id;
-          await this.waitForCreativePropagation(creativeId);
+            const creativeData = this.buildCreativeData(adPayload);
+            const creative =
+              await this.createAdCreativeWithOptionalDestinationFallback(
+                adAccount,
+                creativeData,
+              );
+            const creativeId = creative.id || creative._data?.id;
+            await this.waitForCreativePropagation(creativeId);
 
-          const ad = await adAccount.createAd(AD_FIELDS, {
-            name: adPayload.name,
-            status: adPayload.status ?? 'PAUSED',
-            adset_id: adSetMetaId,
-            creative: this.buildAdCreativeReference(adPayload, creativeId),
-          });
-          const adMetaId = ad.id || ad._data?.id;
+            const ad = await adAccount.createAd(AD_FIELDS, {
+              name: adPayload.name,
+              status: adPayload.status ?? 'PAUSED',
+              adset_id: adSetMetaId,
+              creative: this.buildAdCreativeReference(adPayload, creativeId),
+            });
+            const adMetaId = ad.id || ad._data?.id;
 
-          await this.prisma.systemAd.update({
-            where: { id: adSystem.id },
-            data: {
-              meta_id: adMetaId,
-              status: (ad._data?.status || adPayload.status) as any,
-              data: adData as any,
-            },
-          });
+            await this.prisma.systemAd.update({
+              where: { id: adSystem.id },
+              data: {
+                meta_id: adMetaId,
+                status: (ad._data?.status || adPayload.status) as any,
+                data: adData as any,
+              },
+            });
 
-          adsProcessed += 1;
-          adResults.push({
-            systemAdId: adSystem.id,
-            metaId: adMetaId,
-            creativeId,
-            name: adPayload.name,
-          });
-          await this.updatePublishStep(history.id, 'ads', {
-            status: 'processing',
-            current: adsProcessed,
-          });
+            adsProcessed += 1;
+            adResults.push({
+              systemAdId: adSystem.id,
+              metaId: adMetaId,
+              creativeId,
+              adName,
+              adSetName,
+              status: 'live',
+            });
+            await this.updatePublishStep(history.id, 'ads', {
+              status: 'processing',
+              current: adsProcessed,
+            });
+          } catch (err) {
+            // 1 quảng cáo lỗi KHÔNG làm hỏng các ad còn lại. Ad lỗi giữ meta_id=null.
+            const metaError = parseMetaError(err);
+            const friendlyMsg =
+              metaErrorToFriendly(metaError) ||
+              metaError?.message ||
+              String(err);
+            this.logger.error(`[createAd] ad ${adSystem.id} lỗi:`, metaError);
+            adsProcessed += 1;
+            adResults.push({
+              systemAdId: adSystem.id,
+              adName,
+              adSetName,
+              status: 'failed',
+              error: friendlyMsg,
+            });
+            await this.updatePublishStep(history.id, 'ads', {
+              status: 'processing',
+              current: adsProcessed,
+            });
+          }
         }
+      }
+
+      const liveAds = adResults.filter((r) => r.status === 'live').length;
+      const failedAds = adResults.filter((r) => r.status === 'failed').length;
+
+      // Tất cả quảng cáo đều lỗi → coi như thất bại → ném để nhánh catch rollback.
+      if (adResults.length > 0 && liveAds === 0) {
+        throw new Error('Tất cả quảng cáo đều lỗi khi đẩy lên Meta.');
       }
 
       await this.updatePublishStep(history.id, 'adsets', {
@@ -245,22 +327,33 @@ export class DraftAutomationMetaPublisherService {
         current: adSetsProcessed,
       });
       await this.updatePublishStep(history.id, 'ads', {
-        status: 'success',
+        status: failedAds === 0 ? 'success' : 'partial',
         current: adsProcessed,
+        results: adResults,
+        summary: { total: adResults.length, live: liveAds, failed: failedAds },
       });
       await this.updatePublishStep(
         history.id,
         'sync',
-        { status: 'success' },
-        'SUCCESS',
+        { status: failedAds > 0 ? 'partial' : 'success' },
+        failedAds > 0 ? 'PARTIAL' : 'SUCCESS',
       );
 
+      // PARTIAL: giữ campaign + ad tốt live, KHÔNG rollback; lưu danh sách ad lỗi;
+      // hasMetaChanges=true để lần publish/automation sau retry các ad meta_id=null.
       await this.prisma.systemCampaign.update({
         where: { id: campaignSystem.id },
         data: {
-          errors: Prisma.DbNull,
+          errors:
+            failedAds > 0
+              ? ({
+                  partial: true,
+                  message: `${failedAds}/${adResults.length} quảng cáo lỗi — các quảng cáo còn lại đã lên Meta.`,
+                  failedAds: adResults.filter((r) => r.status === 'failed'),
+                } as any)
+              : Prisma.DbNull,
           isPublishing: false,
-          hasMetaChanges: false,
+          hasMetaChanges: failedAds > 0 ? true : false,
         },
       });
 
@@ -273,20 +366,51 @@ export class DraftAutomationMetaPublisherService {
       };
     } catch (err: any) {
       const metaError = parseMetaError(err);
-      const errorMessage = metaError?.message || String(err);
+      const errorMessage =
+        metaErrorToFriendly(metaError) || metaError?.message || String(err);
 
       this.logger.error(
         `Automation publish failed for system campaign ${campaignSystem.id}:`,
         metaError,
       );
 
+      // E1b: nếu ĐÃ có ad lên live thì KHÔNG rollback (sẽ giết ad tốt) — chỉ báo
+      // lỗi PARTIAL, giữ nguyên campaign + ad live. Chỉ rollback khi không có ad nào.
+      const hasLiveAds = adResults.some((r) => r.status === 'live');
+
       await this.updatePublishStep(
         history.id,
         currentStepKey,
-        { status: 'failed', error: errorMessage },
-        'FAILED',
+        { status: hasLiveAds ? 'partial' : 'failed', error: errorMessage },
+        hasLiveAds ? 'PARTIAL' : 'FAILED',
         errorMessage,
       );
+
+      if (hasLiveAds) {
+        const failedList = adResults.filter((r) => r.status === 'failed');
+        await this.prisma.systemCampaign.update({
+          where: { id: campaignSystem.id },
+          data: {
+            errors: {
+              partial: true,
+              message: errorMessage,
+              failedAds: failedList,
+            } as any,
+            isPublishing: false,
+            hasMetaChanges: true,
+          },
+        });
+        // Đã có ad live → KHÔNG ném lỗi (tránh scheduler đánh dấu cả run thất bại);
+        // trả về như partial success.
+        return {
+          success: true,
+          partial: true,
+          campaignId: campaignMetaId,
+          adSets: adSetResults,
+          ads: adResults,
+          publishHistoryId: history.id,
+        };
+      }
 
       await this.rollbackFailedCreate(
         campaignSystem.id,
@@ -346,6 +470,9 @@ export class DraftAutomationMetaPublisherService {
       metaId?: string | null;
       total?: number;
       current?: number;
+      // Kết quả per-ad (E1b) để UI hiển thị checklist "Ad X lỗi: …".
+      results?: any[];
+      summary?: { total: number; live: number; failed: number };
     },
     overallStatus?: string,
     overallError?: string | null,
