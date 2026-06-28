@@ -1669,6 +1669,12 @@ model SystemCampaign {
   meta_id String?
   cid     String?
 
+  // Snapshot của payload đã đẩy lên Meta ở lần publish THÀNH CÔNG gần nhất. Re-publish
+  // diff bản nháp hiện tại với snapshot này (thay vì với trạng thái live) → chỉ đẩy
+  // field user thật sự sửa, không đè thiết lập chỉnh tay trên Ads Manager. null = chưa
+  // publish lần nào (hoặc draft cũ) → fallback diff-vs-live cho 1 lần rồi tự lành.
+  publishedSnapshot Json?
+
   status Status @default(DRAFT)
 
   createdById String?
@@ -1714,6 +1720,9 @@ model SystemAdSet {
   data    Json?
   meta_id String?
 
+  // Xem SystemCampaign.publishedSnapshot.
+  publishedSnapshot Json?
+
   status Status @default(DRAFT)
 
   createdById String?
@@ -1744,6 +1753,10 @@ model SystemAd {
   id      String  @id @default(cuid())
   data    Json?
   meta_id String?
+
+  // Xem SystemCampaign.publishedSnapshot. Bao gồm cả creative đã đẩy để phát hiện
+  // creative đổi so với lần publish trước (không tạo lại creative khi không cần).
+  publishedSnapshot Json?
 
   status Status @default(DRAFT)
 
@@ -2180,22 +2193,23 @@ enum ContributionStatus {
 }
 
 model Contribution {
-  id                  String             @id @default(uuid())
-  userId              String
-  user                User               @relation("UserContributions", fields: [userId], references: [id], onDelete: Cascade)
-  type                ContributionType
-  title               String
-  content             String             @db.Text
-  attachments         String[]           @default([])
-  status              ContributionStatus @default(PENDING)
-  adminFeedback       String?            @db.Text
-  processedById       String?
-  processedBy         User?              @relation("ProcessedContributions", fields: [processedById], references: [id], onDelete: SetNull)
-  processedAt         DateTime?
-  expectedProcessedAt DateTime?
-  userFeedback        Json?
-  createdAt           DateTime           @default(now())
-  updatedAt           DateTime           @updatedAt
+  id                   String             @id @default(uuid())
+  userId               String
+  user                 User               @relation("UserContributions", fields: [userId], references: [id], onDelete: Cascade)
+  type                 ContributionType
+  title                String
+  content              String             @db.Text
+  attachments          String[]           @default([])
+  status               ContributionStatus @default(PENDING)
+  adminFeedback        String?            @db.Text
+  processedById        String?
+  processedBy          User?              @relation("ProcessedContributions", fields: [processedById], references: [id], onDelete: SetNull)
+  processedAt          DateTime?
+  expectedProcessedAt  DateTime?
+  processedEmailSentAt DateTime?
+  userFeedback         Json?
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
 
   @@index([userId])
   @@index([type])
