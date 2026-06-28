@@ -1,6 +1,7 @@
 import { Process, Processor } from '@nestjs/bull';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bull';
+import { BatchRunLoggerService } from '../batch-run-log/batch-run-logger.service';
 import {
   CREATIVE_REFRESH_JOBS,
   CREATIVE_REFRESH_QUEUE,
@@ -11,16 +12,25 @@ import { CreativeRefreshService } from './creative-refresh.service';
 export class CreativeRefreshProcessor {
   private readonly logger = new Logger(CreativeRefreshProcessor.name);
 
-  constructor(private readonly service: CreativeRefreshService) {}
+  constructor(
+    private readonly service: CreativeRefreshService,
+    private readonly batchRunLogger: BatchRunLoggerService,
+  ) {}
 
   @Process({
     name: CREATIVE_REFRESH_JOBS.RECALCULATE_CREATIVE_URL_EXPIRED,
     concurrency: 1,
   })
   async handleRecalculateCreativeUrlExpired(job: Job) {
-    this.logger.log('[JOB START] Recalculate Creative URL Expired');
-    await this.service.recalculateCreativeUrlExpired();
-    this.logger.log('[JOB FINISHED] Recalculate Creative URL Expired');
+    return this.batchRunLogger.track(
+      CREATIVE_REFRESH_JOBS.RECALCULATE_CREATIVE_URL_EXPIRED,
+      CREATIVE_REFRESH_QUEUE,
+      async () => {
+        this.logger.log('[JOB START] Recalculate Creative URL Expired');
+        await this.service.recalculateCreativeUrlExpired();
+        this.logger.log('[JOB FINISHED] Recalculate Creative URL Expired');
+      },
+    );
   }
 
   @Process({
@@ -28,8 +38,14 @@ export class CreativeRefreshProcessor {
     concurrency: 1,
   })
   async handleRefreshExpiringCreatives(job: Job) {
-    this.logger.log('[JOB START] Refresh Expiring Creatives');
-    await this.service.refreshExpiringCreatives();
-    this.logger.log('[JOB FINISHED] Refresh Expiring Creatives');
+    return this.batchRunLogger.track(
+      CREATIVE_REFRESH_JOBS.REFRESH_EXPIRING_CREATIVES,
+      CREATIVE_REFRESH_QUEUE,
+      async () => {
+        this.logger.log('[JOB START] Refresh Expiring Creatives');
+        await this.service.refreshExpiringCreatives();
+        this.logger.log('[JOB FINISHED] Refresh Expiring Creatives');
+      },
+    );
   }
 }

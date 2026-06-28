@@ -2,6 +2,7 @@ import { InjectQueue } from '@nestjs/bull';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { Queue } from 'bull';
+import { BatchRunLoggerService } from '../batch-run-log/batch-run-logger.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { InsightSyncService } from './insight-sync.service';
 import {
@@ -20,6 +21,7 @@ export class InsightSyncScheduler implements OnModuleInit {
     @InjectQueue(INSIGHT_SYNC_QUEUE) private readonly syncQueue: Queue,
     private readonly prisma: PrismaService,
     private readonly syncService: InsightSyncService,
+    private readonly batchRunLogger: BatchRunLoggerService,
   ) {}
 
   async onModuleInit() {
@@ -283,7 +285,13 @@ export class InsightSyncScheduler implements OnModuleInit {
   async scheduleInactiveSlidingWindow() {
     this.logger.log('📅 Scheduling Inactive Sliding Window Job (12:10 AM)...');
     try {
-      await this.syncService.slideInactiveInsights();
+      await this.batchRunLogger.track(
+        'SLIDE_INACTIVE_INSIGHTS',
+        INSIGHT_SYNC_QUEUE,
+        async () => {
+          await this.syncService.slideInactiveInsights();
+        },
+      );
     } catch (err: any) {
       this.logger.error(`❌ Inactive Sliding Window Job failed: ${err.message}`);
     }

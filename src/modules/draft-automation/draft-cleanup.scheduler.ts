@@ -1,83 +1,98 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
+import { BatchRunLoggerService } from '../batch-run-log/batch-run-logger.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
 export class DraftCleanupScheduler {
   private readonly logger = new Logger(DraftCleanupScheduler.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly batchRunLogger: BatchRunLoggerService,
+  ) {}
 
   // Run everyday at 2:00 AM Asia/Ho_Chi_Minh timezone
   @Cron('0 2 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async cleanupOldDrafts() {
-    this.logger.log('Starting cleanup of old draft campaigns...');
-
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-
     try {
-      // Find all draft campaigns (meta_id is null) that have not been updated in the last 7 days
-      // and are not used as templates
-      const campaignsToDelete = await this.prisma.systemCampaign.findMany({
-        where: {
-          meta_id: null,
-          updatedAt: { lt: sevenDaysAgo },
-          templateCampaigns: {
-            none: {},
-          },
-        },
-        select: { id: true },
-      });
+      await this.batchRunLogger.track(
+        'CLEANUP_OLD_DRAFTS',
+        'draft-automation',
+        async (ctx) => {
+          this.logger.log('Starting cleanup of old draft campaigns...');
 
-      const campaignIds = campaignsToDelete.map((c) => c.id);
+          const sevenDaysAgo = new Date();
+          sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
-      if (campaignIds.length === 0) {
-        this.logger.log('No old draft campaigns found for cleanup.');
-        return;
-      }
-
-      this.logger.log(`Found ${campaignIds.length} draft campaigns to clean up.`);
-
-      await this.prisma.$transaction(async (tx) => {
-        // 1. Delete creatives belonging to ads in these campaigns
-        await tx.systemCreative.deleteMany({
-          where: {
-            ad: {
-              adSet: {
-                campaignId: { in: campaignIds },
+          // Find all draft campaigns (meta_id is null) that have not been updated in the last 7 days
+          // and are not used as templates
+          const campaignsToDelete = await this.prisma.systemCampaign.findMany({
+            where: {
+              meta_id: null,
+              updatedAt: { lt: sevenDaysAgo },
+              templateCampaigns: {
+                none: {},
               },
             },
-          },
-        });
+            select: { id: true },
+          });
 
-        // 2. Delete ads in these campaigns
-        await tx.systemAd.deleteMany({
-          where: {
-            adSet: {
-              campaignId: { in: campaignIds },
-            },
-          },
-        });
+          const campaignIds = campaignsToDelete.map((c) => c.id);
 
-        // 3. Delete adsets in these campaigns
-        await tx.systemAdSet.deleteMany({
-          where: {
-            campaignId: { in: campaignIds },
-          },
-        });
+          if (campaignIds.length === 0) {
+            this.logger.log('No old draft campaigns found for cleanup.');
+            ctx.skip('No old draft campaigns found for cleanup.');
+            return;
+          }
 
-        // 4. Delete campaigns
-        const deleteResult = await tx.systemCampaign.deleteMany({
-          where: {
-            id: { in: campaignIds },
-          },
-        });
+          this.logger.log(
+            `Found ${campaignIds.length} draft campaigns to clean up.`,
+          );
 
-        this.logger.log(
-          `Successfully deleted ${deleteResult.count} old draft campaigns.`,
-        );
-      });
+          await this.prisma.$transaction(async (tx) => {
+            // 1. Delete creatives belonging to ads in these campaigns
+            await tx.systemCreative.deleteMany({
+              where: {
+                ad: {
+                  adSet: {
+                    campaignId: { in: campaignIds },
+                  },
+                },
+              },
+            });
+
+            // 2. Delete ads in these campaigns
+            await tx.systemAd.deleteMany({
+              where: {
+                adSet: {
+                  campaignId: { in: campaignIds },
+                },
+              },
+            });
+
+            // 3. Delete adsets in these campaigns
+            await tx.systemAdSet.deleteMany({
+              where: {
+                campaignId: { in: campaignIds },
+              },
+            });
+
+            // 4. Delete campaigns
+            const deleteResult = await tx.systemCampaign.deleteMany({
+              where: {
+                id: { in: campaignIds },
+              },
+            });
+
+            ctx.setTotal(campaignIds.length);
+            ctx.addSuccess(deleteResult.count);
+            this.logger.log(
+              `Successfully deleted ${deleteResult.count} old draft campaigns.`,
+            );
+          });
+        },
+      );
     } catch (error) {
       this.logger.error('Failed to cleanup old draft campaigns:', error);
     }
