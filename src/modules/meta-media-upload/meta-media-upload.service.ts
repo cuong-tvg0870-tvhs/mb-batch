@@ -5,6 +5,10 @@ import * as fs from 'fs';
 import { drive_v3, google } from 'googleapis';
 import * as path from 'path';
 import { parseMetaUrlExpireTime } from '../../common/utils';
+import {
+  extractCidFromName as sharedExtractCidFromName,
+  fileMatchesRecordCid as sharedFileMatchesRecordCid,
+} from '../../common/utils/cid.util';
 import { MetaApiService } from '../meta-api/meta-api.service';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -140,9 +144,6 @@ export class MetaMediaUploadService {
     60 * 1000,
   );
   private readonly driveFolderMimeType = 'application/vnd.google-apps.folder';
-  // CID là cấu trúc đặt tên nội bộ của công ty, vd: CID00046478
-  // Chỉ upload file khi CID trong tên trùng đúng CID của Lark record.
-  private readonly cidPattern = /CID\d+/i;
   private readonly rootFolderId =
     process.env.META_CREATIVE_ROOT_FOLDER_ID || '4303729193176038';
   private readonly folderEnsurePromises = new Map<string, Promise<any>>();
@@ -2003,9 +2004,10 @@ export class MetaMediaUploadService {
       : {};
   }
 
+  // Ủy quyền cho util CID dùng chung (common/utils/cid.util) — một nguồn chân lý
+  // duy nhất cho cả luồng upload này, lark-sync và draft-automation, tránh trôi lệch.
   private extractCidFromName(name?: string | null): string | null {
-    const match = (name || '').match(this.cidPattern);
-    return match ? match[0].toUpperCase() : null;
+    return sharedExtractCidFromName(name);
   }
 
   // Tên file chỉ hợp lệ khi chứa đúng CID của Lark record (CID00046478).
@@ -2013,10 +2015,7 @@ export class MetaMediaUploadService {
     fileName: string | null | undefined,
     recordCid: string | null | undefined,
   ) {
-    const expected = (recordCid || '').trim().toUpperCase();
-    if (!expected) return false;
-    const found = this.extractCidFromName(fileName);
-    return found !== null && found === expected;
+    return sharedFileMatchesRecordCid(fileName, recordCid);
   }
 
   // Duyệt (đệ quy) một folder Drive, dừng sớm khi gặp file con khớp CID.

@@ -3,6 +3,7 @@ import { LarkRecord, Prisma } from '@prisma/client';
 import axios, { AxiosRequestConfig } from 'axios';
 import { drive_v3, google } from 'googleapis';
 import { chunk } from '../../common/utils';
+import { fileMatchesRecordCid } from '../../common/utils/cid.util';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   PUBLIC_ONLY_PERMISSION_ERROR,
@@ -743,6 +744,7 @@ export class LarkSyncService {
       | 'product_code'
       | 'creative_asset_id'
       | 'drive_url'
+      | 'cid'
     >,
     driveFile: any,
     driveId?: string | null,
@@ -773,6 +775,7 @@ export class LarkSyncService {
       const folderAssetIds = await this.findFolderCreativeAssetIds(
         record,
         targetName,
+        record.cid,
       );
 
       return {
@@ -804,6 +807,16 @@ export class LarkSyncService {
       },
     });
 
+    // STRICT CID RULE: chỉ link khi tên asset chứa ĐÚNG CID của record — mirror
+    // luồng upload (meta-media-upload). Tránh việc khớp theo tên gắn nhầm creative
+    // của CID khác vào content này. Không có CID thì giữ hành vi khớp tên cũ.
+    if (record.cid && asset && !fileMatchesRecordCid(asset.name, record.cid)) {
+      this.logger.warn(
+        `CID mismatch: record ${record.cid} khớp tên với asset ${asset.id} ("${asset.name}") nhưng CID không trùng → bỏ qua link.`,
+      );
+      return { primaryAssetId: null, assetIds: [] };
+    }
+
     return {
       primaryAssetId: asset?.id || null,
       assetIds: asset?.id ? [asset.id] : [],
@@ -813,6 +826,7 @@ export class LarkSyncService {
   private async findFolderCreativeAssetIds(
     record: Pick<LarkRecord, 'project_name' | 'brand_name' | 'product_code'>,
     driveFolderName: string,
+    recordCid?: string | null,
   ) {
     const productFolder = await this.prisma.creativeFolder.findFirst({
       where: {
@@ -846,11 +860,23 @@ export class LarkSyncService {
     const folderIds = await this.collectCreativeFolderIds(targetFolderId);
     const assets = await this.prisma.creativeAsset.findMany({
       where: { folderId: { in: folderIds } },
-      select: { id: true },
+      select: { id: true, name: true },
       orderBy: { createdAtLocal: 'asc' },
     });
 
-    return assets.map((asset) => asset.id);
+    // STRICT CID RULE: chỉ giữ asset có tên chứa đúng CID của record. Một folder
+    // sản phẩm có thể chứa nhiều content (nhiều CID) nên không lọc sẽ gắn nhầm.
+    // Không có CID thì giữ toàn bộ (không lọc được).
+    const matched = recordCid
+      ? assets.filter((a) => fileMatchesRecordCid(a.name, recordCid))
+      : assets;
+    if (recordCid && matched.length !== assets.length) {
+      this.logger.warn(
+        `CID filter (folder): record ${recordCid} — giữ ${matched.length}/${assets.length} asset khớp CID.`,
+      );
+    }
+
+    return matched.map((asset) => asset.id);
   }
 
   private async collectCreativeFolderIds(rootFolderId: string) {
@@ -1036,6 +1062,7 @@ export class LarkSyncService {
       },
       select: {
         id: true,
+        cid: true,
         drive_url: true,
         raw: true,
         project_name: true,
