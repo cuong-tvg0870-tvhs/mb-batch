@@ -71,12 +71,17 @@ enum LevelInsight {
 // =======================
 model TargetingInterest {
   id                        String  @id @default(uuid())
+  // Loại targeting: interests | behaviors | demographics | life_events | locales.
+  // Dữ liệu cũ mặc định là "interests"; giá trị mới được search lưu đúng loại.
+  type                      String  @default("interests")
   name                      String
   description               String?
   audience_size_lower_bound Int?
   audience_size_upper_bound Int?
   path                      Json?
   topic                     String?
+
+  @@index([type])
 }
 
 model DropdownCategory {
