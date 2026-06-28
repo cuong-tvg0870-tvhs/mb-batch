@@ -26,7 +26,7 @@ yarn migration:generate # = npx prisma generate (regenerate Prisma client; does 
 
 - **Running the production build**: use `node dist/src/main.js` (this is what the Dockerfile does). The `start:prod` script (`node dist/main`) points at the wrong path and will fail — `nest build` emits to `dist/src/` because the root-level `prisma.config.ts` is included in compilation, so tsc preserves the `src/` prefix.
 - **Tests**: `yarn test` (jest) is configured but there are currently **no `*.spec.ts` files** in the repo.
-- The worker listens on port **3030** (a health port only — there are no routes). The `main.ts` startup log says "5000"; ignore it, the actual port is 3030.
+- The worker listens on port **3030** (a health port only — there are no routes), hardcoded in `main.ts`. Three numbers float around and only **3030** is real: the `main.ts` startup log says "5000", the `Dockerfile` declares `EXPOSE 3000`, and `app.config.ts` reads a `PORT` env var — all three are ignored. Health-check / port-map **3030**.
 
 ## Hard rules (do not violate)
 
@@ -52,7 +52,8 @@ yarn migration:generate # = npx prisma generate (regenerate Prisma client; does 
 
 **Modules that deviate — don't assume the full pattern:**
 - `help-ai` — `@Cron` scheduler calls the service **directly (no Bull, no processor)**; AI key-pool logic lives in `gemini-api-key-manager.service.ts`.
-- `draft-automation` — **no processor, no `*.constants.ts`**; three schedulers (`draft-automation-cron.scheduler.ts`, main `draft-automation.scheduler.ts`, `draft-cleanup.scheduler.ts`) call services directly. Publishing is in `draft-automation-meta-publisher.service.ts`; CID helpers in `src/common/utils/cid.util.ts`. A lot of logic sits in the scheduler itself.
+- `draft-automation` — **no processor, no `*.constants.ts`**; services are called directly (no Bull). Three scheduler files, but only **two carry `@Cron`**: `draft-automation-cron.scheduler.ts` (the `*/30` reconcile scan — the one cron that omits `timeZone`) and `draft-cleanup.scheduler.ts` (`0 2 * * *`, deletes unpublished draft `SystemCampaign`s untouched >7 days). The middle file `draft-automation.scheduler.ts` (`DraftAutomationScheduler`, ~1870 lines, `processAutomation`) has **no `@Cron`** — it is the asset-selection/draft-generation engine, invoked *by* the cron scheduler. Generation is a **dynamic per-template scheduler**: the cron scheduler registers one self-rescheduling `CronJob` per active `TemplateCampaign` via `SchedulerRegistry` (cron + tz come from `TemplateCampaign.data.automation`, ≥30-min interval enforced) — don't assume a fixed `@Cron` cadence. Publishing is in `draft-automation-meta-publisher.service.ts`; CID helpers in `src/common/utils/cid.util.ts`.
+  - **Duplicate-publish guard (commit `badc101`)** — `publishDraftCampaign()` atomically claims the row with `updateMany({ where: { id, isPublishing: false, meta_id: null }, data: { isPublishing: true } })`; if `count === 0` it returns `{ skipped: true }` **before any Meta call**, so two overlapping runs (cron+cron or cron+manual) can't create duplicate budget-spending campaigns. The flag resets to `false` on success and on rollback. It is a **DB-row claim — not** an advisory lock or in-memory flag. Preserve it when touching publish logic.
 - `meta-api` — a shared `@Global` client, not a scheduler module (see Globals below).
 
 Conventions that matter:
@@ -61,9 +62,10 @@ Conventions that matter:
   - **hour bucket** — `${JOB}:${bucket}` with `bucket = new Date().toISOString().slice(0,13)` (most hourly syncs)
   - **day bucket** — `slice(0,10)` (e.g. insight-sync `SYNC_MISSING_DAILY`/`SYNC_AUDIENCE`, URL-expiry recalc jobs)
   - **singleton** — `${JOB}:singleton`, at most one in flight (media-sync, meta-media-upload)
-  - **composite** — account id + levels + ranges folded into the id (insight-sync `SYNC_ACCOUNT`)
+  - **composite** — account id + levels + ranges **+ hour bucket** folded into the id (insight-sync `SYNC_ACCOUNT`; dedup window is hourly)
   - a few (e.g. lark-sync) set **no `jobId`** at all.
-- Concurrency is controlled per-processor (`@Process({ concurrency })`) and via `p-limit` inside services.
+- Concurrency is controlled per-processor (`@Process({ concurrency })`) and via `p-limit` inside services — except `insight-sync`, which uses a hand-rolled `runWithLimit` helper rather than the `p-limit` library.
+- **Startup enqueue**: several schedulers also enqueue/run a job once in `onModuleInit` (not only on the cron tick) — `insight-sync` (full sequential sync, guarded by a 5-min Redis lock `lock:insight-sync:startup-cooldown`), `media-sync`, `meta-media-sync`, `meta-media-upload`, `help-ai`, and `creative-refresh` if enabled. The production-gated ones (`insight-sync`, `media-sync`) run only when `NODE_ENV==='production'` **and** `DISABLE_STARTUP_SYNC!=='true'`. This is why jobs fire right after a deploy/restart — set `DISABLE_STARTUP_SYNC=true` to suppress.
 
 ### Globals — inject these anywhere
 
@@ -72,20 +74,24 @@ Conventions that matter:
 
 ### Modules wired in `AppModule`
 
-`meta-sync` (hourly campaign core), `insight-sync` (Today/3D/7D/Max/Audience performance), `media-sync` (Drive folders → Meta), `meta-media-sync` (daily image/video sync + error-video recovery), `meta-media-upload`, `lark-sync` (Lark Bitable records + Google Drive permission audit, every 30m), `draft-automation` (generate `System*` drafts from `TemplateCampaign`, publish to Meta, cleanup), `help-ai` (chatbot knowledge snapshots + AI provider key-pool management), `meta-api`.
+`meta-sync` (hourly campaign core), `insight-sync` (Today/3D/7D/Max/Audience performance + a `SYNC_LIFETIME_BACKFILL` job; note it also has one direct-call cron, `scheduleInactiveSlidingWindow` at `10 0 * * *`, that bypasses the queue — so even this "pure trio" module has a deviation), `media-sync` (Drive folders → Meta), `meta-media-sync` (daily image/video sync + error-video recovery), `meta-media-upload`, `lark-sync` (Lark Bitable records + Google Drive permission audit, every 30m), `draft-automation` (generate `System*` drafts from `TemplateCampaign`, publish to Meta, cleanup), `help-ai` (chatbot knowledge snapshots + AI provider key-pool management + AI triage of user-submitted knowledge contributions; three direct `@Cron`s), `meta-api`.
 
-⚠️ **`src/modules/creative-refresh/` exists but is NOT imported in `AppModule`** — it is dormant and its crons do not run. Wire it into `AppModule` if you intend to enable it.
+⚠️ **`src/modules/creative-refresh/` exists but is NOT imported in `AppModule`** — it is dormant and its crons do not run. Wire it into `AppModule` if you intend to enable it. If you revive it, route its Meta calls through `MetaApiService` — it currently hand-rolls `FacebookAdsApi.init` and would bypass the `META_AUTH_CONFIG` token and the cooldown gate.
+
+ℹ️ **`src/modules/mail/` is dead scaffolding** — it holds only empty `templates/{auth,group}/` dirs and **zero `.ts` files**; it is not a module, is not imported, and nothing uses it (like the stale `src/generated/prisma/` dir). Ignore it.
 
 ### Meta API resilience (in `MetaApiService` + `src/common/utils`)
 
 - **Auth**: the SDK is initialized with env `SDK_FACEBOOK_ACCESS_TOKEN`; per-request token + cookie come from the DB `SystemConfig` row keyed `META_AUTH_CONFIG` (cached 30s in-process).
 - **Error handling**: auth errors (codes **190/102**) clear `META_AUTH_CONFIG` from the DB; rate-limit errors (codes **4, 17, 32, 368, 613, 80004**, or subcode `2446079`) write a `META_API_COOLDOWN` row in `SystemConfig`. `assertMetaApiAvailable()` enforces the cooldown (hard-block only when `META_API_COOLDOWN_HARD_BLOCK=true`).
+- **Three different rate-limit code sets** (keep in sync if you add a code): the cooldown detector uses **4, 17, 32, 368, 613, 80004** + subcode `2446079`; the SDK retry path (`executeMetaApiWithRetry`/`isRetryableError`) uses **1, 2, 4, 17, 32, 613, 80004** (+ `is_transient` — omits 368, adds transient 1/2); `fetchAll` retries only **4, 17**.
 - **Retry helpers** (always reuse these, don't hand-roll retries): `executeMetaApiWithRetry`, `executeDbWithRetry` (handles Postgres `57P03` startup), and `fetchAll` (cursor pagination with rate-limit backoff).
+- ⚠️ **`getAccountInsights()` is the exception**: unlike `request()`/`fetchAllPages()`, it uses the **SDK** path (token from `SDK_FACEBOOK_ACCESS_TOKEN` via `FacebookAdsApi`), does **not** read `META_AUTH_CONFIG`, and does **not** call `assertMetaApiAvailable()`. So `insight-sync` is unaffected by the `META_API_COOLDOWN` row and by `META_AUTH_CONFIG` rotation.
 
 ### Data model
 
 `prisma/schema.prisma` is large (~80 models). Rough groupings:
-- **Meta mirror**: `Campaign`, `AdSet`, `Ad`, `Creative`, `AdImage`, `AdVideo` + their `*Insight` and `*AudienceInsight` tables. Insights use composite-key upsert (`entityId`, `dateStart`, `range`) and an ID-reuse/overwrite strategy to avoid churn.
+- **Meta mirror**: `Campaign`, `AdSet`, `Ad`, `Creative`, `AdImage`, `AdVideo` + their `*Insight` and `*AudienceInsight` tables. Plain insight tables use a composite-key upsert of (entity FK — `adId`/`campaignId`/`adSetId`/`creativeId`, abstracted as `entityId` — `dateStart`, `range`) with an ID-reuse/overwrite strategy to avoid churn; the `*AudienceInsight` tables key differently, on `age`/`gender`(/`level`) instead.
 - **Draft system**: `TemplateCampaign` → `SystemCampaign`/`SystemAdSet`/`SystemAd`/`SystemCreative`, `DraftAutomationHistory`, `PublishHistory`.
 - **Automation engine**: `AutomationRule`, `AutomationFilter*`, `AutomationTask*`, `AutomationRuleRun*`, `AutomationInsight*`.
 - **Assets & sources**: `CreativeFolder`, `CreativeAsset`, `CreativeAssetMapping`, `LarkRecord`, `DriveFile`.
@@ -99,4 +105,4 @@ Conventions that matter:
 
 ## Environment
 
-`.env` is gitignored. Required to boot: `DATABASE_URL`, `REDIS_HOST`/`REDIS_PORT`, `SDK_FACEBOOK_ACCESS_TOKEN`, `SDK_FACEBOOK_BUSINESS`. Integrations: `GOOGLE_SERVICE_ACCOUNT_JSON` + `GOOGLE_ALLOWED_SHARED_DRIVE_IDS` (Drive permission audit — see `README.md`), `LARK_APP_ID`/`LARK_APP_SECRET`, `GEMINI_API_KEYS`/`DEEPSEEK_API_KEYS` (Help AI). Most sync modules also expose many optional tuning knobs (`INSIGHT_SYNC_*`, `META_MEDIA_UPLOAD_*`, `CREATIVE_*`, `META_API_*`) read directly via `process.env` in their constants/services.
+`.env` is gitignored. Required to boot: `DATABASE_URL`, `REDIS_HOST`/`REDIS_PORT`, `SDK_FACEBOOK_ACCESS_TOKEN`, `SDK_FACEBOOK_BUSINESS`. Integrations: `GOOGLE_SERVICE_ACCOUNT_JSON` + `GOOGLE_ALLOWED_SHARED_DRIVE_IDS` (Drive permission audit — see `README.md`), `LARK_APP_ID`/`LARK_APP_SECRET`, `GEMINI_API_KEYS`/`DEEPSEEK_API_KEYS` (Help AI). Behavior flags: `NODE_ENV=production` enables the boot-time startup syncs and `DISABLE_STARTUP_SYNC=true` suppresses them (see "Startup enqueue" above). Most sync modules also expose many optional tuning knobs (`INSIGHT_SYNC_*`, `META_MEDIA_UPLOAD_*`, `CREATIVE_*`, `META_API_*`) read directly via `process.env` in their constants/services.

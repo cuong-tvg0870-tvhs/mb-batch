@@ -44,11 +44,13 @@
 - **Path**: `mb-ads` (Port 8000/3003)
 - **Tech Stack**: NestJS 11, Prisma v7 (PostgreSQL), passport-jwt, facebook-nodejs-business-sdk (v24.0.1), googleapis.
 - **Key Modules**:
-  - `meta`: Core Meta SDK interaction (sync, publish, upload).
-  - `draft-campaign` (94KB): CRUD drafts, templates, logic publish to Meta.
+  - `meta` (`/meta-sdk`) & `data-sync` (`/data-sync`): Core Meta SDK interaction (sync, publish, upload) + các endpoint POST chạy **on-demand** tương đương cron job của mb-batch (folders, assets, videos, creative-refresh, expired-urls, cid-auto-upload, insights; Meta sync/all, fanpages, audiences, pixels, catalogs, previews). mb-ads KHÔNG chạy cron — chỉ mb-batch có scheduler.
+  - `draft-campaign` (~165KB): CRUD drafts, templates, logic publish to Meta (publish-readiness `validateLaunchReadiness()` cho luồng "quick-campaign"; "quick-campaign" không phải module riêng).
   - `data-sync`, `medias`, `drive`, `larkbase`, `data-export`, `export-presets`: Sync, export and manage media assets & insights (Google Sheets & Drive integration), and manage saved export presets.
   - `auth`, `user`, `permission` (RBAC), `accounts`, `project`, `account-proposal`: User management, access control & account allocation proposals.
   - `help`: Chatbot hướng dẫn sử dụng dashboard, lưu hội thoại và dùng AI provider key pool (Gemini/DeepSeek) trong DB để tự chuyển key khi quota/rate limit.
+  - `dashboard` (`/dashboard`): báo cáo usage/admin (`/dashboard`, `/dashboard/user-stats`, `/dashboard/care` — Care Ads usage, **dùng chung DB với care-ads-backend**); lọc theo `filter_startDate`/`filter_endDate`.
+  - `message-template` (`/message-templates`), `contribution` (`/contributions`), `medias` (`/medias`): mẫu tin nhắn tái sử dụng; luồng đóng góp/feedback; thư viện media + thống kê usage/asset-perf.
 - **Auth Guard**: `@UseGuards(JwtAuthGuard)` + `@CurrentUser()`.
 - **Export Endpoints**: `POST /cids/export-sheet` (Lark content records), `POST /insights/admin/creatives/export-sheet` (Creative performance insights), `POST /data-export/drive-sheet` (quản lý xuất động Insights và Creative Assets ra Google Sheet), và các API CRUD cho cấu hình xuất `/export-presets` (GET, POST, DELETE).
 
@@ -70,8 +72,8 @@
 ## 3. Quy Tắc Bắt Buộc: Thay Đổi Database Schema (Prisma)
 
 - **Không tự ý chạy Migration**: AI tuyệt đối KHÔNG được chạy `npx prisma migrate dev` hay `yarn migration:run`... Việc chạy migration do USER thực hiện thủ công.
-- **Đồng bộ hóa Schema 2 chiều**: Cần đồng bộ file `schema.prisma` ở cả 3 repo (`mb-ads`, `mb-batch`, `mb-database`) sau khi sửa đổi.
-  - File `mb-database/prisma/schema.prisma` **phải có** cấu hình `output = "../src/generated/prisma"` trong block `generator client`.
+- **Đồng bộ hóa Schema 2 chiều**: Cần đồng bộ file `schema.prisma` ở cả 3 repo (`mb-ads`, `mb-batch`, `mb-db`) sau khi sửa đổi.
+  - File `mb-db/prisma/schema.prisma` **phải có** cấu hình `output = "../src/generated/prisma"` trong block `generator client`.
   - File `mb-ads/prisma/schema.prisma` và `mb-batch/prisma/schema.prisma` **không được có** dòng cấu hình `output` này.
   - Sau khi đồng bộ, AI gọi `npx prisma generate` trong các thư mục đích có sẵn `node_modules` để sinh client code mới.
 
@@ -81,7 +83,7 @@
 
 1. **Mirror + Draft**: Dữ liệu Meta được mirror locally. Draft system cho phép chỉnh sửa/mô phỏng template và tạo drafts trước khi push thay đổi lên Meta (chỉ push các thay đổi thực sự).
 2. **Reuse ID (Insight Sync)**: Tái sử dụng ID insight cũ để ghi đè dữ liệu (TODAY, 3D, 7D, MAX), loại bỏ 99% lệnh ghi vào Campaign/AdSet/Ad/Creative, tối ưu hóa sort/filter của Prisma.
-3. **Daily Insights Upsert**: Lưu dữ liệu daily insights thông qua Native `upsert` trên Postgres composite keys `(entityId, dateStart, range)`.
+3. **Daily Insights Upsert**: Lưu dữ liệu daily insights thông qua Native `upsert` trên Postgres composite keys `(entityId, dateStart, range)`; các model `*AudienceInsight` mở rộng key thêm `age`/`gender` (và `level` cho adset/ad).
 4. **Recently Paused Retention**: Tiếp tục sync thực thể tạm dừng (paused) trong 3 ngày tiếp theo để bắt conversion trễ (attribution lag).
 5. **Creative Placeholder Substitution**: Tự động thay thế các placeholder `VIDEO_1`, `IMAGE_1` trong TemplateCampaign bằng media asset thực tế từ folder chỉ định. Bản nháp chạy thử được xử lý in-process trên `mb-ads` thay vì gọi sang `mb-batch`.
 6. **Folder-based Permission for CIDs**: User không phải admin chỉ xem được LarkRecords (CIDs) thuộc các folder mà họ có quyền (qua Project manager/leader hoặc FolderMember). Logic lọc bằng clause `OR` ngay dưới DB để phân trang nhanh chóng.
@@ -103,5 +105,5 @@
   - `mb-ads`: `.gemini/skills/mb-auto-project-overview.md`
   - `mb-batch`: `/Users/cuongdangquoc/Documents/thanhvinh-source.nosync/new/mb-batch/.gemini/skills/mb-auto-project-overview.md`
   - `mb-frontend`: `/Users/cuongdangquoc/Documents/thanhvinh-source.nosync/new/mb-frontend/.gemini/skills/mb-auto-project-overview.md`
-- **Error Alerts**: Khi gặp Meta auth/rate limit errors (codes 190, 102, 17, 4), hệ thống tự động clear config và gửi mail alert.
+- **Error Alerts**: Lỗi Meta **auth** (190, 102) → hệ thống xóa `META_AUTH_CONFIG` (`SystemConfig`) và gửi mail cảnh báo; lỗi **rate-limit/block** (4, 17, 32, 368, 613, 80004) → gọi `setMetaApiCooldown()` (đặt cooldown, giữ config, không gửi mail). Xử lý tại `mb-ads/src/modules/medias/meta-api.service.ts` (`handleMetaError`).
 - **Language**: Toàn bộ UI labels, enum descriptions, cron descriptions dùng Tiếng Việt. Mặc định dark mode.
