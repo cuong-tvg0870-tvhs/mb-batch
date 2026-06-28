@@ -41,9 +41,10 @@ export class MetaMediaSyncScheduler implements OnModuleInit {
   }
 
   /**
-   * 🎥 AD VIDEO DATA (20:05, 21:05, 22:05)
+   * 🎥 AD VIDEO DATA — rải đều cả ngày, mỗi 3h tại phút :05
+   * (00:05, 03:05, 06:05, 09:05, 12:05, 15:05, 18:05, 21:05)
    */
-  @Cron('5 20,21,22 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('5 */3 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async scheduleAdVideoSync() {
     this.logger.log('📅 Scheduling Ad Video Data Sync...');
     const bucket = new Date().toISOString().slice(0, 13);
@@ -60,9 +61,12 @@ export class MetaMediaSyncScheduler implements OnModuleInit {
   }
 
   /**
-   * 🎥 AD VIDEO ERROR DATA (20:15, 21:15, 22:15)
+   * 🎥 AD VIDEO ERROR DATA (đường lấy thẳng /<video_id> bằng token DB) —
+   * rải đều cả ngày, mỗi 3h tại phút :35 (chạy ~30' sau AdVideo để xử lý các
+   * video vừa bị đánh dấu ERROR, và lệch khỏi các job token-B của media-sync ở :00–:06)
+   * (00:35, 03:35, 06:35, 09:35, 12:35, 15:35, 18:35, 21:35)
    */
-  @Cron('15 20,21,22 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('35 */3 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async scheduleAdVideoErrorSync() {
     this.logger.log('📅 Scheduling Ad Video Error Data Sync...');
     const bucket = new Date().toISOString().slice(0, 13);

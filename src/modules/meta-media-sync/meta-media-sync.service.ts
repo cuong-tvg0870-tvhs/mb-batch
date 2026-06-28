@@ -797,7 +797,7 @@ export class MetaMediaSyncService {
             },
           },
         },
-        orderBy: { updatedAt: 'asc' },
+        orderBy: { urlExpiredAt: 'asc' },
         take: limit,
         select: { id: true, accountId: true },
       });
@@ -811,7 +811,7 @@ export class MetaMediaSyncService {
             ...where,
             id: { notIn: activeIds },
           },
-          orderBy: { updatedAt: 'asc' },
+          orderBy: { urlExpiredAt: 'asc' },
           take: remainingLimit,
           select: { id: true, accountId: true },
         });
