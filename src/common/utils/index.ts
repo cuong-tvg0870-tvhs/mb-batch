@@ -118,6 +118,14 @@ export const metaErrorToFriendly = (metaError: any): string | null => {
     return 'Ngân sách đang thấp hơn mức tối thiểu của Meta. Vui lòng tăng ngân sách ngày/trọn đời rồi publish lại.';
   if (has('special ad', 'special_ad_categor'))
     return 'Chiến dịch thuộc Danh mục quảng cáo đặc biệt — cần khai báo đúng danh mục và quốc gia điều chỉnh.';
+  // "Đã cố tạo nội dung động mà không có ID nhóm sản phẩm" / "tried to create
+  // dynamic content without a product set" — tái dùng "bài viết có sẵn" vốn là
+  // quảng cáo động Shops/Catalog ở chiến dịch/tài khoản không có catalog.
+  if (
+    has('nội dung động', 'nhóm sản phẩm') ||
+    has('dynamic content', 'product set', 'product_set')
+  )
+    return 'Quảng cáo cần gắn Nhóm sản phẩm (Catalog) nhưng chưa có. Thường gặp khi dùng lại "Bài viết có sẵn" vốn là quảng cáo động Shops/Catalog ở chiến dịch/tài khoản không có catalog — hãy chọn một Bài viết thường khác cho quảng cáo bị lỗi, hoặc thiết lập Catalog/Nhóm sản phẩm cho chiến dịch (hoặc đăng ở đúng tài khoản gốc có catalog).';
   if (has('pixel', 'dataset', 'promoted object', 'promoted_object'))
     return 'Thiếu Pixel/Dataset hoặc đối tượng quảng bá (promoted object). Vui lòng chọn Pixel/Trang phù hợp với mục tiêu chiến dịch.';
   if (has('audience', 'targeting') && has('control', 'expand', 'invalid'))
