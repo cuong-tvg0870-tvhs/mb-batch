@@ -252,6 +252,10 @@ export class DraftAutomationMetaPublisherService {
               }) || {};
 
             const creativeData = this.buildCreativeData(adPayload);
+            // Toggle "Hiển thị sản phẩm": OPT_OUT mặc định để tránh lỗi "tạo nội
+            // dung động mà không có ID nhóm sản phẩm". Chỉ tác động ở bước tạo
+            // creative, không đụng diff/snapshot.
+            this.applyProductExtensionsPreference(creativeData, adPayload.creative);
             const creative =
               await this.createAdCreativeWithOptionalDestinationFallback(
                 adAccount,
@@ -843,6 +847,9 @@ export class DraftAutomationMetaPublisherService {
       'creativeSource',
       'product_set_id',
       'pageId',
+      // Toggle UI "Hiển thị sản phẩm" — không gửi raw lên Meta; dịch sang
+      // degrees_of_freedom_spec ở bước tạo creative (applyProductExtensionsPreference).
+      'show_products',
     ];
     for (const field of uiOnlyFields) delete creativeData[field];
 
@@ -1084,6 +1091,35 @@ export class DraftAutomationMetaPublisherService {
       !!creative?.productSetId ||
       !!creative?.product_set_id
     );
+  }
+
+  /**
+   * "Hiển thị sản phẩm" (Advantage+ product extensions) mặc định BẬT ở cấp tài
+   * khoản. Creative KHÔNG gắn catalog mà không chủ động OPT_OUT → Meta báo lỗi
+   * "Đã cố tạo nội dung động mà không có ID nhóm sản phẩm" khi TẠO creative.
+   * Phải khớp với mb-ads (MetaService.applyProductExtensionsPreference) — hai
+   * luồng publish chạy song song nên giữ parity.
+   *
+   * Chỉ gọi ở bước tạo creative, KHÔNG đưa vào buildCreativeData để tránh lọt vào
+   * diff/snapshot khiến creative cũ bị tạo lại oan.
+   */
+  private applyProductExtensionsPreference(
+    creativeData: any,
+    sourceCreative: any,
+  ) {
+    if (this.isCatalogProductCreative(sourceCreative)) return;
+
+    const enrollStatus =
+      sourceCreative?.show_products === true ? 'OPT_IN' : 'OPT_OUT';
+
+    const dof = creativeData.degrees_of_freedom_spec || {};
+    const features = dof.creative_features_spec || {};
+    features.product_extensions = { enroll_status: enrollStatus };
+    if (enrollStatus === 'OPT_OUT') {
+      features.catalog_feed_tags = { enroll_status: 'OPT_OUT' };
+    }
+    dof.creative_features_spec = features;
+    creativeData.degrees_of_freedom_spec = dof;
   }
 
   private normalizeCatalogCreativeForMeta(
