@@ -126,6 +126,45 @@ export const metaErrorToFriendly = (metaError: any): string | null => {
     has('dynamic content', 'product set', 'product_set')
   )
     return 'Quảng cáo cần gắn Nhóm sản phẩm (Catalog) nhưng chưa có. Thường gặp khi dùng lại "Bài viết có sẵn" vốn là quảng cáo động Shops/Catalog ở chiến dịch/tài khoản không có catalog — hãy chọn một Bài viết thường khác cho quảng cáo bị lỗi, hoặc thiết lập Catalog/Nhóm sản phẩm cho chiến dịch (hoặc đăng ở đúng tài khoản gốc có catalog).';
+  // X3: Thực thể gắn theo Tài khoản quảng cáo bị dùng nhầm sang tài khoản khác —
+  // hay gặp khi lên chiến dịch từ MẪU (template) của TKQC khác mà chưa chọn lại.
+  // Tệp đối tượng (Custom/Lookalike): Meta báo not found / not available / invalid.
+  if (
+    has('custom audience', 'custom_audience', 'lookalike') &&
+    has(
+      'not found',
+      'not available',
+      'does not exist',
+      'invalid',
+      'not belong',
+      'does not belong',
+    )
+  )
+    return 'Tệp đối tượng (Custom/Lookalike) không thuộc Tài khoản quảng cáo đang chọn hoặc không còn tồn tại. Nếu bạn lên chiến dịch từ MẪU của tài khoản khác, hãy bỏ hoặc chọn lại Tệp đối tượng cho đúng tài khoản rồi publish lại.';
+  // Bài viết có sẵn / Pixel / Catalog / Trang không thuộc đúng TKQC hoặc Trang.
+  if (
+    has(
+      'does not belong',
+      'not belong to',
+      'is not associated',
+      'not associated with',
+      'not available for the ad account',
+      'not available in this ad account',
+    ) &&
+    has(
+      'post',
+      'story',
+      'object_story',
+      'pixel',
+      'dataset',
+      'catalog',
+      'product set',
+      'product_set',
+      'page',
+      'fanpage',
+    )
+  )
+    return 'Một thành phần (Bài viết có sẵn / Pixel / Catalog / Trang) không thuộc Tài khoản quảng cáo hoặc Trang đang chọn. Nếu bạn lên chiến dịch từ MẪU của tài khoản khác, hãy chọn lại đúng Bài viết/Pixel/Trang của tài khoản hiện tại rồi publish lại.';
   if (has('pixel', 'dataset', 'promoted object', 'promoted_object'))
     return 'Thiếu Pixel/Dataset hoặc đối tượng quảng bá (promoted object). Vui lòng chọn Pixel/Trang phù hợp với mục tiêu chiến dịch.';
   if (has('audience', 'targeting') && has('control', 'expand', 'invalid'))
