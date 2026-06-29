@@ -340,6 +340,8 @@ model Campaign {
 
   name            String?
   status          String?
+  effectiveStatus  String?
+  configuredStatus String?
   objective       String?
   buyingType      String?
   effectiveBudget Int       @default(0)
@@ -457,6 +459,8 @@ model AdSet {
 
   name   String?
   status String?
+  effectiveStatus  String?
+  configuredStatus String?
 
   optimizationGoal String?
   destinationType  String?
