@@ -365,7 +365,11 @@ export class MetaApiService implements OnModuleInit {
             ...rest,
             level,
             filtering,
-            action_attribution_windows: '7d_click',
+            // Giữ '7d_click' đầu tiên để field `value` của mỗi action vẫn = số
+            // 7d_click (KHÔNG cộng 1d_view → không lệch purchases/ROAS hiện tại);
+            // 'incrementality' thêm key incremental song song trong actions/
+            // action_values (xem extract incremental ở frontend, JSON-light).
+            action_attribution_windows: ['7d_click', 'incrementality'],
             action_breakdowns: 'action_type',
           },
           true, // iterate

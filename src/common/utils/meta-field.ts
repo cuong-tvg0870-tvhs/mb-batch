@@ -95,6 +95,7 @@ export const ADSET_FIELDS = [
   AdSet.Fields.targeting,
   AdSet.Fields.promoted_object,
   AdSet.Fields.attribution_spec,
+  AdSet.Fields.is_incremental_attribution_enabled,
   AdSet.Fields.frequency_control_specs,
   AdSet.Fields.is_dynamic_creative,
   AdSet.Fields.instagram_user_id,
