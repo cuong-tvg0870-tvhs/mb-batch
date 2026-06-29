@@ -1109,15 +1109,23 @@ export class DraftAutomationMetaPublisherService {
   ) {
     if (this.isCatalogProductCreative(sourceCreative)) return;
 
-    const enrollStatus =
-      sourceCreative?.show_products === true ? 'OPT_IN' : 'OPT_OUT';
+    const showProducts = sourceCreative?.show_products === true;
 
     const dof = creativeData.degrees_of_freedom_spec || {};
     const features = dof.creative_features_spec || {};
-    features.product_extensions = { enroll_status: enrollStatus };
-    if (enrollStatus === 'OPT_OUT') {
-      features.catalog_feed_tags = { enroll_status: 'OPT_OUT' };
+
+    // creative_features_spec yêu cầu KEY theo enum HOA của Meta (lỗi #100 liệt kê
+    // tập hợp lệ). Ba feature phụ thuộc catalog/sản phẩm cần product set → opt out
+    // cho creative KHÔNG gắn catalog để tránh lỗi "tạo nội dung động mà không có ID
+    // nhóm sản phẩm". Phải khớp mb-ads (MetaService.applyProductExtensionsPreference).
+    features.PRODUCT_BROWSING = {
+      enroll_status: showProducts ? 'OPT_IN' : 'OPT_OUT',
+    };
+    if (!showProducts) {
+      features.STANDARD_ENHANCEMENTS_CATALOG = { enroll_status: 'OPT_OUT' };
+      features.PRODUCT_METADATA_AUTOMATION = { enroll_status: 'OPT_OUT' };
     }
+
     dof.creative_features_spec = features;
     creativeData.degrees_of_freedom_spec = dof;
   }
