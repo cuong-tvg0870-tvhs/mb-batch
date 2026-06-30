@@ -2274,6 +2274,7 @@ model HelpChatSession {
   userId    String
   user      User              @relation("UserHelpChatSessions", fields: [userId], references: [id], onDelete: Cascade)
   title     String
+  mode      String            @default("docs")
   messages  HelpChatMessage[]
   createdAt DateTime          @default(now())
   updatedAt DateTime          @updatedAt
@@ -2281,6 +2282,40 @@ model HelpChatSession {
 
   @@index([userId, deletedAt])
   @@index([updatedAt])
+}
+
+/// Created out-of-band by the mb-ads AI assistant service on the shared production DB.
+/// Mirrored here so mb-db's Prisma schema matches reality (no DB-level FKs).
+model AiPendingAction {
+  id         String   @id
+  sessionId  String?
+  userId     String
+  type       String
+  targetType String
+  targetIds  Json
+  params     Json?
+  summary    String
+  status     String   @default("PROPOSED")
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @default(now()) @updatedAt
+
+  @@index([userId, status])
+}
+
+model AiActionLog {
+  id              String   @id
+  pendingActionId String?
+  userId          String
+  type            String
+  targetId        String
+  before          Json?
+  params          Json?
+  status          String
+  errorMessage    String?
+  createdAt       DateTime @default(now())
+
+  @@index([userId, createdAt])
 }
 
 model HelpChatMessage {
