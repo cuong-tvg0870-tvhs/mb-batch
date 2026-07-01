@@ -1918,13 +1918,16 @@ export class MetaMediaUploadService {
       const raw = this.normalizeRaw(record.raw);
 
       // Folder: dò nội dung con xem đã có file nào khớp CID chưa.
-      // File đơn: chỉ cần tên file đã đổi so với lúc skip.
+      // File đơn: xét tên file HIỆN TẠI đã khớp đúng CID của record chưa —
+      // bắt được cả khi user sửa tên file LẪN khi CID của record được sửa lại
+      // (tên file giữ nguyên nhưng record.cid đổi cho khớp), và tránh churn
+      // re-arm → SKIP lại khi tên có đổi nhưng CID vẫn lệch.
       const shouldRearm =
         currentMime === this.driveFolderMimeType
           ? driveId
             ? await this.folderHasMatchingCidFile(driveId, record.cid)
             : false
-          : (currentName || '') !== (raw.sync_skip_drive_name || '');
+          : this.fileMatchesRecordCid(currentName, record.cid);
 
       if (shouldRearm) {
         // Đưa về PENDING; luồng upload chính sẽ refetch + kiểm CID chính thức
