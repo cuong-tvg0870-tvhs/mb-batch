@@ -251,11 +251,19 @@ export class DraftAutomationMetaPublisherService {
                 status: this.normalizeMetaStatus(adData.status, 'PAUSED'),
               }) || {};
 
+            // Post-ID scaling: nội dung có bài viết sẵn cùng Trang + CTA → tham chiếu bài
+            // viết (tránh lỗi "Ảnh không hợp lệ hoặc đã hết hạn"). Mutate tại chỗ.
+            await this.applyScalePostId(adPayload.creative, adAccountId);
+
             const creativeData = this.buildCreativeData(adPayload);
             // Toggle "Hiển thị sản phẩm": OPT_OUT mặc định để tránh lỗi "tạo nội
             // dung động mà không có ID nhóm sản phẩm". Chỉ tác động ở bước tạo
-            // creative, không đụng diff/snapshot.
-            this.applyProductExtensionsPreference(creativeData, adPayload.creative);
+            // creative, không đụng diff/snapshot. KHÔNG áp cho POST_ID (bài viết có sẵn).
+            if (!creativeData.object_story_id)
+              this.applyProductExtensionsPreference(
+                creativeData,
+                adPayload.creative,
+              );
             const creative =
               await this.createAdCreativeWithOptionalDestinationFallback(
                 adAccount,
@@ -810,8 +818,197 @@ export class DraftAutomationMetaPublisherService {
     };
   }
 
+  // ===== POST-ID SCALING (an toàn cross-account) — parity với mb-ads =====
+  // Bài viết nhắn tin (MESSAGE_PAGE/WhatsApp/IG) KHÔNG dùng được cho ad-set website và
+  // ngược lại → chỉ ghép post cùng LỚP CTA.
+  private static readonly MESSAGING_CTAS = new Set([
+    'MESSAGE_PAGE',
+    'MESSENGER',
+    'WHATSAPP_MESSAGE',
+    'INSTAGRAM_MESSAGE',
+    'CONTACT_US',
+  ]);
+
+  private extractScaleMedia(creative: any): {
+    videoId?: string;
+    imageHash?: string;
+    pageId?: string;
+    ctaType?: string;
+    isCustom: boolean;
+  } {
+    if (!creative || typeof creative !== 'object') return { isCustom: false };
+    if (creative.object_story_id || creative.effective_object_story_id)
+      return { isCustom: false };
+    if (
+      creative.useCatalog === true ||
+      creative.productSetId ||
+      creative.product_set_id
+    )
+      return { isCustom: false };
+    const oss = creative.object_story_spec || {};
+    if (
+      oss.link_data?.child_attachments?.length ||
+      String(creative.mediaType || '').toLowerCase() === 'carousel'
+    )
+      return { isCustom: false };
+    const vd = oss.video_data || {};
+    const ld = oss.link_data || {};
+    const af = creative.asset_feed_spec || {};
+    const videoId =
+      vd.video_id ||
+      creative.videoId ||
+      creative.video_id ||
+      af.videos?.[0]?.video_id ||
+      undefined;
+    const imageHash =
+      ld.image_hash ||
+      creative.imageHash ||
+      creative.image_hash ||
+      af.images?.[0]?.hash ||
+      undefined;
+    const pageId = oss.page_id || creative.pageId || undefined;
+    const ctaType =
+      vd.call_to_action?.type ||
+      ld.call_to_action?.type ||
+      af.call_to_action_types?.[0] ||
+      creative.callToAction ||
+      undefined;
+    return {
+      videoId,
+      imageHash,
+      pageId,
+      ctaType,
+      isCustom: !!(videoId || imageHash),
+    };
+  }
+
+  /**
+   * Nếu creative dùng media thô mà nội dung đó có BÀI VIẾT có sẵn cùng Trang + cùng lớp
+   * CTA → chuyển sang tham chiếu bài viết (object_story_id), xoá object_story_spec/
+   * asset_feed_spec. Post gắn theo Trang nên hợp lệ cross-account và mang media gốc còn
+   * hạn (fix cả lỗi ảnh/video hết hạn). Không có post phù hợp thì giữ nguyên media thô.
+   * Nuốt lỗi để không chặn auto-publish. (Tham số adAccountId giữ để log/def tương thích.)
+   */
+  private async applyScalePostId(
+    creative: any,
+    _adAccountId?: string,
+  ): Promise<void> {
+    try {
+      if (!creative) return;
+      const m = this.extractScaleMedia(creative);
+      if (!m.isCustom || !m.pageId) return;
+
+      // Video: khớp theo videoId. Ảnh (không có videoId): khớp theo imageHash. KHÔNG
+      // khớp imageHash cho creative video — imageHash đó là THUMBNAIL, dễ đụng bài viết
+      // khác cùng thumbnail → chọn nhầm nội dung.
+      const orMatch = m.videoId
+        ? [{ videoId: m.videoId }]
+        : m.imageHash
+          ? [{ imageHash: m.imageHash }]
+          : [];
+      if (!orMatch.length) return;
+
+      const candidates = await this.prisma.creative.findMany({
+        where: {
+          AND: [
+            { OR: orMatch },
+            { effectObjectStoryId: { startsWith: `${m.pageId}_` } },
+          ],
+        },
+        select: {
+          effectObjectStoryId: true,
+          objectStoryId: true,
+          performanceStatus: true,
+          roas: true,
+          results: true,
+          spend: true,
+          remoteUpdatedAt: true,
+          rawPayload: true,
+        },
+      });
+      if (!candidates.length) return;
+
+      const Pub = DraftAutomationMetaPublisherService;
+      const wantMessaging = m.ctaType
+        ? Pub.MESSAGING_CTAS.has(m.ctaType)
+        : undefined;
+      const ctaOf = (c: any): string | undefined => {
+        const s = (c.rawPayload as any)?.object_story_spec || {};
+        return (
+          s.video_data?.call_to_action?.type ||
+          s.link_data?.call_to_action?.type ||
+          (c.rawPayload as any)?.asset_feed_spec?.call_to_action_types?.[0] ||
+          undefined
+        );
+      };
+      const ok = candidates.filter((c) => {
+        const story = c.effectObjectStoryId || c.objectStoryId;
+        if (!story) return false;
+        // Không rõ lớp CTA đích → KHÔNG scale (tránh ghép nhầm bài viết nhắn tin vào
+        // ad-set website và ngược lại → Meta từ chối / sai mục tiêu).
+        if (wantMessaging === undefined) return false;
+        const t = ctaOf(c);
+        if (!t) return false;
+        return Pub.MESSAGING_CTAS.has(t) === wantMessaging;
+      });
+      if (!ok.length) return;
+
+      const scaleRank = (s?: string | null): number =>
+        s === 'SCALE_P2' ? 3 : s === 'SCALE_P1' ? 2 : s && s !== 'OFF' ? 1 : 0;
+      const rank = (c: any): number[] => [
+        scaleRank(c.performanceStatus),
+        c.roas || 0,
+        c.results || 0,
+        c.spend || 0,
+        c.remoteUpdatedAt ? new Date(c.remoteUpdatedAt).getTime() : 0,
+      ];
+      ok.sort((a, b) => {
+        const ra = rank(a);
+        const rb = rank(b);
+        for (let i = 0; i < ra.length; i++) {
+          if (ra[i] !== rb[i]) return rb[i] - ra[i];
+        }
+        return 0;
+      });
+      const story = ok[0].effectObjectStoryId || ok[0].objectStoryId;
+      if (!story) return;
+
+      creative.object_story_id = story;
+      creative.effective_object_story_id = story;
+      creative.pageId = story.split('_')[0] || creative.pageId;
+      delete creative.object_story_spec;
+      delete creative.asset_feed_spec;
+      delete creative.videoId;
+      delete creative.video_id;
+      delete creative.imageHash;
+      delete creative.image_hash;
+    } catch (e) {
+      this.logger.warn(`applyScalePostId skipped: ${(e as Error)?.message}`);
+    }
+  }
+
   private buildCreativeData(adPayload: any) {
     const sourceCreative = adPayload?.creative || {};
+
+    // POST-ID: tham chiếu BÀI VIẾT có sẵn → chỉ gửi object_story_id, bỏ object_story_spec/
+    // asset_feed_spec. Bài viết gắn theo Trang nên hợp lệ cả khi khác tài khoản (parity
+    // với mb-ads buildNormalizedCreativePayload / meta.service publish).
+    const storyId =
+      sourceCreative.object_story_id || sourceCreative.effective_object_story_id;
+    const oss = sourceCreative.object_story_spec || {};
+    const hasCustomContent =
+      Object.keys(oss).length > 0 || !!sourceCreative.asset_feed_spec;
+    if (storyId && !hasCustomContent) {
+      return (
+        CleanObjectOrArray({
+          name: `${adPayload.name} - Creative`,
+          object_story_id: storyId,
+          url_tags:
+            sourceCreative.url_tags || sourceCreative.urlTags || undefined,
+        }) || {}
+      );
+    }
+
     const isCatalogProductCreative =
       this.isCatalogProductCreative(sourceCreative);
     const catalogProductSetId =
