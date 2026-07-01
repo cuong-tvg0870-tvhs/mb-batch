@@ -1298,6 +1298,17 @@ export class DraftAutomationMetaPublisherService {
       sourceCreative?.object_story_spec?.page_id ||
       sourceCreative?.pageId;
 
+    // Map catalogFormat (UI: SINGLE/CAROUSEL/COLLECTION) -> Meta format_option.
+    // Thiếu field này, catalog ad mặc định về Carousel (parity với mb-ads).
+    const catalogFormat =
+      sourceCreative?.catalogFormat || sourceCreative?.catalog_format;
+    const formatOption =
+      catalogFormat === 'COLLECTION'
+        ? 'collection_video'
+        : catalogFormat === 'CAROUSEL'
+          ? 'carousel_images_multi_items'
+          : 'single_image';
+
     creativeData.object_story_spec = CleanObjectOrArray({
       page_id: pageId,
       template_data: {
@@ -1316,10 +1327,9 @@ export class DraftAutomationMetaPublisherService {
           sourceTemplateData.description ||
           sourceCreative?.description ||
           '{{product.description}}',
+        format_option: formatOption,
         multi_share_end_card:
-          ['CAROUSEL', 'COLLECTION'].includes(
-            sourceCreative?.catalogFormat || sourceCreative?.catalog_format,
-          ) || undefined,
+          ['CAROUSEL', 'COLLECTION'].includes(catalogFormat) || undefined,
         call_to_action: {
           type: callToActionType,
           value: link ? { link } : undefined,
