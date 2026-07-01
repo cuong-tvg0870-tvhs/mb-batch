@@ -889,7 +889,7 @@ export class DraftAutomationMetaPublisherService {
       );
     }
 
-    this.stripDisabledPromotionalMetadataForMeta(creativeData);
+    this.applyPromotionalMetadataForMeta(creativeData);
     this.normalizeCreativeMediaForMeta(creativeData);
     if (isCatalogProductCreative) {
       this.normalizeCatalogCreativeForMeta(
@@ -941,15 +941,154 @@ export class DraftAutomationMetaPublisherService {
     return CleanObjectOrArray(creativeData) || {};
   }
 
-  private stripDisabledPromotionalMetadataForMeta(creativeData: any) {
-    if (creativeData?.promotional_metadata?.enabled === false) {
+  // Parity với mb-ads MetaService: chuẩn hoá promotional_metadata về
+  // asset_feed_spec.promotional_metadata (shape flat + propositions), thay vì chỉ
+  // strip khi disabled. Đảm bảo ad auto-publish có promo giống hệt publish thủ công.
+  private applyPromotionalMetadataForMeta(creativeData: any) {
+    const topLevelPromoMeta = this.normalizePromotionalMetadataForMeta(
+      creativeData.promotional_metadata,
+    );
+    if (topLevelPromoMeta) {
+      creativeData.asset_feed_spec = creativeData.asset_feed_spec || {};
+      creativeData.asset_feed_spec.promotional_metadata =
+        creativeData.asset_feed_spec.promotional_metadata || topLevelPromoMeta;
+      delete creativeData.promotional_metadata;
+    } else {
       delete creativeData.promotional_metadata;
     }
 
-    const assetFeedPromo = creativeData?.asset_feed_spec?.promotional_metadata;
-    if (assetFeedPromo?.enabled === false) {
+    const assetFeedPromoMeta = this.normalizePromotionalMetadataForMeta(
+      creativeData.asset_feed_spec?.promotional_metadata,
+    );
+    if (assetFeedPromoMeta) {
+      creativeData.asset_feed_spec = creativeData.asset_feed_spec || {};
+      creativeData.asset_feed_spec.promotional_metadata = assetFeedPromoMeta;
+      delete creativeData.promotional_metadata;
+    } else if (creativeData.asset_feed_spec) {
       delete creativeData.asset_feed_spec.promotional_metadata;
     }
+  }
+
+  // Copy 1:1 mb-ads MetaService.normalizePromotionalMetadataForMeta (kèm hedge
+  // propositions). Giữ nguyên xi để 2 writer đẩy payload Meta giống hệt nhau.
+  private normalizePromotionalMetadataForMeta(config: any) {
+    if (!config) return undefined;
+    if (config.enabled === false) return undefined;
+
+    const hasMetaShape =
+      'is_auto_update_allowed' in config ||
+      'manual_coupon_codes' in config ||
+      'allowed_coupon_code_sources' in config ||
+      'allowedSources' in config ||
+      'excluded_offers' in config ||
+      'excludedOffers' in config ||
+      Array.isArray(config.propositions);
+    if (config.enabled === undefined && !hasMetaShape) return undefined;
+
+    const propositions = Array.isArray(config.propositions)
+      ? config.propositions
+      : [];
+    const propositionManualCodes = propositions
+      .filter((item: any) => item?.proposition_type !== 'AUTOMATIC')
+      .map((item: any) => item?.coupon_code || item?.promo_code)
+      .filter(Boolean);
+    const propositionExcludedOffers = propositions
+      .filter((item: any) => item?.proposition_type === 'AUTOMATIC')
+      .flatMap((item: any) => item?.excluded_coupon_codes || []);
+    const isAuto = Boolean(
+      config.is_auto_update_allowed ??
+        config.isAuto ??
+        (propositionExcludedOffers.length > 0 &&
+          propositionManualCodes.length === 0),
+    );
+    const manualCodesSource =
+      config.manual_coupon_codes ||
+      config.manualCodes ||
+      propositionManualCodes;
+    const manualCodes = Array.isArray(manualCodesSource)
+      ? manualCodesSource
+          .map((code: any) => `${code}`.trim())
+          .filter((code: string) => code.length > 0)
+      : [];
+    const excludedOffersSource =
+      config.excluded_offers ||
+      config.excludedOffers ||
+      propositionExcludedOffers;
+    const excludedOffers = Array.isArray(excludedOffersSource)
+      ? excludedOffersSource
+          .map((code: any) => `${code}`.trim())
+          .filter((code: string) => code.length > 0)
+      : [];
+    const allowedSources = Array.isArray(
+      config.allowed_coupon_code_sources || config.allowedSources,
+    )
+      ? config.allowed_coupon_code_sources || config.allowedSources
+      : undefined;
+    const autoCouponCodeSources = new Set([
+      'PROVIDED_BY_MERCHANT',
+      'DETECTED_FROM_MERCHANT_ADS',
+      'DETECTED_FROM_MERCHANT_WEBSITE',
+      'DETECTED_FROM_MERCHANT_WEBSITE_URL',
+    ]);
+    const manualCouponCodeSources = new Set([
+      'AD_CREATIVE_PRIMARY_TEXT',
+      'AD_CREATIVE_HEADLINE',
+      'AD_CREATIVE_DESCRIPTION',
+      'AD_CREATIVE_PRIMARY_TEXT_LLM',
+      'AD_CREATIVE_HEADLINE_LLM',
+      'AD_CREATIVE_DESCRIPTION_LLM',
+      'AD_CREATIVE_MANUAL_COUPON_CODES',
+    ]);
+    const safeCouponCodeSources = isAuto
+      ? autoCouponCodeSources
+      : manualCouponCodeSources;
+    const safeAllowedSources = allowedSources
+      ?.map((source: any) => `${source}`.trim())
+      .map((source: string) =>
+        source === 'PROVIDED_FROM_MERCHANT'
+          ? 'PROVIDED_BY_MERCHANT'
+          : source,
+      )
+      .filter((source: string) => safeCouponCodeSources.has(source));
+    const defaultAllowedSources = isAuto
+      ? [
+          'DETECTED_FROM_MERCHANT_ADS',
+          'PROVIDED_BY_MERCHANT',
+          'DETECTED_FROM_MERCHANT_WEBSITE',
+        ]
+      : ['AD_CREATIVE_MANUAL_COUPON_CODES'];
+
+    // Meta's promotional_metadata is an undocumented passthrough dict (not in
+    // the SDK field list), so we can't be 100% sure it honours the flat
+    // `excluded_offers` / `manual_coupon_codes` shape. Send BOTH the flat fields
+    // AND the nested `propositions[]` (same shape used everywhere else in the
+    // codebase) so exclusion still lands whichever shape Meta actually reads.
+    const metaPropositions = isAuto
+      ? [
+          {
+            proposition_type: 'AUTOMATIC',
+            excluded_coupon_codes: excludedOffers,
+          },
+        ]
+      : manualCodes[0]
+        ? [
+            {
+              proposition_type: 'COUPON_CODE',
+              coupon_code: manualCodes[0],
+            },
+          ]
+        : undefined;
+
+    return CleanObjectOrArray({
+      is_auto_update_allowed: isAuto,
+      allowed_coupon_code_sources:
+        safeAllowedSources?.length ? safeAllowedSources : defaultAllowedSources,
+      excluded_offers:
+        isAuto && excludedOffers.length ? excludedOffers : undefined,
+      manual_coupon_codes:
+        !isAuto && manualCodes.length ? manualCodes : undefined,
+      propositions: metaPropositions,
+    });
   }
 
   private async createAdCreativeWithOptionalDestinationFallback(
@@ -1190,7 +1329,19 @@ export class DraftAutomationMetaPublisherService {
 
     if (productSetId) creativeData.product_set_id = productSetId;
 
+    // Giữ lại promotional_metadata khi rút gọn asset_feed_spec cho catalog product
+    // creative (song song mb-ads). Trước đây xoá thẳng asset_feed_spec làm mất promo
+    // trên path auto-publish — mà "Highlight your promotions" CHỈ áp dụng cho catalog.
+    const promotionalMetadata =
+      creativeData.asset_feed_spec?.promotional_metadata ||
+      creativeData.promotional_metadata;
     delete creativeData.asset_feed_spec;
+    if (promotionalMetadata) {
+      creativeData.asset_feed_spec = {
+        promotional_metadata: promotionalMetadata,
+      };
+    }
+    delete creativeData.promotional_metadata;
     delete creativeData.image_hash;
     delete creativeData.image_url;
     delete creativeData.video_id;
