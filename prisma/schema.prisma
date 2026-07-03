@@ -1670,7 +1670,9 @@ model DraftAutomationHistory {
 model SystemCampaign {
   id      String  @id @default(cuid())
   data    Json?
-  meta_id String?
+  // @unique = lưới an toàn tầng DB chống publish trùng: không cho 2 bản ghi
+  // SystemCampaign cùng trỏ về 1 campaign Meta (Postgres cho phép nhiều NULL).
+  meta_id String? @unique
   cid     String?
 
   // Snapshot của payload đã đẩy lên Meta ở lần publish THÀNH CÔNG gần nhất. Re-publish
@@ -1709,6 +1711,10 @@ model SystemCampaign {
 
   errors           Json?
   isPublishing     Boolean          @default(false)
+  // Mốc chiếm cờ isPublishing gần nhất. Chống 2 lỗi: (1) race re-publish — claim
+  // còn mới (<20') thì isPublishStuck không được gỡ cờ dù PublishHistory mới nhất
+  // là của lần trước; (2) mb-batch tự gỡ khóa kẹt (pod crash sau claim) sau 20'.
+  publishClaimedAt DateTime?
   hasMetaChanges   Boolean          @default(true)
   publishHistories PublishHistory[]
 

@@ -82,9 +82,33 @@ export class DraftAutomationMetaPublisherService {
     // CHƯA có meta_id. Nếu count=0 → đang có tiến trình khác publish hoặc campaign
     // đã được publish rồi → bỏ qua, tránh tạo campaign Meta TRÙNG (tiêu ngân sách
     // hai lần khi hai lần cron chồng nhau). Mirror chốt chặn của publish thủ công.
+    //
+    // GỠ KHÓA KẸT: pod crash sau khi chiếm cờ nhưng trước khi tạo campaign →
+    // isPublishing=true vĩnh viễn, mọi lần cron sau đều claim.count=0 và cleanup
+    // 7 ngày cũng né (yêu cầu isPublishing=false) → draft bị treo mãi mãi. Cho
+    // phép chiếm lại khi claim đã quá 20 phút (mirror STUCK_PUBLISH_MS của
+    // mb-ads). An toàn vì cửa sổ cần bảo vệ rất ngắn: campaign create chạy ngay
+    // sau claim và khi meta_id đã được ghi thì điều kiện meta_id=null tự chặn.
+    const STUCK_PUBLISH_MS = 20 * 60 * 1000; // 20 phút
+    const stuckBefore = new Date(Date.now() - STUCK_PUBLISH_MS);
     const claim = await this.prisma.systemCampaign.updateMany({
-      where: { id: campaignSystem.id, isPublishing: false, meta_id: null },
-      data: { isPublishing: true, errors: Prisma.DbNull },
+      where: {
+        id: campaignSystem.id,
+        meta_id: null,
+        OR: [
+          { isPublishing: false },
+          { publishClaimedAt: { lt: stuckBefore } },
+          // Khóa kẹt từ trước khi có cột publishClaimedAt (hoặc do writer cũ
+          // chưa ghi cột này): chỉ coi là kẹt khi bản ghi đã lâu không có ai
+          // đụng tới — mọi write hợp lệ trong lúc publish đều làm mới updatedAt.
+          { publishClaimedAt: null, updatedAt: { lt: stuckBefore } },
+        ],
+      },
+      data: {
+        isPublishing: true,
+        publishClaimedAt: new Date(),
+        errors: Prisma.DbNull,
+      },
     });
     if (claim.count === 0) {
       this.logger.warn(
