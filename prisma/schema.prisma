@@ -449,6 +449,28 @@ model Campaign {
   @@index([accountId, updatedAt(sort: Desc), id])
 }
 
+// Đánh dấu "đã xem" theo từng user cho MỌI loại entity (badge "Mới" ở danh sách).
+// Đa hình: (entityType, entityId, userId) — có 1 dòng = user đã mở; không có = chưa
+// xem. Ghi side-effect khi mở chi tiết (giống mốc lastReadBy của Contribution).
+// Không FK (entityId đa hình) → chấp nhận orphan khi hard-delete (nhỏ, vô hại).
+// Thêm entity mới chỉ cần +1 value ở SeenEntityType.
+enum SeenEntityType {
+  CAMPAIGN
+  ADSET
+  AD
+  CREATIVE
+}
+
+model EntitySeen {
+  entityType SeenEntityType
+  entityId   String
+  userId     String
+  seenAt     DateTime       @default(now())
+
+  @@id([entityType, entityId, userId])
+  @@index([userId, entityType])
+}
+
 model AdSet {
   id         String   @id
   campaignId String
