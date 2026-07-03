@@ -408,6 +408,20 @@ function findExistingSlots(
   }
 }
 
+// Kết quả một lượt chạy engine cho MỘT automation (template legacy hoặc row
+// DraftAutomation). Nhánh legacy bỏ qua; nhánh DraftAutomation dùng để cập nhật
+// run-tracking (lastRunStatus/lastRunReason) và quyết định COMPLETED / lịch kế tiếp.
+export interface AutomationRunResult {
+  status: 'SUCCESS' | 'SKIPPED' | 'FAILED';
+  reason?: string;
+  // isComplete = bản nháp đã lấp đủ mọi slot của mẫu (đủ điều kiện coi là "xong").
+  isComplete: boolean;
+  // published = đã đăng lên Meta ở lượt này (chỉ khi publishMode=PUBLISH_IMMEDIATELY
+  // và không bị khóa chống trùng bỏ qua).
+  published: boolean;
+  generatedCampaignId?: string;
+}
+
 @Injectable()
 export class DraftAutomationScheduler {
   private readonly logger = new Logger(DraftAutomationScheduler.name);
@@ -423,6 +437,9 @@ export class DraftAutomationScheduler {
 
   private async recordAutomationHistory(input: {
     template: any;
+    // Liên kết history với row DraftAutomation (nhánh mới). undefined ở nhánh legacy
+    // → Prisma bỏ qua cột → history cũ không đổi.
+    draftAutomationId?: string;
     startedAt: Date;
     status: 'SUCCESS' | 'SKIPPED' | 'FAILED';
     reason?: string;
@@ -442,6 +459,7 @@ export class DraftAutomationScheduler {
       await this.prisma.draftAutomationHistory.create({
         data: {
           templateId: input.template.id,
+          draftAutomationId: input.draftAutomationId,
           templateName: input.template.name,
           creatorId: input.creator?.id || input.template.createdById,
           creatorName: input.creator?.name,
@@ -819,6 +837,19 @@ export class DraftAutomationScheduler {
       images,
     );
 
+    // Gắn folderId của automation vào draft.data.automation để engine tự tìm lại
+    // "bản nháp đang gom dở" ở lượt sau (fallback theo template+folder+creator ở
+    // processAutomation). NHÁNH LEGACY: no-op — substitutedValues.automation.folderId
+    // vốn đã bằng automation.folderId (cùng nguồn template.data.automation). NHÁNH
+    // DraftAutomation: template có thể KHÔNG có data.automation → đây là chỗ gắn
+    // folderId để chế độ LOOP gom nhiều asset vào cùng một nháp hoạt động đúng.
+    if (automation?.folderId) {
+      substitutedValues.automation = {
+        ...(substitutedValues.automation || {}),
+        folderId: automation.folderId,
+      };
+    }
+
     // Map mỗi ad -> CID của asset đã lấp slot của ad đó, để đặt tên CID theo TỪNG
     // ad (clonedTemplateData vẫn giữ placeholder VIDEO_n/IMAGE_n vì replacePlaceholders
     // không mutate input). Slot VIDEO_n -> videos[n-1], IMAGE_n -> images[n-1].
@@ -1001,28 +1032,54 @@ export class DraftAutomationScheduler {
     });
   }
 
-  async processAutomation(templateId?: string) {
-    // 1. Fetch all templates with automation configured
-    const templates = await this.prisma.templateCampaign.findMany({
-      where: {
-        deletedAt: null,
-        ...(templateId ? { id: templateId } : {}),
-      },
-    });
+  async processAutomation(
+    templateId?: string,
+    override?: {
+      template: any;
+      rawAutomation: any;
+      draftAutomationId?: string;
+    },
+  ): Promise<AutomationRunResult> {
+    // Giá trị trả về CHỈ có ý nghĩa cho nhánh mới (override = 1 DraftAutomation row,
+    // luôn đúng 1 template). Nhánh legacy gọi không dùng return nên hành vi không đổi.
+    let lastResult: AutomationRunResult = {
+      status: 'SKIPPED',
+      reason: 'Không có template tự động hóa nào để xử lý.',
+      isComplete: false,
+      published: false,
+    };
 
-    const activeTemplates = templates.filter((template) => {
-      const automation = (template.data as any)?.automation;
-      return automation?.enabled === true && automation?.folderId;
-    });
+    // 1. Fetch all templates with automation configured.
+    // override != null: NHÁNH DraftAutomation — chạy đúng template do caller cấp,
+    // cấu hình automation lấy từ override.rawAutomation (map từ row DraftAutomation)
+    // thay cho template.data.automation. KHÔNG đụng bộ lọc/danh sách legacy bên dưới.
+    let activeTemplates: any[];
+    if (override) {
+      activeTemplates = [override.template];
+    } else {
+      const templates = await this.prisma.templateCampaign.findMany({
+        where: {
+          deletedAt: null,
+          ...(templateId ? { id: templateId } : {}),
+        },
+      });
 
-    if (activeTemplates.length === 0) {
-      this.logger.log('No templates configured with active automation rules.');
-      return;
+      activeTemplates = templates.filter((template) => {
+        const automation = (template.data as any)?.automation;
+        return automation?.enabled === true && automation?.folderId;
+      });
+
+      if (activeTemplates.length === 0) {
+        this.logger.log(
+          'No templates configured with active automation rules.',
+        );
+        return lastResult;
+      }
+
+      this.logger.log(
+        `Found ${activeTemplates.length} templates with active automation rules.`,
+      );
     }
-
-    this.logger.log(
-      `Found ${activeTemplates.length} templates with active automation rules.`,
-    );
 
     for (const template of activeTemplates) {
       const startedAt = new Date();
@@ -1034,13 +1091,22 @@ export class DraftAutomationScheduler {
       let publishMode: 'DRAFT_ONLY' | 'PUBLISH_IMMEDIATELY' = 'DRAFT_ONLY';
       try {
         automation = this.normalizeAutomation(
-          (template.data as any).automation,
+          override ? override.rawAutomation : (template.data as any).automation,
         );
         if (
           automation.enabled !== true ||
           automation.status === 'PAUSED' ||
-          automation.status === 'DISABLED'
+          automation.status === 'DISABLED' ||
+          // Chốt chặn CHỈ cho nhánh mới: thiếu thư mục nội dung thì không chạy (nhánh
+          // legacy đã lọc folderId ở activeTemplates nên điều kiện này luôn false).
+          (override != null && !automation.folderId)
         ) {
+          lastResult = {
+            status: 'SKIPPED',
+            reason: 'Tự động hóa chưa bật hoặc thiếu thư mục nội dung.',
+            isComplete: false,
+            published: false,
+          };
           continue;
         }
         publishRequested = this.shouldPublishImmediately(automation);
@@ -1059,6 +1125,7 @@ export class DraftAutomationScheduler {
             folderId: automation.folderId,
             publishRequested,
             publishMode,
+            draftAutomationId: override?.draftAutomationId,
             steps: [
               {
                 key: 'creator',
@@ -1068,6 +1135,12 @@ export class DraftAutomationScheduler {
               },
             ],
           });
+          lastResult = {
+            status: 'SKIPPED',
+            reason: 'Mẫu chưa có ID người tạo.',
+            isComplete: false,
+            published: false,
+          };
           continue;
         }
 
@@ -1079,18 +1152,20 @@ export class DraftAutomationScheduler {
           this.logger.warn(
             `Creator of template ${template.name} has no employee ID. Skipping.`,
           );
+          const creatorSkipReason = !creator
+            ? 'Không tìm thấy người tạo mẫu.'
+            : 'Người tạo template chưa có employee ID.';
           await this.recordAutomationHistory({
             template,
             startedAt,
             status: 'SKIPPED',
-            reason: !creator
-              ? 'Không tìm thấy người tạo mẫu.'
-              : 'Người tạo template chưa có employee ID.',
+            reason: creatorSkipReason,
             automation,
             creator,
             folderId: automation.folderId,
             publishRequested,
             publishMode,
+            draftAutomationId: override?.draftAutomationId,
             steps: [
               {
                 key: 'creator',
@@ -1103,6 +1178,12 @@ export class DraftAutomationScheduler {
               },
             ],
           });
+          lastResult = {
+            status: 'SKIPPED',
+            reason: creatorSkipReason,
+            isComplete: false,
+            published: false,
+          };
           continue;
         }
 
@@ -1594,18 +1675,20 @@ export class DraftAutomationScheduler {
           this.logger.log(
             `No new eligible assets for template "${template.name}". Skipping this run.`,
           );
+          const noAssetsReason = inProgressDraft
+            ? 'Chưa có asset mới đủ điều kiện cho bản nháp tự động hóa đang xử lý.'
+            : 'Chưa có asset đủ điều kiện để bắt đầu bản nháp tự động hóa.';
           await this.recordAutomationHistory({
             template,
             startedAt,
             status: 'SKIPPED',
-            reason: inProgressDraft
-              ? 'Chưa có asset mới đủ điều kiện cho bản nháp tự động hóa đang xử lý.'
-              : 'Chưa có asset đủ điều kiện để bắt đầu bản nháp tự động hóa.',
+            reason: noAssetsReason,
             automation,
             creator,
             folderId: automation.folderId,
             publishRequested,
             publishMode,
+            draftAutomationId: override?.draftAutomationId,
             conditionSummary: {
               ...conditionSummary,
               checks: [
@@ -1635,11 +1718,21 @@ export class DraftAutomationScheduler {
               },
             ],
           });
-          await this.updateTemplateAutomationState(template, {
-            ...automation,
-            status: 'WAITING_ASSETS',
-            lastRunAt: new Date().toISOString(),
-          });
+          // Trạng thái legacy chỉ ghi cho nhánh template.data.automation. Nhánh
+          // DraftAutomation (override) để scheduler cập nhật row DraftAutomation.
+          if (!override) {
+            await this.updateTemplateAutomationState(template, {
+              ...automation,
+              status: 'WAITING_ASSETS',
+              lastRunAt: new Date().toISOString(),
+            });
+          }
+          lastResult = {
+            status: 'SKIPPED',
+            reason: noAssetsReason,
+            isComplete: false,
+            published: false,
+          };
           continue;
         }
 
@@ -1743,48 +1836,56 @@ export class DraftAutomationScheduler {
           });
         }
 
-        await this.updateTemplateAutomationState(template, {
-          ...automation,
-          status:
-            automation.runMode === 'ONCE' && isComplete
-              ? 'COMPLETED'
-              : isComplete
-                ? 'READY_FOR_NEXT_RUN'
-                : 'WAITING_ASSETS',
-          enabled:
-            automation.runMode === 'ONCE' && isComplete
-              ? false
-              : automation.enabled,
-          lastRunAt: new Date().toISOString(),
-          completedAt:
-            automation.runMode === 'ONCE' && isComplete
-              ? new Date().toISOString()
-              : automation.completedAt || null,
-          completedDraftId:
-            automation.runMode === 'ONCE' && isComplete
-              ? generatedCampaignId
-              : automation.completedDraftId || null,
-          inProgressDraftId: isComplete ? null : generatedCampaignId,
-          lastGeneratedDraftId: generatedCampaignId,
-        });
+        // Trạng thái legacy chỉ ghi cho nhánh template.data.automation. Nhánh
+        // DraftAutomation (override) để scheduler cập nhật row DraftAutomation
+        // (lastRunAt/runCount/lastRunStatus/nextRunAt/COMPLETED).
+        if (!override) {
+          await this.updateTemplateAutomationState(template, {
+            ...automation,
+            status:
+              automation.runMode === 'ONCE' && isComplete
+                ? 'COMPLETED'
+                : isComplete
+                  ? 'READY_FOR_NEXT_RUN'
+                  : 'WAITING_ASSETS',
+            enabled:
+              automation.runMode === 'ONCE' && isComplete
+                ? false
+                : automation.enabled,
+            lastRunAt: new Date().toISOString(),
+            completedAt:
+              automation.runMode === 'ONCE' && isComplete
+                ? new Date().toISOString()
+                : automation.completedAt || null,
+            completedDraftId:
+              automation.runMode === 'ONCE' && isComplete
+                ? generatedCampaignId
+                : automation.completedDraftId || null,
+            inProgressDraftId: isComplete ? null : generatedCampaignId,
+            lastGeneratedDraftId: generatedCampaignId,
+          });
+        }
+
+        const successReason =
+          publishRequested && isComplete
+            ? 'Đã tạo bản nháp chiến dịch tự động và đăng lên Meta.'
+            : isComplete
+              ? 'Bản nháp chiến dịch tự động đã hoàn tất.'
+              : inProgressDraft
+                ? 'Đã cập nhật bản nháp chiến dịch tự động với asset mới đủ điều kiện.'
+                : 'Đã tạo bản nháp chiến dịch tự động với một phần asset đủ điều kiện.';
 
         await this.recordAutomationHistory({
           template,
           startedAt,
           status: 'SUCCESS',
-          reason:
-            publishRequested && isComplete
-              ? 'Đã tạo bản nháp chiến dịch tự động và đăng lên Meta.'
-              : isComplete
-                ? 'Bản nháp chiến dịch tự động đã hoàn tất.'
-                : inProgressDraft
-                  ? 'Đã cập nhật bản nháp chiến dịch tự động với asset mới đủ điều kiện.'
-                  : 'Đã tạo bản nháp chiến dịch tự động với một phần asset đủ điều kiện.',
+          reason: successReason,
           automation,
           creator,
           folderId: automation.folderId,
           publishRequested,
           publishMode,
+          draftAutomationId: override?.draftAutomationId,
           publishResult,
           conditionSummary: {
             ...conditionSummary,
@@ -1808,6 +1909,21 @@ export class DraftAutomationScheduler {
           generatedCampaignId,
           steps: successSteps,
         });
+
+        lastResult = {
+          status: 'SUCCESS',
+          reason: successReason,
+          isComplete,
+          // Chỉ coi là đã publish khi thực sự đăng ở lượt này (không bị khóa chống
+          // trùng bỏ qua). Dùng cho quyết định COMPLETED khi publishMode=IMMEDIATELY.
+          published: !!(
+            publishRequested &&
+            isComplete &&
+            publishResult &&
+            !publishResult.skipped
+          ),
+          generatedCampaignId,
+        };
 
         this.logger.log(
           publishRequested && isComplete
@@ -1840,19 +1956,22 @@ export class DraftAutomationScheduler {
                 },
               ];
 
+        const failureReason =
+          publishRequested && generatedCampaignId
+            ? 'Đã tạo bản nháp chiến dịch nhưng đăng lên Meta thất bại.'
+            : 'Có lỗi không mong muốn khi xử lý mẫu.';
+
         await this.recordAutomationHistory({
           template,
           startedAt,
           status: 'FAILED',
-          reason:
-            publishRequested && generatedCampaignId
-              ? 'Đã tạo bản nháp chiến dịch nhưng đăng lên Meta thất bại.'
-              : 'Có lỗi không mong muốn khi xử lý mẫu.',
+          reason: failureReason,
           automation,
           creator,
           folderId: automation?.folderId,
           publishRequested,
           publishMode,
+          draftAutomationId: override?.draftAutomationId,
           conditionSummary,
           steps: failureSteps,
           generatedCampaignId,
@@ -1863,7 +1982,97 @@ export class DraftAutomationScheduler {
           `Error processing template "${template.name}":`,
           this.formatError(err),
         );
+        lastResult = {
+          status: 'FAILED',
+          reason: failureReason,
+          isComplete: false,
+          published: false,
+          generatedCampaignId,
+        };
       }
     }
+
+    return lastResult;
+  }
+
+  /**
+   * Map một row DraftAutomation → ĐÚNG shape cấu hình mà engine dựng-nháp đang đọc
+   * từ template.data.automation. Nguồn: cột của row + JSON `conditions`. Không thêm
+   * field lạ ngoài những gì engine dùng (folderId, videoCount, imageCount, nameRule,
+   * assetCreatedAfter, slotRules, publishMode, runMode, cronExpression, timezone).
+   * normalizeAutomation() sẽ chuẩn hoá tiếp (publishMode/runMode/cron/timezone).
+   */
+  draftAutomationToAutomationConfig(row: {
+    folderId: string | null;
+    conditions: any;
+    publishMode: string;
+    runMode: string;
+    cronExpression: string | null;
+    timezone: string | null;
+  }) {
+    const conditions =
+      row.conditions && typeof row.conditions === 'object'
+        ? (row.conditions as any)
+        : {};
+    return {
+      // enabled=true: engine dùng cờ này để quyết định chạy. Row đã được lọc
+      // ACTIVE ở tầng scheduler nên tới đây luôn bật.
+      enabled: true,
+      folderId: row.folderId ?? conditions.folderId ?? undefined,
+      nameRule: conditions.nameRule ?? undefined,
+      videoCount: conditions.videoCount ?? undefined,
+      imageCount: conditions.imageCount ?? undefined,
+      assetCreatedAfter: conditions.assetCreatedAfter ?? undefined,
+      // slotRules (nếu có) giữ nguyên khoá VIDEO_n / IMAGE_n mà engine đã hiểu.
+      slotRules: conditions.slotRules ?? undefined,
+      cidRequired: conditions.cidRequired ?? undefined,
+      publishMode: row.publishMode,
+      runMode: row.runMode,
+      cronExpression: row.cronExpression ?? undefined,
+      timezone: row.timezone ?? undefined,
+    };
+  }
+
+  /**
+   * Chạy MỘT lượt dựng-nháp cho một DraftAutomation row (sourceType=TEMPLATE),
+   * DÙNG LẠI toàn bộ engine qua processAutomation(_, override). KHÔNG tự chọn asset
+   * / lấp slot / thay thế / publish — tất cả nằm trong engine sẵn có. Trả về kết quả
+   * để scheduler cập nhật run-tracking + lịch kế tiếp trên row.
+   */
+  async runDraftAutomationOnce(row: {
+    id: string;
+    templateId: string | null;
+    folderId: string | null;
+    conditions: any;
+    publishMode: string;
+    runMode: string;
+    cronExpression: string | null;
+    timezone: string | null;
+  }): Promise<AutomationRunResult> {
+    if (!row.templateId) {
+      return {
+        status: 'SKIPPED',
+        reason: 'DraftAutomation chưa gắn template nguồn.',
+        isComplete: false,
+        published: false,
+      };
+    }
+    const template = await this.prisma.templateCampaign.findFirst({
+      where: { id: row.templateId, deletedAt: null },
+    });
+    if (!template) {
+      return {
+        status: 'SKIPPED',
+        reason: 'Không tìm thấy template nguồn của DraftAutomation.',
+        isComplete: false,
+        published: false,
+      };
+    }
+    const rawAutomation = this.draftAutomationToAutomationConfig(row);
+    return this.processAutomation(undefined, {
+      template,
+      rawAutomation,
+      draftAutomationId: row.id,
+    });
   }
 }
