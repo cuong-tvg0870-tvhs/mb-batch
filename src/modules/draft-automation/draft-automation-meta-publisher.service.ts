@@ -618,6 +618,21 @@ export class DraftAutomationMetaPublisherService {
     delete metaPayload.ads;
     delete metaPayload.timezone_type;
 
+    // ABO (ngân sách nằm ở ad set) BẮT BUỘC có bid_strategy ở cấp ad set — nếu
+    // thiếu, Meta từ chối bằng thông báo khó hiểu ("Cần có giá thầu… đặt GIÁ TRỊ
+    // là mục tiêu tối ưu"). Mặc định "Chi phí thấp nhất, không giới hạn giá thầu".
+    // CHỈ áp khi ad set tự mang ngân sách (=ABO); dưới CBO ad set KHÔNG có ngân
+    // sách và Meta CẤM khai bid_strategy ở đây. Giữ đồng bộ với mb-ads.
+    const adSetHasOwnBudget =
+      metaPayload.daily_budget != null || metaPayload.lifetime_budget != null;
+    if (adSetHasOwnBudget && !metaPayload.bid_strategy) {
+      metaPayload.bid_strategy = 'LOWEST_COST_WITHOUT_CAP';
+    }
+
+    // Loại audience_controls.min_age khi Advantage+ bật — Meta từ chối. Độ tuổi
+    // tối thiểu đi qua targeting.age_min. Giữ đồng bộ với mb-ads.
+    metaPayload.audience_controls = this.sanitizeAudienceControls(metaPayload);
+
     return (
       CleanObjectOrArray({
         ...metaPayload,
@@ -625,6 +640,20 @@ export class DraftAutomationMetaPublisherService {
         campaign_id: campaignMetaId,
       }) || {}
     );
+  }
+
+  // Meta TỪ CHỐI audience_controls.min_age khi Advantage+ Audience bật ("thêm độ
+  // tuổi tối thiểu cao hơn làm gợi ý"). Độ tuổi tối thiểu phải đi qua
+  // targeting.age_min. Loại min_age khi advantage on; giữ control khác. Đồng bộ mb-ads.
+  private sanitizeAudienceControls(payload: any) {
+    const advOn =
+      payload?.targeting?.targeting_automation?.advantage_audience === 1 ||
+      payload?.targeting?.targeting_automation?.advantage_audience === true;
+    const ac = payload?.audience_controls;
+    if (!advOn || !ac || typeof ac !== 'object') return ac;
+    const { min_age, ...restControls } = ac as Record<string, any>;
+    void min_age;
+    return Object.keys(restControls).length > 0 ? restControls : undefined;
   }
 
   private resolveAdSetProductSetId(payload: any) {
