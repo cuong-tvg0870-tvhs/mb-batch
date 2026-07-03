@@ -1637,6 +1637,7 @@ model TemplateCampaign {
   deletedAt   DateTime?
 
   automationHistories DraftAutomationHistory[]
+  draftAutomations    DraftAutomation[]
 
   @@index([name])
   @@index([reference_id])
@@ -1659,6 +1660,11 @@ model DraftAutomationHistory {
 
   templateId String
   template   TemplateCampaign @relation(fields: [templateId], references: [id], onDelete: Cascade)
+
+  // Liên kết tới DraftAutomation (thực thể tự động hóa mới). Nullable + additive:
+  // history cũ / writer cũ không set → không ảnh hưởng.
+  draftAutomationId String?
+  draftAutomation   DraftAutomation? @relation(fields: [draftAutomationId], references: [id], onDelete: SetNull)
 
   templateName      String
   creatorId         String?
@@ -1684,9 +1690,95 @@ model DraftAutomationHistory {
   createdAt  DateTime  @default(now())
 
   @@index([templateId, createdAt(sort: Desc)])
+  @@index([draftAutomationId, createdAt(sort: Desc)])
   @@index([creatorId, createdAt(sort: Desc)])
   @@index([status, createdAt(sort: Desc)])
   @@index([publishRequested, createdAt(sort: Desc)])
+}
+
+// =============================================================================
+// DRAFT AUTOMATION (thực thể "tự động hóa lên camp theo template") — NHÓM MỚI.
+// -----------------------------------------------------------------------------
+// KHÁC hoàn toàn cụm AutomationRule* (Care Ads: tối ưu camp đang chạy). Đây là
+// "1 template → NHIỀU lượt tự động": mỗi DraftAutomation trỏ tới 1 TemplateCampaign
+// có sẵn (sourceType=TEMPLATE) + nguồn content + lịch + điều kiện; runner mb-batch
+// quét các bản ACTIVE để DÙNG LẠI engine dựng-nháp hiện có. sourceType=QUICK_CONFIG
+// dành cho phase sau (nguồn = thiết lập nhanh, không cần template).
+// Migration additive: bảng mới + cột FK nullable trên DraftAutomationHistory —
+// không phá dữ liệu/hành vi cũ.
+// =============================================================================
+enum DraftAutomationSourceType {
+  TEMPLATE
+  QUICK_CONFIG
+}
+
+enum DraftAutomationScheduleType {
+  INTERVAL
+  CRON
+}
+
+enum DraftAutomationRunMode {
+  LOOP
+  ONCE
+}
+
+enum DraftAutomationStatus {
+  ACTIVE
+  PAUSED
+  COMPLETED
+}
+
+model DraftAutomation {
+  id          String  @id @default(cuid())
+  name        String
+  description String?
+
+  // Nguồn dựng nháp. TEMPLATE = từ mẫu có sẵn (hiện tại). QUICK_CONFIG = phase sau.
+  sourceType  DraftAutomationSourceType @default(TEMPLATE)
+  templateId  String?
+  template    TemplateCampaign?         @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  quickConfig Json?
+
+  // Nguồn content + điều kiện chọn nội dung. Chi tiết linh hoạt trong `conditions`
+  // (nameRule / cidRequired / assetCreatedAfter / videoCount / imageCount / grouping…)
+  // để tinh chỉnh KHÔNG cần migration; engine dựng-nháp đọc từ đây.
+  folderId   String?
+  conditions Json?
+
+  // Lịch chạy.
+  scheduleType    DraftAutomationScheduleType @default(INTERVAL)
+  intervalMinutes Int?
+  cronExpression  String?
+  timezone        String?
+  runMode         DraftAutomationRunMode @default(LOOP)
+
+  // Chế độ đăng — mặc định chỉ tạo nháp (an toàn). Dùng lại enum sẵn có.
+  publishMode DraftAutomationPublishMode @default(DRAFT_ONLY)
+
+  status DraftAutomationStatus @default(ACTIVE)
+
+  // Theo dõi lần chạy để hiển thị cho marketer (gần nhất / kế tiếp / lý do "đang gom").
+  lastRunAt     DateTime?
+  nextRunAt     DateTime?
+  lastRunStatus DraftAutomationRunStatus?
+  lastRunReason String?
+  runCount      Int                       @default(0)
+
+  // accountId / createdById dạng chuỗi (không FK) theo đúng quy ước folderId/creatorId
+  // ở DraftAutomationHistory.
+  accountId   String?
+  createdById String?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  histories DraftAutomationHistory[]
+
+  @@index([status, nextRunAt])
+  @@index([templateId, createdAt(sort: Desc)])
+  @@index([accountId, createdAt(sort: Desc)])
+  @@index([createdById, createdAt(sort: Desc)])
 }
 
 model SystemCampaign {
