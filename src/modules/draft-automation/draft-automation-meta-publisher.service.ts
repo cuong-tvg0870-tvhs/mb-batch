@@ -46,6 +46,25 @@ export class DraftAutomationMetaPublisherService {
     this.initialized = true;
   }
 
+  // Ngưỡng "tối thiểu N mẫu nội dung/chiến dịch" — cấu hình runtime qua
+  // SystemConfig[min_publish_contents] (parity mb-ads DraftCampaignService). value =
+  // số (vd 5) hoặc { value: 5 }. FAIL-OPEN về mặc định 5 khi thiếu row/lỗi.
+  private async getMinPublishContents(): Promise<number> {
+    try {
+      const cfg = await this.prisma.systemConfig.findUnique({
+        where: { key: 'min_publish_contents' },
+        select: { value: true },
+      });
+      const raw: any = cfg?.value;
+      const n = Number(
+        raw !== null && typeof raw === 'object' ? raw.value : raw,
+      );
+      return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 5;
+    } catch {
+      return 5;
+    }
+  }
+
   async publishDraftCampaign(systemCampaignId: string) {
     this.init();
 
@@ -63,6 +82,58 @@ export class DraftAutomationMetaPublisherService {
 
     if (!campaignSystem) {
       throw new Error(`SystemCampaign ${systemCampaignId} not found.`);
+    }
+
+    // CHỐT CHẶN Ô-TRỐNG (parity mb-ads validateLaunchReadiness): KHÔNG publish khi còn
+    // ô nội dung chưa lấp — creative còn token slot `VIDEO_n`/`IMAGE_n` hoặc cờ
+    // `placeholder`. Nếu để lọt, token/creative rỗng lên Meta sẽ bị từ chối. Bản đăng
+    // tay chặn được; auto cũng phải chặn (isComplete đếm số lượng nên có thể sai khi
+    // template có slot index vượt số lượng required — xem finding [26]). Bỏ qua SỚM,
+    // KHÔNG claim, KHÔNG tạo gì trên Meta.
+    const hasUnfilledSlot = (campaignSystem.ad_sets || []).some((adSet) =>
+      (adSet.ads || []).some((ad) => {
+        const cr = (
+          (CleanObjectOrArray((ad.data as any) || {}) || {}) as any
+        )?.creative;
+        return this.creativeHasUnfilledSlot(cr);
+      }),
+    );
+    if (hasUnfilledSlot) {
+      this.logger.warn(
+        `Bỏ qua publish draft ${campaignSystem.id}: còn ô nội dung trống (slot chưa được lấp bằng ảnh/video).`,
+      );
+      return { skipped: true, reason: 'EMPTY_SLOT' };
+    }
+
+    // LƯỚI AN TOÀN ≥5 NỘI DUNG (parity mb-ads validateLaunchReadiness): cron đăng qua
+    // publisher NÀY (không qua pushToMeta mb-ads) nên phải tự kiểm — KHÔNG tạo chiến
+    // dịch MỚI lên Meta dưới 5 mẫu nội dung (chuẩn phân phối Meta). Bỏ qua SỚM (không
+    // throw → tránh retry-loop/rollback), engine ghi nhận nhẹ nhàng. Chỉ lần tạo mới
+    // (chưa meta_id), không phải template, miễn khi tên chiến dịch chứa "TestingContent".
+    // Backstop cho row lọt qua gate cấu hình + tự-tạm-dừng (vd nhánh legacy không có row).
+    const MIN_PUBLISH_CONTENTS = await this.getMinPublishContents();
+    const totalContents = (campaignSystem.ad_sets || []).reduce(
+      (sum, adSet) => sum + (adSet.ads?.length || 0),
+      0,
+    );
+    const campaignName = String(
+      campaignSystem.campaign_name ||
+        (campaignSystem.data as any)?.campaign?.name ||
+        '',
+    );
+    const isTestingContent = campaignName
+      .toLowerCase()
+      .includes('testingcontent');
+    if (
+      !campaignSystem.meta_id &&
+      !campaignSystem.is_template &&
+      !isTestingContent &&
+      totalContents < MIN_PUBLISH_CONTENTS
+    ) {
+      this.logger.warn(
+        `Bỏ qua publish draft ${campaignSystem.id}: chỉ ${totalContents}/${MIN_PUBLISH_CONTENTS} mẫu nội dung — chưa đạt chuẩn phân phối Meta.`,
+      );
+      return { skipped: true, reason: 'MIN_CONTENTS_NOT_MET' };
     }
 
     const data = this.clone(
@@ -627,6 +698,9 @@ export class DraftAutomationMetaPublisherService {
       metaPayload.daily_budget != null || metaPayload.lifetime_budget != null;
     if (adSetHasOwnBudget && !metaPayload.bid_strategy) {
       metaPayload.bid_strategy = 'LOWEST_COST_WITHOUT_CAP';
+    } else if (!adSetHasOwnBudget && metaPayload.bid_strategy) {
+      // CBO: Meta CẤM khai bid_strategy ở ad set → xoá giá trị thừa (parity mb-ads).
+      delete metaPayload.bid_strategy;
     }
 
     // Loại audience_controls.min_age khi Advantage+ bật — Meta từ chối. Độ tuổi
@@ -1159,8 +1233,30 @@ export class DraftAutomationMetaPublisherService {
       const isFlexibleFormat =
         creativeData.asset_feed_spec?.optimization_type ===
         'DEGREES_OF_FREEDOM';
+
+      // PARITY mb-ads (meta.service buildCreativeData): asset_feed_spec CHỈ được coi là
+      // "mang creative" khi có trường media/nội dung thật. Nếu nó sinh ra chỉ để chở
+      // promotional_metadata / onsite_destinations (không images/videos) thì KHÔNG được
+      // xoá media trong object_story_spec — nếu không ad sẽ mất ảnh/video → Meta từ chối.
+      const assetFeedCreativeKeys = [
+        'ad_formats',
+        'images',
+        'videos',
+        'bodies',
+        'titles',
+        'descriptions',
+        'link_urls',
+        'call_to_action_types',
+        'optimization_type',
+      ];
+      const hasCreativeAssetFeedFields = assetFeedCreativeKeys.some((key) => {
+        const value = creativeData.asset_feed_spec?.[key];
+        return Array.isArray(value) ? value.length > 0 : value != null;
+      });
+
       const isCarousel =
         sourceCreative?.mediaType?.toLowerCase() === 'carousel' ||
+        creativeData?.mediaType?.toLowerCase() === 'carousel' ||
         (Array.isArray(
           creativeData.object_story_spec?.link_data?.child_attachments,
         ) &&
@@ -1168,7 +1264,11 @@ export class DraftAutomationMetaPublisherService {
             0) ||
         creativeData.asset_feed_spec?.ad_formats?.some((format: string) =>
           format.includes('CAROUSEL'),
-        );
+        ) ||
+        (Array.isArray(sourceCreative?.carouselCards) &&
+          sourceCreative.carouselCards.length > 0) ||
+        (Array.isArray(creativeData.carouselCards) &&
+          creativeData.carouselCards.length > 0);
 
       if (isFlexibleFormat && isCarousel) {
         const allowedKeys = ['optimization_type', 'bodies'];
@@ -1181,7 +1281,37 @@ export class DraftAutomationMetaPublisherService {
         }
       }
 
-      if (creativeData.object_story_spec && creativeData.asset_feed_spec) {
+      // Flexible nhưng thực chất chỉ 1 asset (không trường DOF nào length>1) → gỡ hẳn
+      // asset_feed_spec, đăng như ad 1-asset thường (parity mb-ads — tránh Meta dựng ad
+      // Flexible lệch cấu trúc so với bản đăng tay).
+      if (isFlexibleFormat && creativeData.asset_feed_spec) {
+        const dofFields = [
+          'bodies',
+          'titles',
+          'descriptions',
+          'images',
+          'videos',
+          'link_urls',
+          'call_to_action_types',
+        ];
+        const hasMultiAssetDofField = dofFields.some((key) => {
+          const value = creativeData.asset_feed_spec?.[key];
+          return Array.isArray(value) && value.length > 1;
+        });
+        const hasOnlyOptimizationType = Object.keys(
+          creativeData.asset_feed_spec,
+        ).every((key) => key === 'optimization_type');
+        if (hasOnlyOptimizationType || !hasMultiAssetDofField) {
+          delete creativeData.asset_feed_spec;
+        }
+      }
+
+      if (
+        creativeData.object_story_spec &&
+        creativeData.asset_feed_spec &&
+        hasCreativeAssetFeedFields &&
+        !isFlexibleFormat
+      ) {
         delete creativeData.object_story_spec.link_data;
         delete creativeData.object_story_spec.video_data;
         delete creativeData.object_story_spec.template_data;
@@ -1894,5 +2024,26 @@ export class DraftAutomationMetaPublisherService {
 
   private clone<T>(value: T): T {
     return JSON.parse(JSON.stringify(value ?? null));
+  }
+
+  // Quét đệ quy 1 creative: còn ô slot chưa lấp không? Tín hiệu chắc chắn là chuỗi
+  // đúng dạng token `VIDEO_n`/`IMAGE_n` (media đã lấp là id THẬT dạng số, không khớp);
+  // kèm cờ `placeholder` (đã bị xoá khi lấp nên chỉ còn ở creative chưa lấp). Ad "ghim
+  // bài" giữ object_story_id, không có token/placeholder nên KHÔNG bị chặn nhầm.
+  private creativeHasUnfilledSlot(node: any): boolean {
+    if (!node) return false;
+    if (typeof node === 'string') {
+      return /^VIDEO_\d+$/.test(node) || /^IMAGE_\d+$/.test(node);
+    }
+    if (Array.isArray(node)) {
+      return node.some((n) => this.creativeHasUnfilledSlot(n));
+    }
+    if (typeof node === 'object') {
+      if (node.placeholder === true) return true;
+      return Object.values(node).some((v) =>
+        this.creativeHasUnfilledSlot(v),
+      );
+    }
+    return false;
   }
 }
