@@ -46,10 +46,16 @@ export function applyCidToAdName(name: string, cid: string): string {
     (p) => CID_PATTERN.test(p.trim()) || p.trim() === '[MÃ_CID_CONTENT]',
   );
   if (idx === -1) {
-    // Chỉ dùng vị trí mặc định (thứ 5) cho tên quảng cáo dạng pipe; tránh đụng
-    // tên dạng campaign/adset có sentinel AUTO_ADS.
-    if (parts.length >= 5 && parts[5]?.trim() !== 'AUTO_ADS') idx = 4;
-    else return name;
+    // Không có token/placeholder CID sẵn: CHỈ chèn vào vị trí thứ 5 (index 4) khi tên
+    // ĐÚNG dạng quảng cáo pipe chuẩn "A|B|C|D|CID|" — 6 phần, phần cuối rỗng — và KHÔNG
+    // chứa sentinel AUTO_ADS ở BẤT KỲ vị trí nào. Trước đây guard đọc parts[5] nhưng ghi
+    // parts[4] (lệch 1 ô) nên có thể phá segment thứ 5 của các tên 5+ phần khác.
+    const looksLikeAdName =
+      parts.length === 6 &&
+      parts[5].trim() === '' &&
+      !parts.some((p) => p.trim() === 'AUTO_ADS');
+    if (!looksLikeAdName) return name;
+    idx = 4;
   }
   parts[idx] = cid;
   return parts.join('|');

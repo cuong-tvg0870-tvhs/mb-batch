@@ -70,14 +70,47 @@ export class DraftCleanupScheduler {
             );
           }
 
-          if (campaignIds.length === 0) {
+          // A9: KHÔNG xoá nháp do tự động hóa sinh ra mà VẪN được tham chiếu — để
+          // (a) link "xem nháp đã tạo" trong lịch sử không hỏng, và (b) giữ nháp
+          // DRAFT_ONLY đang chờ người duyệt / nháp đang gom dở của automation đang chạy.
+          let cleanableIds = campaignIds;
+          if (campaignIds.length > 0) {
+            const [referencedByHistory, inProgress] = await Promise.all([
+              this.prisma.draftAutomationHistory.findMany({
+                where: { generatedCampaignId: { in: cleanableIds } },
+                select: { generatedCampaignId: true },
+              }),
+              this.prisma.draftAutomation.findMany({
+                where: {
+                  inProgressDraftId: { in: cleanableIds },
+                  deletedAt: null,
+                },
+                select: { inProgressDraftId: true },
+              }),
+            ]);
+            const keep = new Set<string>(
+              [
+                ...referencedByHistory.map((h) => h.generatedCampaignId),
+                ...inProgress.map((a) => a.inProgressDraftId),
+              ].filter((id): id is string => !!id),
+            );
+            cleanableIds = campaignIds.filter((id) => !keep.has(id));
+            const skipped = campaignIds.length - cleanableIds.length;
+            if (skipped > 0) {
+              this.logger.log(
+                `Giữ lại ${skipped} nháp tự động còn tham chiếu (lịch sử / đang gom dở) — không xoá.`,
+              );
+            }
+          }
+
+          if (cleanableIds.length === 0) {
             this.logger.log('No old draft campaigns found for cleanup.');
             ctx.skip('No old draft campaigns found for cleanup.');
             return;
           }
 
           this.logger.log(
-            `Found ${campaignIds.length} draft campaigns to clean up.`,
+            `Found ${cleanableIds.length} draft campaigns to clean up.`,
           );
 
           await this.prisma.$transaction(async (tx) => {
@@ -86,7 +119,7 @@ export class DraftCleanupScheduler {
               where: {
                 ad: {
                   adSet: {
-                    campaignId: { in: campaignIds },
+                    campaignId: { in: cleanableIds },
                   },
                 },
               },
@@ -96,7 +129,7 @@ export class DraftCleanupScheduler {
             await tx.systemAd.deleteMany({
               where: {
                 adSet: {
-                  campaignId: { in: campaignIds },
+                  campaignId: { in: cleanableIds },
                 },
               },
             });
@@ -104,18 +137,18 @@ export class DraftCleanupScheduler {
             // 3. Delete adsets in these campaigns
             await tx.systemAdSet.deleteMany({
               where: {
-                campaignId: { in: campaignIds },
+                campaignId: { in: cleanableIds },
               },
             });
 
             // 4. Delete campaigns
             const deleteResult = await tx.systemCampaign.deleteMany({
               where: {
-                id: { in: campaignIds },
+                id: { in: cleanableIds },
               },
             });
 
-            ctx.setTotal(campaignIds.length);
+            ctx.setTotal(cleanableIds.length);
             ctx.addSuccess(deleteResult.count);
             this.logger.log(
               `Successfully deleted ${deleteResult.count} old draft campaigns.`,
