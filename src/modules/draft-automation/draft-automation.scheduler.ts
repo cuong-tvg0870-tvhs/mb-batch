@@ -673,6 +673,10 @@ export class DraftAutomationScheduler {
 
     const autoAssignCreativeSlots = (creative: any) => {
       if (!creative) return;
+      // Ad "Ghim nội dung" (PINNED_POST): giữ NGUYÊN media/bài viết gốc — không biến thành
+      // ô slot rồi bị thay bằng content khác. Parity với mb-ads autoAssignCreativeSlots +
+      // buildCreativeData (nhánh POST_ID) để pin có hiệu lực ở cron automation.
+      if (creative.pinnedPost === true) return;
 
       const mediaType = inferMediaType(creative);
       const spec = creative.object_story_spec || {};

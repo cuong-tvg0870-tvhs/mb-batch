@@ -1051,7 +1051,9 @@ export class DraftAutomationMetaPublisherService {
     const oss = sourceCreative.object_story_spec || {};
     const hasCustomContent =
       Object.keys(oss).length > 0 || !!sourceCreative.asset_feed_spec;
-    if (storyId && !hasCustomContent) {
+    // "Ghim nội dung" (PINNED_POST, parity với mb-ads buildDraftAdCreative): dùng LẠI đúng
+    // bài viết gốc để giữ engagement — ép nhánh POST_ID kể cả khi còn object_story_spec.
+    if (storyId && (sourceCreative.pinnedPost === true || !hasCustomContent)) {
       return (
         CleanObjectOrArray({
           name: `${adPayload.name} - Creative`,
