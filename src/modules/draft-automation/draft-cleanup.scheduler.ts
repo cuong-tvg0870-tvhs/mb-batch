@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
+import { AppConfigReader } from '../app-config/app-config.reader';
 import { BatchRunLoggerService } from '../batch-run-log/batch-run-logger.service';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -10,6 +11,7 @@ export class DraftCleanupScheduler {
   constructor(
     private readonly prisma: PrismaService,
     private readonly batchRunLogger: BatchRunLoggerService,
+    private readonly appConfig: AppConfigReader,
   ) {}
 
   // Run everyday at 2:00 AM Asia/Ho_Chi_Minh timezone
@@ -22,16 +24,21 @@ export class DraftCleanupScheduler {
         async (ctx) => {
           this.logger.log('Starting cleanup of old draft campaigns...');
 
-          const sevenDaysAgo = new Date();
-          sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+          // Số ngày giữ nháp cấu hình runtime (SystemConfig draft_cleanup_days, mặc định 7).
+          const cleanupDays = await this.appConfig.getNumber(
+            'draft_cleanup_days',
+            7,
+          );
+          const cutoff = new Date();
+          cutoff.setDate(cutoff.getDate() - cleanupDays);
 
-          // Find all draft campaigns (meta_id is null) that have not been updated in the last 7 days
-          // and are not used as templates. Loại trừ draft đang publish dở.
+          // Find all draft campaigns (meta_id is null) chưa cập nhật trong cleanupDays ngày
+          // và không dùng làm template. Loại trừ draft đang publish dở.
           const candidates = await this.prisma.systemCampaign.findMany({
             where: {
               meta_id: null,
               isPublishing: false,
-              updatedAt: { lt: sevenDaysAgo },
+              updatedAt: { lt: cutoff },
               templateCampaigns: {
                 none: {},
               },

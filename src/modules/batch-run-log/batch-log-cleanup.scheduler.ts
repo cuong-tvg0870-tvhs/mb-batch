@@ -2,14 +2,12 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import * as fs from 'fs';
 import * as path from 'path';
+import { AppConfigReader } from '../app-config/app-config.reader';
 import {
   batchLogDateFromFile,
   resolveBatchLogDir,
   resolveRunningDir,
 } from './batch-run-log.util';
-
-/** Keep batch run logs for this many days, then delete the day's file. */
-const RETENTION_DAYS = 90;
 
 /**
  * Remove orphaned "running" markers older than this. A marker normally lives
@@ -22,14 +20,22 @@ const RUNNING_MARKER_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 export class BatchLogCleanupScheduler {
   private readonly logger = new Logger(BatchLogCleanupScheduler.name);
 
+  constructor(private readonly appConfig: AppConfigReader) {}
+
   // Every day at 03:00 Asia/Ho_Chi_Minh.
   @Cron('0 3 * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
-  cleanupOldLogs() {
+  async cleanupOldLogs() {
     const dir = resolveBatchLogDir();
     if (!fs.existsSync(dir)) return;
 
+    // Số ngày giữ nhật ký chạy cấu hình runtime (SystemConfig run_log_retention_days,
+    // mặc định 90).
+    const retentionDays = await this.appConfig.getNumber(
+      'run_log_retention_days',
+      90,
+    );
     const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - RETENTION_DAYS);
+    cutoff.setDate(cutoff.getDate() - retentionDays);
 
     let removed = 0;
     try {
@@ -44,7 +50,7 @@ export class BatchLogCleanupScheduler {
       }
       if (removed > 0) {
         this.logger.log(
-          `Removed ${removed} batch run log file(s) older than ${RETENTION_DAYS} days.`,
+          `Removed ${removed} batch run log file(s) older than ${retentionDays} days.`,
         );
       }
     } catch (e) {

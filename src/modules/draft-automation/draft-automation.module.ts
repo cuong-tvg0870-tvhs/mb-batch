@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AppConfigModule } from '../app-config/app-config.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { DraftAutomationEntityScheduler } from './draft-automation-entity.scheduler';
 import { DraftAutomationMetaPublisherService } from './draft-automation-meta-publisher.service';
@@ -6,7 +7,7 @@ import { DraftAutomationScheduler } from './draft-automation.scheduler';
 import { DraftCleanupScheduler } from './draft-cleanup.scheduler';
 
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, AppConfigModule],
   controllers: [],
   providers: [
     DraftAutomationEntityScheduler,

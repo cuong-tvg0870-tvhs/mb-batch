@@ -1,4 +1,5 @@
 import { Global, Module } from '@nestjs/common';
+import { AppConfigModule } from '../app-config/app-config.module';
 import { BatchLogCleanupScheduler } from './batch-log-cleanup.scheduler';
 import { BatchRunLoggerService } from './batch-run-logger.service';
 
@@ -8,6 +9,7 @@ import { BatchRunLoggerService } from './batch-run-logger.service';
  */
 @Global()
 @Module({
+  imports: [AppConfigModule],
   providers: [BatchRunLoggerService, BatchLogCleanupScheduler],
   exports: [BatchRunLoggerService],
 })

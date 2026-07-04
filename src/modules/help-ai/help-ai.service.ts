@@ -4,6 +4,7 @@ import { access, readdir, readFile } from 'fs/promises';
 import { basename, extname, join } from 'path';
 import { GeminiApiKeyManager } from './gemini-api-key-manager.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { AppConfigReader } from '../app-config/app-config.reader';
 
 type HelpKnowledgeSnapshotSource = {
   slug: string;
@@ -33,6 +34,7 @@ export class HelpAiService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly geminiKeyManager: GeminiApiKeyManager,
+    private readonly appConfig: AppConfigReader,
   ) {}
 
   async refreshHelpKnowledge() {
@@ -79,7 +81,14 @@ export class HelpAiService {
   }
 
   async triagePendingContributions() {
-    if (process.env.HELP_AI_TRIAGE_ENABLED !== 'true') {
+    // Bật/tắt phân loại góp ý bằng AI — cấu hình runtime (SystemConfig
+    // ai_triage_enabled, fallback env HELP_AI_TRIAGE_ENABLED, mặc định TẮT).
+    const enabled = await this.appConfig.getBoolean(
+      'ai_triage_enabled',
+      false,
+      'HELP_AI_TRIAGE_ENABLED',
+    );
+    if (!enabled) {
       return;
     }
 
