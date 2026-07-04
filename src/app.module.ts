@@ -5,6 +5,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { configLoads } from './config';
 import { BatchRunLogModule } from './modules/batch-run-log/batch-run-log.module';
 import { DraftAutomationModule } from './modules/draft-automation/draft-automation.module';
+import { EntitySyncModule } from './modules/entity-sync/entity-sync.module';
 import { InsightSyncModule } from './modules/insight-sync/insight-sync.module';
 import { HelpAiModule } from './modules/help-ai/help-ai.module';
 import { LarkSyncModule } from './modules/lark-sync/lark-sync.module';
@@ -41,6 +42,7 @@ export const global_modules = [
     MetaApiModule,
     InsightSyncModule,
     MetaSyncModule,
+    EntitySyncModule,
     LarkSyncModule,
     MediaSyncModule,
     DraftAutomationModule,

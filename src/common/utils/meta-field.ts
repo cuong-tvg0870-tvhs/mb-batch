@@ -315,4 +315,25 @@ export const SUMMARY_AD_INSIGHT_FIELDS = [
 ];
 
 export const AUDIENCE_FIELDS = ['id', 'name', 'subtype', 'approximate_count'];
-export const PAGE_FIELDS = ['id', 'name', 'access_token'];
+
+/**
+ * Fanpage fields kéo về khi đồng bộ (edge me/accounts).
+ * Ngoài id/name/token còn lấy thêm:
+ *  - Instagram gắn với page: `instagram_business_account` (liên kết lúc chuyển đổi
+ *    tài khoản doanh nghiệp) và `connected_instagram_account` (connect qua cài đặt page).
+ *  - Số WhatsApp gắn với page (click-to-WhatsApp): `whatsapp_number` + 2 cờ has_*.
+ * Toàn bộ payload page được lưu nguyên vào `Fanpage.rawPayload` (không tách cột),
+ * nên field nào Meta trả về đều được giữ để "sau này dễ xử lý".
+ */
+export const PAGE_FIELDS = [
+  'id',
+  'name',
+  'access_token',
+  'category',
+  'phone',
+  'instagram_business_account{id,username,name,profile_picture_url}',
+  'connected_instagram_account{id,username,name}',
+  'whatsapp_number',
+  'has_whatsapp_number',
+  'has_whatsapp_business_number',
+];
