@@ -1782,6 +1782,20 @@ model DraftAutomation {
   lastRunReason String?
   runCount      Int                       @default(0)
 
+  // Trần an toàn (additive): số lượt chạy tối đa. Đạt trần → tự chuyển COMPLETED, ngừng
+  // lịch. null = không giới hạn. Enforce ở entity scheduler (mb-batch) + runNow (mb-ads)
+  // TRƯỚC khi dựng/đăng nháp.
+  maxRuns Int?
+
+  // Khóa chạy NGUYÊN TỬ chống chồng lượt: cron-tick trùng "Chạy ngay", hoặc mb-batch
+  // multi-replica. Claim bằng updateMany có điều kiện (runLockedAt null hoặc quá hạn
+  // STUCK); giải phóng khi xong. null = đang rảnh.
+  runLockedAt DateTime?
+
+  // Bản nháp "đang gom dở" của CHÍNH row này — thay heuristic template+creator+folder
+  // (vốn có thể latch nhầm nháp của automation khác cùng mẫu). null = chưa có nháp dở.
+  inProgressDraftId String?
+
   // accountId / createdById dạng chuỗi (không FK) theo đúng quy ước folderId/creatorId
   // ở DraftAutomationHistory.
   accountId   String?

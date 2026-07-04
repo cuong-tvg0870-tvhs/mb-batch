@@ -435,6 +435,26 @@ export class DraftAutomationScheduler {
     return err?.stack || err?.message || String(err);
   }
 
+  // Ngưỡng "tối thiểu N mẫu nội dung/chiến dịch" — cấu hình runtime qua
+  // SystemConfig[min_publish_contents] (parity mb-ads DraftCampaignService). value =
+  // số (vd 5) hoặc { value: 5 }. FAIL-OPEN về mặc định 5 khi thiếu row/lỗi → không cần
+  // migration/seed. Đọc mỗi lượt cron (không phải đường nóng).
+  private async getMinPublishContents(): Promise<number> {
+    try {
+      const cfg = await this.prisma.systemConfig.findUnique({
+        where: { key: 'min_publish_contents' },
+        select: { value: true },
+      });
+      const raw: any = cfg?.value;
+      const n = Number(
+        raw !== null && typeof raw === 'object' ? raw.value : raw,
+      );
+      return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 5;
+    } catch {
+      return 5;
+    }
+  }
+
   private async recordAutomationHistory(input: {
     template: any;
     // Liên kết history với row DraftAutomation (nhánh mới). undefined ở nhánh legacy
@@ -520,25 +540,6 @@ export class DraftAutomationScheduler {
       publishToMeta: publishMode === 'PUBLISH_IMMEDIATELY',
       runMode,
     };
-  }
-
-  private async updateTemplateAutomationState(template: any, patch: any) {
-    const currentData = ((template.data || {}) as any) || {};
-    const currentAutomation = currentData.automation || {};
-    const nextAutomation = {
-      ...currentAutomation,
-      ...patch,
-    };
-
-    template.data = {
-      ...currentData,
-      automation: nextAutomation,
-    };
-
-    await this.prisma.templateCampaign.update({
-      where: { id: template.id },
-      data: { data: template.data as any },
-    });
   }
 
   private async getAssetsByIds(ids: string[]) {
@@ -1036,16 +1037,14 @@ export class DraftAutomationScheduler {
     });
   }
 
-  async processAutomation(
-    templateId?: string,
-    override?: {
-      template: any;
-      rawAutomation: any;
-      draftAutomationId?: string;
-    },
-  ): Promise<AutomationRunResult> {
-    // Giá trị trả về CHỈ có ý nghĩa cho nhánh mới (override = 1 DraftAutomation row,
-    // luôn đúng 1 template). Nhánh legacy gọi không dùng return nên hành vi không đổi.
+  async processAutomation(override: {
+    template: any;
+    rawAutomation: any;
+    draftAutomationId?: string;
+  }): Promise<AutomationRunResult> {
+    // NHÁNH DraftAutomation (hệ mới) — luôn chạy đúng 1 template do caller cấp; cấu
+    // hình automation lấy từ override.rawAutomation (map từ row DraftAutomation). Hệ
+    // "automation cấu hình trong template" (cũ) đã được gỡ bỏ hoàn toàn.
     let lastResult: AutomationRunResult = {
       status: 'SKIPPED',
       reason: 'Không có template tự động hóa nào để xử lý.',
@@ -1053,37 +1052,7 @@ export class DraftAutomationScheduler {
       published: false,
     };
 
-    // 1. Fetch all templates with automation configured.
-    // override != null: NHÁNH DraftAutomation — chạy đúng template do caller cấp,
-    // cấu hình automation lấy từ override.rawAutomation (map từ row DraftAutomation)
-    // thay cho template.data.automation. KHÔNG đụng bộ lọc/danh sách legacy bên dưới.
-    let activeTemplates: any[];
-    if (override) {
-      activeTemplates = [override.template];
-    } else {
-      const templates = await this.prisma.templateCampaign.findMany({
-        where: {
-          deletedAt: null,
-          ...(templateId ? { id: templateId } : {}),
-        },
-      });
-
-      activeTemplates = templates.filter((template) => {
-        const automation = (template.data as any)?.automation;
-        return automation?.enabled === true && automation?.folderId;
-      });
-
-      if (activeTemplates.length === 0) {
-        this.logger.log(
-          'No templates configured with active automation rules.',
-        );
-        return lastResult;
-      }
-
-      this.logger.log(
-        `Found ${activeTemplates.length} templates with active automation rules.`,
-      );
-    }
+    const activeTemplates = [override.template];
 
     for (const template of activeTemplates) {
       const startedAt = new Date();
@@ -1094,16 +1063,13 @@ export class DraftAutomationScheduler {
       let publishRequested = false;
       let publishMode: 'DRAFT_ONLY' | 'PUBLISH_IMMEDIATELY' = 'DRAFT_ONLY';
       try {
-        automation = this.normalizeAutomation(
-          override ? override.rawAutomation : (template.data as any).automation,
-        );
+        automation = this.normalizeAutomation(override.rawAutomation);
         if (
           automation.enabled !== true ||
           automation.status === 'PAUSED' ||
           automation.status === 'DISABLED' ||
-          // Chốt chặn CHỈ cho nhánh mới: thiếu thư mục nội dung thì không chạy (nhánh
-          // legacy đã lọc folderId ở activeTemplates nên điều kiện này luôn false).
-          (override != null && !automation.folderId)
+          // Thiếu thư mục nội dung thì không chạy.
+          !automation.folderId
         ) {
           lastResult = {
             status: 'SKIPPED',
@@ -1441,6 +1407,9 @@ export class DraftAutomationScheduler {
 
         const countCreativeAssets = (creative: any) => {
           if (!creative) return;
+          // Ad "ghim bài" (pinnedPost) giữ media gốc, không lấp slot → không tính vào
+          // số slot cần (parity mb-ads + slotify/autoAssign). Finding Q1.
+          if (creative.pinnedPost === true) return;
           const mediaType = inferMediaType(creative);
           const spec = creative.object_story_spec || {};
 
@@ -1502,6 +1471,77 @@ export class DraftAutomationScheduler {
         if (requiredImages < templateImageCount) {
           requiredImages = templateImageCount;
         }
+
+        // Tự TẠM DỪNG khi tự-đăng KHÔNG THỂ đạt chuẩn ≥5 nội dung: mẫu chỉ tạo
+        // requiredVideos+requiredImages < ngưỡng creative/chiến dịch → gom bao nhiêu
+        // content cũng vô ích, chỉ tốn tài nguyên mỗi 30'. PAUSE row DraftAutomation +
+        // ghi lý do (parity với gate lúc lưu ở mb-ads). Chỉ PUBLISH_IMMEDIATELY; miễn
+        // tên chiến dịch của mẫu chứa "TestingContent". Chỉ áp dụng cho nhánh mới
+        // (có draftAutomationId) — nhánh legacy không có row để tạm dừng.
+        const MIN_AUTO_PUBLISH_CONTENTS = await this.getMinPublishContents();
+        const projectedContents = requiredVideos + requiredImages;
+        const templateCampaignName = String(
+          (template.data as any)?.campaign?.name || '',
+        );
+        const isTestingTemplate = templateCampaignName
+          .toLowerCase()
+          .includes('testingcontent');
+        if (
+          publishRequested &&
+          override?.draftAutomationId &&
+          !isTestingTemplate &&
+          projectedContents < MIN_AUTO_PUBLISH_CONTENTS
+        ) {
+          const pauseReason =
+            `Tạm dừng tự động: mẫu chỉ tạo ${projectedContents} mẫu nội dung/chiến dịch ` +
+            `(cần tối thiểu ${MIN_AUTO_PUBLISH_CONTENTS} để đăng tự động lên Meta). Hãy chọn ` +
+            `mẫu có ≥${MIN_AUTO_PUBLISH_CONTENTS} ô nội dung, tăng số lượng video/ảnh, hoặc ` +
+            `thêm "TestingContent" vào tên chiến dịch của mẫu nếu là nội dung thử nghiệm.`;
+          this.logger.warn(
+            `DraftAutomation ${override.draftAutomationId} (mẫu "${template.name}") tạm dừng: chỉ tạo ${projectedContents} < ${MIN_AUTO_PUBLISH_CONTENTS} nội dung.`,
+          );
+          await this.prisma.draftAutomation
+            .update({
+              where: { id: override.draftAutomationId },
+              data: {
+                status: 'PAUSED',
+                nextRunAt: null,
+                runLockedAt: null,
+                lastRunAt: startedAt,
+                lastRunStatus: 'SKIPPED',
+                lastRunReason: pauseReason.slice(0, 1000),
+              },
+            })
+            .catch(() => undefined);
+          await this.recordAutomationHistory({
+            template,
+            startedAt,
+            status: 'SKIPPED',
+            reason: pauseReason,
+            automation,
+            creator,
+            folderId: automation.folderId,
+            publishRequested,
+            publishMode,
+            draftAutomationId: override?.draftAutomationId,
+            steps: [
+              {
+                key: 'min_contents',
+                label: 'Đủ số nội dung tối thiểu để đăng tự động',
+                status: 'skipped',
+                reason: pauseReason,
+              },
+            ],
+          });
+          lastResult = {
+            status: 'SKIPPED',
+            reason: pauseReason,
+            isComplete: false,
+            published: false,
+          };
+          continue;
+        }
+
         // Rule theo TỪNG slot: { VIDEO_1: 'hook', IMAGE_2: 'demo' }. Mỗi slot lấy
         // content có TÊN chứa dấu hiệu của slot; không có dấu hiệu thì lấy content
         // đủ điều kiện cũ nhất bất kỳ; không có content khớp thì để trống slot.
@@ -1734,15 +1774,7 @@ export class DraftAutomationScheduler {
               },
             ],
           });
-          // Trạng thái legacy chỉ ghi cho nhánh template.data.automation. Nhánh
-          // DraftAutomation (override) để scheduler cập nhật row DraftAutomation.
-          if (!override) {
-            await this.updateTemplateAutomationState(template, {
-              ...automation,
-              status: 'WAITING_ASSETS',
-              lastRunAt: new Date().toISOString(),
-            });
-          }
+          // Trạng thái lượt chạy được ghi vào row DraftAutomation ở scheduler/runNow.
           lastResult = {
             status: 'SKIPPED',
             reason: noAssetsReason,
@@ -1852,36 +1884,8 @@ export class DraftAutomationScheduler {
           });
         }
 
-        // Trạng thái legacy chỉ ghi cho nhánh template.data.automation. Nhánh
-        // DraftAutomation (override) để scheduler cập nhật row DraftAutomation
-        // (lastRunAt/runCount/lastRunStatus/nextRunAt/COMPLETED).
-        if (!override) {
-          await this.updateTemplateAutomationState(template, {
-            ...automation,
-            status:
-              automation.runMode === 'ONCE' && isComplete
-                ? 'COMPLETED'
-                : isComplete
-                  ? 'READY_FOR_NEXT_RUN'
-                  : 'WAITING_ASSETS',
-            enabled:
-              automation.runMode === 'ONCE' && isComplete
-                ? false
-                : automation.enabled,
-            lastRunAt: new Date().toISOString(),
-            completedAt:
-              automation.runMode === 'ONCE' && isComplete
-                ? new Date().toISOString()
-                : automation.completedAt || null,
-            completedDraftId:
-              automation.runMode === 'ONCE' && isComplete
-                ? generatedCampaignId
-                : automation.completedDraftId || null,
-            inProgressDraftId: isComplete ? null : generatedCampaignId,
-            lastGeneratedDraftId: generatedCampaignId,
-          });
-        }
-
+        // Trạng thái lượt chạy (COMPLETED / nextRunAt / lastRunStatus…) được ghi vào
+        // row DraftAutomation ở DraftAutomationEntityScheduler.runOne / runNow (mb-ads).
         const successReason =
           publishRequested && isComplete
             ? 'Đã tạo bản nháp chiến dịch tự động và đăng lên Meta.'
@@ -2055,6 +2059,7 @@ export class DraftAutomationScheduler {
     runMode: string;
     cronExpression: string | null;
     timezone: string | null;
+    inProgressDraftId?: string | null;
   }) {
     const conditions =
       row.conditions && typeof row.conditions === 'object'
@@ -2082,6 +2087,9 @@ export class DraftAutomationScheduler {
       runMode: row.runMode,
       cronExpression: row.cronExpression ?? undefined,
       timezone: row.timezone ?? undefined,
+      // Nháp "đang gom dở" của CHÍNH row này → engine tìm lại đúng nháp đó thay vì
+      // heuristic template+creator+folder (chống latch nhầm nháp automation khác — A7).
+      inProgressDraftId: row.inProgressDraftId ?? undefined,
     };
   }
 
@@ -2121,7 +2129,7 @@ export class DraftAutomationScheduler {
       };
     }
     const rawAutomation = this.draftAutomationToAutomationConfig(row);
-    return this.processAutomation(undefined, {
+    return this.processAutomation({
       template,
       rawAutomation,
       draftAutomationId: row.id,

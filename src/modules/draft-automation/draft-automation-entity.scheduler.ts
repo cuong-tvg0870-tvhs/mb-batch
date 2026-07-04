@@ -14,6 +14,12 @@ const RECONCILE_CRON = '*/30 * * * *';
 const DEFAULT_TIMEZONE = 'Asia/Ho_Chi_Minh';
 const MIN_INTERVAL_MINUTES = 30;
 const MIN_INTERVAL_MS = MIN_INTERVAL_MINUTES * 60 * 1000;
+// Coi khóa chạy là "kẹt" và cho chiếm lại sau 30 phút (một lượt build+publish bình
+// thường ngắn hơn nhiều; ngưỡng này chỉ để tự phục hồi khi tiến trình chết giữa chừng).
+const RUN_LOCK_STUCK_MS = 30 * 60 * 1000;
+// Công tắc tắt khẩn cấp TOÀN CỤC mọi tự động hóa (SystemConfig). value = { active: true }
+// → bỏ qua toàn bộ lượt (cả cron lẫn run-now). Marketer/admin bật khi cần "phanh gấp".
+const DRAFT_AUTOMATION_KILL_SWITCH_KEY = 'draft_automation_kill_switch';
 
 /**
  * Scheduler cho THỰC THỂ MỚI `DraftAutomation` ("1 template → nhiều lượt tự động").
@@ -21,8 +27,8 @@ const MIN_INTERVAL_MS = MIN_INTERVAL_MINUTES * 60 * 1000;
  *
  * Mỗi 30 phút: tìm các row ACTIVE tới hạn (sourceType=TEMPLATE, có templateId), với
  * mỗi row gọi DÙNG LẠI engine dựng-nháp qua `runner.runDraftAutomationOnce(row)` rồi
- * cập nhật run-tracking + lịch kế tiếp trên row. KHÔNG đụng nhánh legacy
- * template.data.automation (do DraftAutomationCronScheduler xử lý riêng).
+ * cập nhật run-tracking + lịch kế tiếp trên row. Đây là scheduler DUY NHẤT cho tự động
+ * hóa dựng-nháp — hệ "automation cấu hình trong template" (cũ) đã được gỡ bỏ hoàn toàn.
  */
 @Injectable()
 export class DraftAutomationEntityScheduler {
@@ -46,6 +52,12 @@ export class DraftAutomationEntityScheduler {
     }
     this.running = true;
     try {
+      if (await this.isKillSwitchActive()) {
+        this.logger.warn(
+          'DraftAutomation: công tắc tắt khẩn cấp đang BẬT — bỏ qua toàn bộ lượt tự động hóa.',
+        );
+        return;
+      }
       const now = new Date();
       // TỚI HẠN: ACTIVE, chưa xoá, nguồn TEMPLATE có templateId, và (chưa từng chạy)
       // hoặc (nextRunAt đã tới). Dùng chung nextRunAt cho cả INTERVAL lẫn CRON —
@@ -70,6 +82,22 @@ export class DraftAutomationEntityScheduler {
       // Chạy tuần tự: engine đọc/ghi nhiều SystemCampaign dùng chung asset; chạy
       // song song dễ tranh asset. Một row lỗi không được chặn các row còn lại.
       for (const row of dueRows) {
+        // CRON vừa tạo/sửa/resume có nextRunAt=null (mb-ads chưa tính mốc cron). Query
+        // coi null là "tới hạn" → nếu chạy ngay sẽ SAI GIỜ HẸN (đăng sớm). Thay vì chạy,
+        // SEED mốc cron kế tiếp để nó chỉ chạy đúng khung giờ đã đặt (finding A6).
+        if (row.scheduleType === 'CRON' && row.nextRunAt === null) {
+          const seeded = this.computeNextRunAt(row, now);
+          await this.prisma.draftAutomation
+            .updateMany({
+              where: { id: row.id, status: 'ACTIVE', nextRunAt: null },
+              data: { nextRunAt: seeded },
+            })
+            .catch(() => undefined);
+          this.logger.log(
+            `DraftAutomation "${row.name}" (${row.id}): CRON — hẹn mốc chạy đầu tiên ${seeded.toISOString()}.`,
+          );
+          continue;
+        }
         await this.runOne(row);
       }
     } catch (err: any) {
@@ -84,6 +112,41 @@ export class DraftAutomationEntityScheduler {
 
   private async runOne(row: DraftAutomation) {
     const runAt = new Date();
+
+    // Trần an toàn (P1): đạt maxRuns → COMPLETED, không chạy thêm (chống LOOP vô hạn).
+    if (row.maxRuns != null && row.runCount >= row.maxRuns) {
+      await this.prisma.draftAutomation
+        .updateMany({
+          where: { id: row.id, status: 'ACTIVE', deletedAt: null },
+          data: { status: 'COMPLETED', nextRunAt: null, runLockedAt: null },
+        })
+        .catch(() => undefined);
+      this.logger.log(
+        `DraftAutomation "${row.name}" (${row.id}) đạt trần ${row.maxRuns} lượt → COMPLETED.`,
+      );
+      return;
+    }
+
+    // Claim NGUYÊN TỬ: chỉ 1 tiến trình lấy được khóa cho row này. Chống cron-tick trùng
+    // "Chạy ngay" (mb-ads) và mb-batch multi-replica → không dựng 2 nháp / đăng đôi.
+    // Điều kiện status=ACTIVE đồng thời chặn row vừa bị PAUSED giữa vòng quét (A5).
+    const stuckBefore = new Date(runAt.getTime() - RUN_LOCK_STUCK_MS);
+    const claim = await this.prisma.draftAutomation.updateMany({
+      where: {
+        id: row.id,
+        status: 'ACTIVE',
+        deletedAt: null,
+        OR: [{ runLockedAt: null }, { runLockedAt: { lt: stuckBefore } }],
+      },
+      data: { runLockedAt: runAt },
+    });
+    if (claim.count === 0) {
+      this.logger.warn(
+        `DraftAutomation "${row.name}" (${row.id}) bỏ qua lượt: đang chạy ở tiến trình khác hoặc vừa tạm dừng.`,
+      );
+      return;
+    }
+
     let result: AutomationRunResult;
     try {
       result = await this.runner.runDraftAutomationOnce(row);
@@ -123,6 +186,15 @@ export class DraftAutomationEntityScheduler {
           runCount: { increment: 1 },
           lastRunStatus: result.status,
           lastRunReason: result.reason ?? null,
+          // Ghi nháp "đang gom dở" của row (A7): xong → null, còn dở → generatedCampaignId.
+          // Chỉ đụng khi chạy thành công (SKIPPED/FAILED giữ nguyên giá trị cũ).
+          ...(result.status === 'SUCCESS'
+            ? {
+                inProgressDraftId: result.isComplete
+                  ? null
+                  : (result.generatedCampaignId ?? null),
+              }
+            : {}),
           ...(completed
             ? { status: 'COMPLETED', nextRunAt: null }
             : { nextRunAt }),
@@ -134,6 +206,16 @@ export class DraftAutomationEntityScheduler {
         this.formatError(err),
       );
     }
+
+    // Giải phóng khóa của CHÍNH lượt này (khớp runLockedAt=runAt). Tách khỏi update
+    // trên vì update đó guard status=ACTIVE — nếu row bị PAUSED giữa chừng, update
+    // không khớp nhưng khóa vẫn phải được nhả để lượt sau chạy được.
+    await this.prisma.draftAutomation
+      .updateMany({
+        where: { id: row.id, runLockedAt: runAt },
+        data: { runLockedAt: null },
+      })
+      .catch(() => undefined);
 
     this.logger.log(
       `DraftAutomation "${row.name}" (${row.id}): ${result.status}` +
@@ -216,5 +298,19 @@ export class DraftAutomationEntityScheduler {
 
   private formatError(err: any) {
     return err?.stack || err?.message || String(err);
+  }
+
+  // Công tắc tắt khẩn cấp toàn cục: SystemConfig[draft_automation_kill_switch].active===true
+  // → bỏ qua mọi lượt. Lỗi đọc config KHÔNG được chặn engine (fail-open: coi như tắt switch).
+  private async isKillSwitchActive(): Promise<boolean> {
+    try {
+      const cfg = await this.prisma.systemConfig.findUnique({
+        where: { key: DRAFT_AUTOMATION_KILL_SWITCH_KEY },
+        select: { value: true },
+      });
+      return (cfg?.value as any)?.active === true;
+    } catch {
+      return false;
+    }
   }
 }
