@@ -14,6 +14,7 @@ import { MetaApiModule } from './modules/meta-api/meta-api.module';
 import { MetaMediaSyncModule } from './modules/meta-media-sync/meta-media-sync.module';
 import { MetaMediaUploadModule } from './modules/meta-media-upload/meta-media-upload.module';
 import { MetaSyncModule } from './modules/meta-sync/meta-sync.module';
+import { UserLarkSyncModule } from './modules/user-lark-sync/user-lark-sync.module';
 
 export const global_modules = [
   ScheduleModule.forRoot(),
@@ -49,6 +50,7 @@ export const global_modules = [
     MetaMediaSyncModule,
     MetaMediaUploadModule,
     HelpAiModule,
+    UserLarkSyncModule,
   ],
 })
 export class AppModule implements OnModuleInit {

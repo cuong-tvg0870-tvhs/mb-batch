@@ -142,6 +142,22 @@ model User {
 
   locale String?
 
+  // ── Lark / danh bạ (đồng bộ từ Lark Contact API theo email) ──────────────
+  // Tất cả nullable + additive: user tạo tay/không có trên Lark vẫn hợp lệ.
+  // `employee_id` (ở trên) = Lark `employee_no` (mã số nhân viên).
+  avatar            String? // URL avatar (Lark avatar_240) — hiển thị ở list/detail
+  // open_id — ID gửi tin nhắn/notify & đẩy Larkbase. KHÔNG unique: một người Lark
+  // có thể gắn NHIỀU tài khoản MB (vd cùng người dùng 2 email công ty
+  // @tvhs.asia và @thanhvinhgroup.com = 2 tài khoản RIÊNG, cùng trỏ 1 open_id).
+  larkOpenId        String?
+  larkUserId        String? // user_id nội bộ tenant Lark
+  larkUnionId       String? // union_id ổn định cross-app
+  larkMobile        String? // số điện thoại từ danh bạ
+  larkJobTitle      String? // chức danh
+  larkDepartmentIds Json? // string[] open_department_id
+  larkRaw           Json? // payload get-user đầy đủ (dự phòng, không đóng đinh cột)
+  larkSyncedAt      DateTime? // lần cuối đồng bộ thành công từ Lark
+
   // relations
   changeLogs     ChangeLog[]          @relation("change_actor")
   accountMembers AccountMember[]      @relation("UserAccountMembers")
@@ -167,6 +183,8 @@ model User {
   proposals              AccountProposal[] @relation("UserProposals")
   processedProposals     AccountProposal[] @relation("ProcessedProposals")
   helpChatSessions       HelpChatSession[] @relation("UserHelpChatSessions")
+
+  @@index([larkOpenId]) // tra nhanh mọi tài khoản MB của 1 người Lark (notify/Larkbase)
 }
 
 model UserActivity {
