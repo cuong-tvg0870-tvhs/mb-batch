@@ -1191,10 +1191,22 @@ export class DraftAutomationScheduler {
           `Processing template "${template.name}" for user ${creator.name} (${creator.employee_id}). folderId: ${automation.folderId}`,
         );
 
-        // 2. Fetch all assets in the target folder
+        // 2. Fetch all assets in the target folder(s)
+        // Gom folder nguồn: folder được chọn + con cháu (nếu bật). Legacy chỉ có
+        // folderId + không includeSubfolders => set = [folderId] (y hệt hành vi cũ).
+        const folderRoots =
+          Array.isArray(automation.folderIds) && automation.folderIds.length
+            ? automation.folderIds
+            : automation.folderId
+              ? [automation.folderId]
+              : [];
+        const folderIdSet = await this.resolveAutomationFolderIds(
+          folderRoots,
+          automation.includeSubfolders === true,
+        );
         const allFolderAssets = await this.prisma.creativeAsset.findMany({
           where: {
-            folderId: automation.folderId,
+            folderId: { in: folderIdSet },
           },
           orderBy: {
             createdAtLocal: 'asc', // Oldest first
@@ -2002,6 +2014,36 @@ export class DraftAutomationScheduler {
    * assetCreatedAfter, slotRules, publishMode, runMode, cronExpression, timezone).
    * normalizeAutomation() sẽ chuẩn hoá tiếp (publishMode/runMode/cron/timezone).
    */
+  // Gom tập folderId nguồn: folder gốc + TOÀN BỘ con cháu (khi includeSub=true).
+  // GIỮ NGUYÊN VĂN Ở CẢ mb-ads LẪN mb-batch (parity — hai engine phải gom giống hệt).
+  // Legacy truyền includeSub=false => chỉ các folder gốc, y hệt hành vi cũ.
+  private async resolveAutomationFolderIds(
+    roots: string[],
+    includeSub: boolean,
+  ): Promise<string[]> {
+    const clean = Array.from(new Set((roots || []).filter(Boolean)));
+    if (!clean.length || !includeSub) return clean;
+    const all = await this.prisma.creativeFolder.findMany({
+      select: { id: true, parentId: true },
+    });
+    const childrenOf = new Map<string, string[]>();
+    for (const f of all) {
+      if (!f.parentId) continue;
+      const arr = childrenOf.get(f.parentId);
+      if (arr) arr.push(f.id);
+      else childrenOf.set(f.parentId, [f.id]);
+    }
+    const out = new Set<string>();
+    const stack = [...clean];
+    while (stack.length) {
+      const id = stack.pop() as string;
+      if (out.has(id)) continue;
+      out.add(id);
+      for (const c of childrenOf.get(id) || []) stack.push(c);
+    }
+    return Array.from(out);
+  }
+
   draftAutomationToAutomationConfig(row: {
     folderId: string | null;
     conditions: any;
@@ -2019,6 +2061,12 @@ export class DraftAutomationScheduler {
       // ACTIVE ở tầng scheduler nên tới đây luôn bật.
       enabled: true,
       folderId: row.folderId ?? conditions.folderId ?? undefined,
+      folderIds:
+        Array.isArray(conditions.folderIds) && conditions.folderIds.length
+          ? conditions.folderIds
+          : undefined,
+      includeSubfolders:
+        conditions.includeSubfolders === true ? true : undefined,
       nameRule: conditions.nameRule ?? undefined,
       videoCount: conditions.videoCount ?? undefined,
       imageCount: conditions.imageCount ?? undefined,
