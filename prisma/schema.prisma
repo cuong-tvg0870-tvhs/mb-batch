@@ -184,6 +184,10 @@ model User {
   processedProposals     AccountProposal[] @relation("ProcessedProposals")
   helpChatSessions       HelpChatSession[] @relation("UserHelpChatSessions")
 
+  assetAccessRequests    AssetAccessRequest[] @relation("AssetReqRequester")
+  assignedAssetRequests  AssetAccessRequest[] @relation("AssetReqAssignee")
+  processedAssetRequests AssetAccessRequest[] @relation("AssetReqProcessor")
+
   @@index([larkOpenId]) // tra nhanh mọi tài khoản MB của 1 người Lark (notify/Larkbase)
 }
 
@@ -2168,6 +2172,8 @@ model Project {
   fanpages ProjectFanpage[]
   catalogs ProjectProductCatalog[]
   folders  ProjectFolder[]
+
+  assetAccessRequests AssetAccessRequest[]
 }
 
 model ProjectMember {
@@ -2516,6 +2522,107 @@ model AccountProposal {
 
   @@index([userId])
   @@index([status])
+}
+
+// ==========================================================================
+// ASSET ACCESS REQUEST — "Yêu cầu cấp quyền tài sản"
+// Migration `add_asset_access_request` (additive; KHÔNG đụng AccountProposal ở
+// trên — hệ đó chỉ gán tài sản ĐÃ có sẵn trong DB cho user).
+//
+// Khác biệt cốt lõi: các tài sản ở đây là MỚI, chưa có trong hệ thống. Nhân sự
+// của một project đề xuất thêm TKQC/Fanpage/Pixel/Catalog (+ Folder nội bộ),
+// admin cấp quyền cho System-User token trên trình quảng cáo Meta, rồi bấm
+// "Xác nhận đã phân" → hệ TỰ đọc từng tài sản từ Meta (đọc được = đã cấp thật),
+// upsert vào DB rồi auto phân quyền cho cả PROJECT lẫn NGƯỜI ĐƯỢC PHÂN.
+//
+// Tách `AssetAccessRequestItem` ra bảng riêng để kéo/phân & retry TỪNG tài sản
+// độc lập (một id lỗi token không chặn các id còn lại).
+// ==========================================================================
+
+enum AssetAccessType {
+  AD_ACCOUNT
+  FANPAGE
+  PIXEL
+  CATALOG
+  FOLDER // CreativeFolder nội bộ — không kéo từ Meta, chỉ wire ACL
+}
+
+enum AssetAccessRequestStatus {
+  DRAFT
+  SUBMITTED // chờ admin xử lý
+  GRANTING_ON_META // admin đang cấp quyền trên trình quảng cáo
+  DONE // đã kéo về + phân hết
+  PARTIAL // kéo/phân được một phần — còn item lỗi, giữ phiếu mở để retry
+  NEED_MORE_INFO // admin báo thiếu thông tin
+  CANNOT_GRANT // không cấp được / từ chối
+}
+
+enum AssetItemStatus {
+  PENDING // chưa xử lý
+  FETCHED // đã đọc được từ Meta + upsert DB (nhưng chưa/không phân ACL — vd PIXEL)
+  ALLOCATED // đã kéo về + phân ACL xong
+  FAILED // đọc Meta lỗi (chưa cấp quyền / sai id) — có fetchError
+  SKIPPED
+}
+
+model AssetAccessRequest {
+  id String @id @default(uuid())
+
+  // Người tạo phiếu đề xuất
+  requesterId String
+  requester   User   @relation("AssetReqRequester", fields: [requesterId], references: [id], onDelete: Cascade)
+
+  // Người sẽ được phân quyền (mặc định = requester). Cho phép trỏ tới user đã có,
+  // hoặc khai email/tên để tự tạo user mới lúc confirm (giống AccountProposal).
+  assigneeUserId String?
+  assignee       User?   @relation("AssetReqAssignee", fields: [assigneeUserId], references: [id], onDelete: SetNull)
+  assigneeEmail  String?
+  assigneeName   String?
+  employeeId     String?
+
+  // Project nhận tài sản
+  projectId String?
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  // Thông tin để admin tìm trên trình quảng cáo
+  businessId String? // Business Manager id
+  note       String? @db.Text // ghi chú requester (link, owner, hoàn cảnh...)
+
+  status        AssetAccessRequestStatus @default(SUBMITTED)
+  adminFeedback String?                  @db.Text
+
+  processedById String?
+  processedBy   User?     @relation("AssetReqProcessor", fields: [processedById], references: [id], onDelete: SetNull)
+  processedAt   DateTime?
+
+  items AssetAccessRequestItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([requesterId])
+  @@index([assigneeUserId])
+  @@index([projectId])
+  @@index([status])
+}
+
+model AssetAccessRequestItem {
+  id        String             @id @default(uuid())
+  requestId String
+  request   AssetAccessRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  type   AssetAccessType
+  metaId String // id tài sản trên Meta (hoặc CreativeFolder.id nếu type=FOLDER)
+  name   String? // tên khai báo / tên lấy về từ Meta
+
+  status     AssetItemStatus @default(PENDING)
+  fetchError String?         @db.Text
+  fetchedAt  DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([requestId])
+  @@index([type, metaId])
 }
 
 // ==========================================================================
