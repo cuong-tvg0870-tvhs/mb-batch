@@ -42,9 +42,15 @@ export function fileMatchesRecordCid(
 export function applyCidToAdName(name: string, cid: string): string {
   if (!name || !cid) return name;
   const parts = name.split('|');
-  let idx = parts.findIndex(
-    (p) => CID_PATTERN.test(p.trim()) || p.trim() === '[MÃ_CID_CONTENT]',
-  );
+  let idx = parts.findIndex((p) => {
+    const t = p.trim();
+    // Nhận 3 dạng ô CID: token đầy đủ (CID0004689), placeholder [MÃ_CID_CONTENT], và
+    // ô "CID" TRƠN (chưa gắn số) của mẫu. Trước đây bỏ sót "CID" trơn (CID_PATTERN đòi
+    // có chữ số) nên tên mẫu dạng "...|Purchase|CID" không được ghép CID → phải điền tay.
+    return (
+      CID_PATTERN.test(t) || t === '[MÃ_CID_CONTENT]' || t.toUpperCase() === 'CID'
+    );
+  });
   if (idx === -1) {
     // Không có token/placeholder CID sẵn: CHỈ chèn vào vị trí thứ 5 (index 4) khi tên
     // ĐÚNG dạng quảng cáo pipe chuẩn "A|B|C|D|CID|" — 6 phần, phần cuối rỗng — và KHÔNG
