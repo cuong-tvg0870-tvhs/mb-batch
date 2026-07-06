@@ -956,6 +956,15 @@ export class DraftAutomationMetaPublisherService {
     'CONTACT_US',
   ]);
 
+  // CTA nhắn tin THUẦN: đích đến do ad set (destination_type + promoted_object.page_id) quyết định;
+  // KHÔNG gửi kèm value.link website. (CONTACT_US KHÔNG thuộc nhóm này vì vẫn cần link.)
+  private static readonly MESSAGING_CTA_NO_LINK = new Set([
+    'MESSAGE_PAGE',
+    'MESSENGER',
+    'WHATSAPP_MESSAGE',
+    'INSTAGRAM_MESSAGE',
+  ]);
+
   private extractScaleMedia(creative: any): {
     videoId?: string;
     imageHash?: string;
@@ -1714,7 +1723,13 @@ export class DraftAutomationMetaPublisherService {
           ['CAROUSEL', 'COLLECTION'].includes(catalogFormat) || undefined,
         call_to_action: {
           type: callToActionType,
-          value: link ? { link } : undefined,
+          value:
+            link &&
+            !DraftAutomationMetaPublisherService.MESSAGING_CTA_NO_LINK.has(
+              callToActionType,
+            )
+              ? { link }
+              : undefined,
         },
       },
     });
