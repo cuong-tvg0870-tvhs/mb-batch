@@ -1540,10 +1540,14 @@ export class DraftAutomationMetaPublisherService {
       excluded_geo_locations,
       is_manual,
       use_age_min_control,
+      minimum_age,
+      min_age,
       ...rest
     } = targeting || {};
 
     void use_age_min_control;
+    void minimum_age;
+    void min_age;
 
     // Meta: với Advantage+ Audience (targeting_automation.advantage_audience = 1)
     // KHÔNG được đặt age_max làm "control" thấp hơn 65 — độ tuổi tối đa thấp hơn
