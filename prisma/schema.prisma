@@ -3040,6 +3040,16 @@ model AutomationRuleRunItem {
   /// can correlate with Meta's own logs.
   metaTraceId String?
 
+  /// Comma-joined Meta async request-set id(s) for an in-flight deep_copy
+  /// duplicate submitted via `asyncbatch`. NULL for every other item. While set
+  /// the item keeps status CONFIRMED but is EXCLUDED from execution and polled
+  /// for completion instead — cleared back to NULL when finalised (EXECUTED /
+  /// FAILED). Guarantees a partial/failed async copy is never reported EXECUTED.
+  asyncRequestIds   String?
+  /// Number of times the async-copy poller has checked this item; caps polling
+  /// so a stuck async request eventually finalises FAILED ("timeout").
+  asyncPollAttempts Int     @default(0)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
