@@ -94,6 +94,12 @@ export const parseMetaError = (err: any) => {
   };
 };
 
+// Meta subcode 2490408 cho MESSAGING_PURCHASE_CONVERSION = Trang chưa đủ điều kiện
+// "mua hàng qua tin nhắn" (thiếu đo lường Purchase qua CAPI for Business Messaging),
+// KHÔNG phải sai objective↔goal. Giữ song song với bản ở mb-ads (common/utils/index.ts).
+export const MPC_NOT_ELIGIBLE_MESSAGE =
+  'Trang chưa đủ điều kiện tối ưu "Mua hàng qua tin nhắn": Meta cần Trang bật đo lường mua hàng qua tin nhắn (CAPI for Business Messaging) và có đủ sự kiện Purchase gần đây. Hãy đổi "Mục tiêu hiệu quả" sang "Số tin nhắn" (Conversations), hoặc tạo nhóm quảng cáo này trực tiếp trên Trình quản lý quảng cáo của Meta.';
+
 /**
  * Chuyển lỗi Meta (thường tiếng Anh) sang hướng dẫn ngắn gọn tiếng Việt + cách
  * khắc phục. Trả null nếu không khớp mẫu nào để caller fallback message gốc.

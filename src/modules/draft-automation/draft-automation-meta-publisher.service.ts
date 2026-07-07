@@ -8,6 +8,7 @@ import {
 import {
   CleanObjectOrArray,
   metaErrorToFriendly,
+  MPC_NOT_ELIGIBLE_MESSAGE,
   parseMetaError,
   sleep,
 } from '../../common/utils';
@@ -256,16 +257,34 @@ export class DraftAutomationMetaPublisherService {
 
         const adSetData: any = this.clone(adSetSystem.data || {});
 
-        // Nâng cấp đích nhắn tin cho trang có IG (xem ghi chú ở igLinkedPageIds).
+        // Đích nhắn tin phụ thuộc Trang có Instagram liên kết hay không (xem ghi chú ở
+        // igLinkedPageIds). Chốt cả 2 chiều cho goal nhắn tin (MPC + CONVERSATIONS).
+        // Đồng bộ với mb-ads draft-campaign.service.ts:
+        //  - Trang CÓ IG + MPC + Messenger/trống → nâng lên combo (Meta bắt buộc).
+        //  - Chọn đích Instagram/combo NHƯNG Trang KHÔNG có IG → hạ về Messenger để
+        //    tránh Meta từ chối cả nhóm (subcode 2490408).
         const mpcPageId = adSetData.promoted_object?.page_id;
-        if (
-          adSetData.optimization_goal === 'MESSAGING_PURCHASE_CONVERSION' &&
-          (adSetData.destination_type === 'MESSENGER' ||
-            !adSetData.destination_type) &&
-          mpcPageId &&
-          igLinkedPageIds.has(String(mpcPageId))
-        ) {
-          adSetData.destination_type = 'MESSAGING_INSTAGRAM_DIRECT_MESSENGER';
+        const isMessagingGoal =
+          adSetData.optimization_goal === 'MESSAGING_PURCHASE_CONVERSION' ||
+          adSetData.optimization_goal === 'CONVERSATIONS';
+        const isIgDestination =
+          adSetData.destination_type === 'INSTAGRAM_DIRECT' ||
+          adSetData.destination_type === 'MESSAGING_INSTAGRAM_DIRECT_MESSENGER';
+        if (isMessagingGoal && mpcPageId) {
+          const pageHasIg = igLinkedPageIds.has(String(mpcPageId));
+          if (
+            pageHasIg &&
+            adSetData.optimization_goal === 'MESSAGING_PURCHASE_CONVERSION' &&
+            (adSetData.destination_type === 'MESSENGER' ||
+              !adSetData.destination_type)
+          ) {
+            adSetData.destination_type = 'MESSAGING_INSTAGRAM_DIRECT_MESSENGER';
+          } else if (!pageHasIg && isIgDestination) {
+            console.warn(
+              `[draft-automation-publish] adSet ${adSetSystem.id}: Trang ${mpcPageId} chưa liên kết Instagram — hạ đích ${adSetData.destination_type} → MESSENGER để tránh Meta từ chối.`,
+            );
+            adSetData.destination_type = 'MESSENGER';
+          }
         }
         const catalogProductSetId =
           this.resolveAdSetProductSetId(adSetData) ||
@@ -308,8 +327,18 @@ export class DraftAutomationMetaPublisherService {
           // Lỗi tạo NHÓM quảng cáo → nhóm + ads của nó coi như lỗi, các nhóm KHÁC
           // vẫn tiếp tục. Ad lỗi giữ meta_id=null nên lần chạy sau tạo lại đúng nó.
           const metaError = parseMetaError(err);
-          const friendlyMsg =
+          let friendlyMsg =
             metaErrorToFriendly(metaError) || metaError?.message || String(err);
+          // Meta subcode 2490408 cho MPC = Trang chưa đủ điều kiện mua-hàng-qua-tin-nhắn
+          // (không phải sai objective). Dịch thành thông báo hành động được. Đồng bộ
+          // với mb-ads draft-campaign.service.ts. Automation không có UI hỏi trước nên
+          // đây là lưới chính để log/hiện lỗi rõ ràng.
+          if (
+            Number(metaError?.subcode) === 2490408 &&
+            adSetData.optimization_goal === 'MESSAGING_PURCHASE_CONVERSION'
+          ) {
+            friendlyMsg = MPC_NOT_ELIGIBLE_MESSAGE;
+          }
           this.logger.error(
             `[createAdSet] adset ${adSetSystem.id} lỗi:`,
             metaError,
@@ -376,6 +405,13 @@ export class DraftAutomationMetaPublisherService {
                 creativeData,
                 adPayload.creative,
               );
+            // Đích nhắn tin combo (Messenger + Instagram…) → creative BẮT BUỘC khai
+            // asset_feed_spec DOF_MESSAGING_DESTINATION, nếu không Meta từ chối tạo Ad
+            // (subcode 2446493). destination_type ĐÃ CHỐT nằm ở adSetData. Parity mb-ads.
+            this.applyMultiDestinationMessaging(
+              creativeData,
+              adSetData.destination_type,
+            );
             const creative =
               await this.createAdCreativeWithOptionalDestinationFallback(
                 adAccount,
@@ -1775,6 +1811,91 @@ export class DraftAutomationMetaPublisherService {
 
     dof.creative_features_spec = features;
     creativeData.degrees_of_freedom_spec = dof;
+  }
+
+  // Đích nhắn tin "combo" (nhiều kênh trong 1 nhóm) → tập app_destination cần khai
+  // trong creative. Hiện chỉ 1 combo: Messenger + Instagram. Parity mb-ads.
+  private static readonly MULTI_MESSAGING_DESTINATION_CHANNELS: Record<
+    string,
+    string[]
+  > = {
+    MESSAGING_INSTAGRAM_DIRECT_MESSENGER: ['MESSENGER', 'INSTAGRAM_DIRECT'],
+  };
+
+  // app_destination → {cta type, link tài liệu} để dựng call_to_actions creative
+  // nhiều đích. Khoá theo app_destination (khác MESSAGING_CTA_DESTINATION keyed cta.type).
+  private static readonly MESSAGING_DESTINATION_CTA: Record<
+    string,
+    { type: string; link: string }
+  > = {
+    MESSENGER: { type: 'MESSAGE_PAGE', link: 'https://fb.com/messenger_doc/' },
+    INSTAGRAM_DIRECT: {
+      type: 'INSTAGRAM_MESSAGE',
+      link: 'https://www.instagram.com',
+    },
+    WHATSAPP: {
+      type: 'WHATSAPP_MESSAGE',
+      link: 'https://api.whatsapp.com/send',
+    },
+  };
+
+  /**
+   * Quảng cáo click-to-message NHIỀU ĐÍCH (destination_type combo, vd
+   * MESSAGING_INSTAGRAM_DIRECT_MESSENGER): Meta yêu cầu creative khai
+   * `asset_feed_spec.optimization_type = 'DOF_MESSAGING_DESTINATION'` +
+   * `call_to_actions` cho TỪNG kênh. THIẾU → Meta từ chối tạo Ad với subcode 2446493.
+   * KHÔNG kèm standard_enhancements (đã ngừng — subcode 3858504). Giữ object_story_spec làm CTA chính
+   * (Meta cho gửi kèm khi asset_feed_spec chỉ có optimization_type + call_to_actions).
+   * Chỉ gọi ở bước TẠO creative (không đưa vào diff/snapshot). Parity mb-ads
+   * (MetaService.applyMultiDestinationMessaging).
+   */
+  private applyMultiDestinationMessaging(
+    creativeData: any,
+    destinationType?: string,
+  ) {
+    const channels = destinationType
+      ? DraftAutomationMetaPublisherService
+          .MULTI_MESSAGING_DESTINATION_CHANNELS[destinationType]
+      : undefined;
+    if (!channels || channels.length < 2) return;
+
+    if (
+      creativeData.object_story_id ||
+      creativeData.object_story_spec?.object_story_id ||
+      creativeData.asset_feed_spec?.onsite_destinations
+    ) {
+      return;
+    }
+
+    const callToActions: any[] = [];
+    for (const dest of channels) {
+      const cfg =
+        DraftAutomationMetaPublisherService.MESSAGING_DESTINATION_CTA[dest];
+      if (cfg) {
+        callToActions.push({
+          type: cfg.type,
+          value: { app_destination: dest, link: cfg.link },
+        });
+      }
+    }
+    if (callToActions.length < 2) return;
+
+    const assetFeed = creativeData.asset_feed_spec || {};
+    if (
+      assetFeed.optimization_type &&
+      assetFeed.optimization_type !== 'DOF_MESSAGING_DESTINATION'
+    ) {
+      this.logger.warn(
+        `[multi-destination] asset_feed_spec.optimization_type='${assetFeed.optimization_type}' đã đặt — bỏ qua DOF_MESSAGING_DESTINATION cho ${destinationType}.`,
+      );
+      return;
+    }
+    assetFeed.optimization_type = 'DOF_MESSAGING_DESTINATION';
+    assetFeed.call_to_actions = callToActions;
+    creativeData.asset_feed_spec = assetFeed;
+
+    // KHÔNG thêm standard_enhancements: Meta đã NGỪNG field này (subcode 3858504),
+    // phải chọn từng tính năng — đã do applyProductExtensionsPreference đặt. Parity mb-ads.
   }
 
   private normalizeCatalogCreativeForMeta(
