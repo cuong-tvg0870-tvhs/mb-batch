@@ -246,10 +246,27 @@ export class DraftAutomationMetaPublisherService {
       let adSetsProcessed = 0;
       let adsProcessed = 0;
 
+      // Trang có Instagram liên kết → Meta yêu cầu đích MESSAGING_INSTAGRAM_DIRECT_MESSENGER
+      // cho "Mua hàng qua tin nhắn"; plain MESSENGER bị từ chối (subcode 2490408). Trang
+      // không IG vẫn dùng MESSENGER được. Nạp 1 lần. Đồng bộ với mb-ads.
+      const igLinkedPageIds = await this.loadIgLinkedPageIds(accountId);
+
       for (const adSetSystem of campaignSystem.ad_sets) {
         currentStepKey = 'adsets';
 
         const adSetData: any = this.clone(adSetSystem.data || {});
+
+        // Nâng cấp đích nhắn tin cho trang có IG (xem ghi chú ở igLinkedPageIds).
+        const mpcPageId = adSetData.promoted_object?.page_id;
+        if (
+          adSetData.optimization_goal === 'MESSAGING_PURCHASE_CONVERSION' &&
+          (adSetData.destination_type === 'MESSENGER' ||
+            !adSetData.destination_type) &&
+          mpcPageId &&
+          igLinkedPageIds.has(String(mpcPageId))
+        ) {
+          adSetData.destination_type = 'MESSAGING_INSTAGRAM_DIRECT_MESSENGER';
+        }
         const catalogProductSetId =
           this.resolveAdSetProductSetId(adSetData) ||
           this.resolveCatalogProductSetIdFromAds(
@@ -650,6 +667,33 @@ export class DraftAutomationMetaPublisherService {
 
   private normalizeAdAccountId(accountId: string) {
     return accountId.startsWith('act_') ? accountId : `act_${accountId}`;
+  }
+
+  // Tập page_id có Instagram liên kết (từ Account.pages đã sync). Quyết định
+  // destination_type cho ad set "Mua hàng qua tin nhắn". Lỗi DB → Set rỗng (giữ
+  // MESSENGER như cũ). Đồng bộ với mb-ads draft-campaign.service.loadIgLinkedPageIds.
+  private async loadIgLinkedPageIds(accountId: string): Promise<Set<string>> {
+    const ids = new Set<string>();
+    try {
+      const account = await this.prisma.account.findUnique({
+        where: { id: this.normalizeAdAccountId(accountId) },
+        select: { pages: true },
+      });
+      const pages = Array.isArray(account?.pages)
+        ? (account?.pages as any[])
+        : [];
+      for (const p of pages) {
+        const hasIg =
+          !!p?.instagram_business_account ||
+          !!p?.connected_instagram_account ||
+          (Array.isArray(p?.instagram_accounts?.data) &&
+            p.instagram_accounts.data.length > 0);
+        if (hasIg && p?.id) ids.add(String(p.id));
+      }
+    } catch (e) {
+      this.logger.error('[loadIgLinkedPageIds] đọc Account.pages lỗi, bỏ qua:', e);
+    }
+    return ids;
   }
 
   private normalizeMetaStatus(status?: string, fallback = 'PAUSED') {
