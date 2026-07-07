@@ -126,6 +126,20 @@ function getAssetCreationDate(asset: any): Date | undefined {
   return parseValidDate(asset?.creation_time || asset?.createdAtLocal);
 }
 
+// Nguồn CreativeAsset cho automation:
+//  - NEW_ONLY  (mặc định): chỉ content chưa từng lên camp/publish (hành vi cũ)
+//  - USED_ONLY: chỉ content ĐÃ từng lên camp/publish
+//  - BOTH     : cả hai
+function normalizeAssetReuseMode(
+  value: any,
+): 'NEW_ONLY' | 'USED_ONLY' | 'BOTH' {
+  const v = String(value ?? '')
+    .trim()
+    .toUpperCase();
+  if (v === 'USED_ONLY' || v === 'BOTH') return v;
+  return 'NEW_ONLY';
+}
+
 function getThumbnailList(video: any): any[] {
   const thumbnails = parseJsonValue(video?.video_thumbnails);
   if (Array.isArray(thumbnails)) return thumbnails;
@@ -1352,6 +1366,14 @@ export class DraftAutomationScheduler {
           noCid: 0,
         };
 
+        // Nguồn nội dung: NEW_ONLY (mặc định, chỉ content chưa từng lên camp),
+        // USED_ONLY (chỉ content đã từng lên camp), BOTH (cả hai). Chỉ đổi hành vi
+        // của điều kiện "đã dùng ở hệ thống/đã publish" — vẫn luôn loại content
+        // đang bị bản nháp khác giữ (isUsedInDraft).
+        const assetReuseMode = normalizeAssetReuseMode(
+          (automation as any).assetReuseMode,
+        );
+
         const eligibleAssets = folderAssets.filter((asset) => {
           const isUsedInDraft =
             usedDraftIdentifiers.has(asset.id) ||
@@ -1368,6 +1390,12 @@ export class DraftAutomationScheduler {
               usedSystemCampaignIdentifiers.has(asset.video_id)) ||
             (asset.imageHash &&
               usedSystemCampaignIdentifiers.has(asset.imageHash));
+          const passesReuse =
+            assetReuseMode === 'BOTH'
+              ? true
+              : assetReuseMode === 'USED_ONLY'
+                ? !!isUsedBySystemOrPublished
+                : !isUsedBySystemOrPublished; // NEW_ONLY (mặc định)
           const matchesNameRule =
             !automation.nameRule ||
             (asset.name || '')
@@ -1376,19 +1404,14 @@ export class DraftAutomationScheduler {
           // Yêu cầu: chỉ lấy content có chứa mã CID trong tên (vd CID00046478).
           const hasCid = !!extractCidFromName(asset.name);
 
-          if (isUsedBySystemOrPublished) {
+          if (!passesReuse) {
             exclusionCounts.alreadyUsedBySystemOrPublished += 1;
           }
           if (isUsedInDraft) exclusionCounts.usedInDraft += 1;
           if (!matchesNameRule) exclusionCounts.nameRuleMismatch += 1;
           if (!hasCid) exclusionCounts.noCid += 1;
 
-          return (
-            !isUsedBySystemOrPublished &&
-            !isUsedInDraft &&
-            matchesNameRule &&
-            hasCid
-          );
+          return passesReuse && !isUsedInDraft && matchesNameRule && hasCid;
         });
 
         const eligibleVideos = eligibleAssets.filter(
@@ -2083,6 +2106,7 @@ export class DraftAutomationScheduler {
       // slotRules (nếu có) giữ nguyên khoá VIDEO_n / IMAGE_n mà engine đã hiểu.
       slotRules: conditions.slotRules ?? undefined,
       cidRequired: conditions.cidRequired ?? undefined,
+      assetReuseMode: conditions.assetReuseMode ?? undefined,
       publishMode: row.publishMode,
       runMode: row.runMode,
       cronExpression: row.cronExpression ?? undefined,
