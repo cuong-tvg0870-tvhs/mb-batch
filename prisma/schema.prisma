@@ -360,20 +360,20 @@ model Campaign {
   systemCampaignId String?
   systemCampaign   SystemCampaign? @relation(fields: [systemCampaignId], references: [id], onDelete: Cascade)
 
-  name            String?
-  status          String?
+  name             String?
+  status           String?
   effectiveStatus  String?
   configuredStatus String?
-  objective       String?
-  buyingType      String?
-  effectiveBudget Int       @default(0)
-  dailyBudget     Int?
-  lifetimeBudget  Int?
-  startTime       DateTime?
-  endTime         DateTime?
-  remoteUpdatedAt DateTime?
-  lastFetchedAt   DateTime?
-  rawPayload      Json?
+  objective        String?
+  buyingType       String?
+  effectiveBudget  Int       @default(0)
+  dailyBudget      Int?
+  lifetimeBudget   Int?
+  startTime        DateTime?
+  endTime          DateTime?
+  remoteUpdatedAt  DateTime?
+  lastFetchedAt    DateTime?
+  rawPayload       Json?
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @default(now())
@@ -501,8 +501,8 @@ model AdSet {
   accountId String
   account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
-  name   String?
-  status String?
+  name             String?
+  status           String?
   effectiveStatus  String?
   configuredStatus String?
 
@@ -1772,7 +1772,7 @@ model DraftAutomation {
   intervalMinutes Int?
   cronExpression  String?
   timezone        String?
-  runMode         DraftAutomationRunMode @default(LOOP)
+  runMode         DraftAutomationRunMode      @default(LOOP)
 
   // Chế độ đăng — mặc định chỉ tạo nháp (an toàn). Dùng lại enum sẵn có.
   publishMode DraftAutomationPublishMode @default(DRAFT_ONLY)
@@ -2728,6 +2728,13 @@ model AutomationRule {
   // executor in the same tick — no manual confirm step. Default false preserves
   // the manual-confirm behaviour for every existing rule.
   autoExecute Boolean @default(false)
+
+  // False while the rule's insight cache is still being seeded after activation —
+  // the runner holds it in "Đang nạp dữ liệu" (no evaluation) and drives the
+  // backfill, flipping to true (and starting real runs) once the cache is
+  // complete. Default true so existing rules keep running (only NEW activations
+  // that need seeding start at false).
+  dataReady Boolean @default(true)
 
   categoryId String
   category   AutomationCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
