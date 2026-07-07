@@ -1140,6 +1140,57 @@ export class DraftAutomationMetaPublisherService {
     }
   }
 
+  // Đích nhắn tin chuẩn cho từng kênh (link tài liệu + app_destination). Meta cần
+  // value.app_destination để nhận diện quảng cáo click-to-message; thiếu nó thì
+  // optimization MESSAGING_PURCHASE_CONVERSION bị từ chối lúc tạo Ad. Đồng bộ mb-ads.
+  private static readonly MESSAGING_CTA_DESTINATION: Record<
+    string,
+    { link: string; app_destination: string }
+  > = {
+    MESSAGE_PAGE: {
+      link: 'https://fb.com/messenger_doc/',
+      app_destination: 'MESSENGER',
+    },
+    MESSENGER: {
+      link: 'https://fb.com/messenger_doc/',
+      app_destination: 'MESSENGER',
+    },
+    WHATSAPP_MESSAGE: {
+      link: 'https://api.whatsapp.com/send',
+      app_destination: 'WHATSAPP',
+    },
+    INSTAGRAM_MESSAGE: {
+      link: 'https://www.instagram.com/',
+      app_destination: 'INSTAGRAM_DIRECT',
+    },
+  };
+
+  // Rào an toàn: nháp/mẫu cũ có thể lưu call_to_action nhắn tin dạng trơ {type} —
+  // thiếu value.app_destination → Meta từ chối MPC. Bơm đích nhắn tin chuẩn nếu thiếu.
+  // KHÔNG đụng CTA website. Đồng bộ với mb-ads meta.service.normalizeMessagingCtaForMeta.
+  private normalizeMessagingCtaForMeta(creativeData: any) {
+    const spec = creativeData?.object_story_spec;
+    if (!spec) return;
+    const fix = (cta: any) => {
+      if (!cta || typeof cta !== 'object') return;
+      const dest =
+        DraftAutomationMetaPublisherService.MESSAGING_CTA_DESTINATION[cta.type];
+      if (!dest) return;
+      if (!cta.value?.app_destination) {
+        cta.value = { ...dest, ...(cta.value || {}) };
+        cta.value.app_destination = dest.app_destination;
+        if (!cta.value.link) cta.value.link = dest.link;
+      }
+    };
+    fix(spec.video_data?.call_to_action);
+    fix(spec.link_data?.call_to_action);
+    if (Array.isArray(spec.link_data?.child_attachments)) {
+      for (const att of spec.link_data.child_attachments) {
+        fix(att?.call_to_action);
+      }
+    }
+  }
+
   private buildCreativeData(adPayload: any) {
     const sourceCreative = adPayload?.creative || {};
 
@@ -1243,6 +1294,7 @@ export class DraftAutomationMetaPublisherService {
 
     this.applyPromotionalMetadataForMeta(creativeData);
     this.normalizeCreativeMediaForMeta(creativeData);
+    this.normalizeMessagingCtaForMeta(creativeData);
     if (isCatalogProductCreative) {
       this.normalizeCatalogCreativeForMeta(
         creativeData,
