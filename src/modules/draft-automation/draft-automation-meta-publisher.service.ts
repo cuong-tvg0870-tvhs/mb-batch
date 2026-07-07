@@ -703,6 +703,23 @@ export class DraftAutomationMetaPublisherService {
       delete metaPayload.bid_strategy;
     }
 
+    // MESSAGING_PURCHASE_CONVERSION ("Mua hàng qua tin nhắn" — CTM/CTWA): Meta đo sự
+    // kiện Purchase qua Conversions API for Business Messaging (page_id + PSID), KHÔNG
+    // dùng pixel trình duyệt. promoted_object PHẢI khai `smart_pse_enabled` để Meta biết
+    // nguồn tín hiệu mua hàng; thiếu nó Meta từ chối cả cụm với thông báo khó hiểu "không
+    // thể dùng mục tiêu hiệu quả cho mục tiêu chiến dịch". Bằng chứng THẬT: 2014/2014 ad
+    // set MESSAGING_PURCHASE_CONVERSION đang chạy đều có smart_pse_enabled=false. Mặc định
+    // false, không đè nếu đã set. Áp cho cả MESSENGER lẫn WHATSAPP. Giữ đồng bộ với mb-ads.
+    if (
+      metaPayload.optimization_goal === 'MESSAGING_PURCHASE_CONVERSION' &&
+      metaPayload.promoted_object?.smart_pse_enabled === undefined
+    ) {
+      metaPayload.promoted_object = {
+        ...(metaPayload.promoted_object || {}),
+        smart_pse_enabled: false,
+      };
+    }
+
     // Loại audience_controls.min_age khi Advantage+ bật — Meta từ chối. Độ tuổi
     // tối thiểu đi qua targeting.age_min. Giữ đồng bộ với mb-ads.
     metaPayload.audience_controls = this.sanitizeAudienceControls(metaPayload);
