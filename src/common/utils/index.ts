@@ -114,6 +114,12 @@ export const metaErrorToFriendly = (metaError: any): string | null => {
   const code = Number(metaError.code);
   const has = (...keys: string[]) => keys.some((k) => msg.includes(k));
 
+  // subcode 2490408 = Meta KHÔNG hỗ trợ "mục tiêu hiệu quả" (optimization goal) đã chọn
+  // cho "mục tiêu chiến dịch" (objective) này. Ca MPC được CALL-SITE ghi đè thông điệp
+  // riêng (Trang chưa đủ điều kiện) nên rule này chỉ áp cho ca chung.
+  if (Number(metaError.subcode) === 2490408)
+    return 'Meta không hỗ trợ "Mục tiêu hiệu quả" (tối ưu hoá) đã chọn cho "Mục tiêu chiến dịch" này. Vui lòng đổi "Mục tiêu hiệu quả" cho phù hợp với mục tiêu chiến dịch (hoặc đổi mục tiêu chiến dịch) rồi publish lại.';
+
   if (has('image hash', 'image_hash', 'invalid image', 'image is not'))
     return 'Ảnh không hợp lệ hoặc đã hết hạn trên Meta. Vui lòng chọn lại ảnh/tài nguyên cho quảng cáo bị lỗi rồi publish lại.';
   if (has('video', 'thumbnail') && has('not', 'invalid', 'missing'))
@@ -293,11 +299,10 @@ export const classifyMetaError = (metaError: any): MetaErrorClassification => {
 
   // 🚫 META KHÔNG HỖ TRỢ / ĐÃ DỪNG HỖ TRỢ (hoặc chưa đủ điều kiện) — không sửa được
   // bằng 1 field trong nháp.
-  // LƯU Ý subcode 2490408 ("không dùng được mục tiêu hiệu quả cho mục tiêu chiến dịch")
-  // lưỡng nghĩa: ngoài MPC = user CHỌN SAI optimization_goal ↔ objective (tự sửa được →
-  // DRAFT_CONFIG, để mặc định bên dưới bắt qua error_user_msg). CHỈ khi optimization_goal
-  // = MESSAGING_PURCHASE_CONVERSION nó mới là "Trang chưa đủ điều kiện" (META_LIMITATION);
-  // ca đó do CALL-SITE tự nâng category (nó biết optimization_goal, còn hàm này thì không).
+  // subcode 2490408 = combo "mục tiêu hiệu quả (optimization_goal) ↔ mục tiêu chiến
+  // dịch (objective)" Meta KHÔNG hỗ trợ → META_LIMITATION (thông điệp ở metaErrorToFriendly).
+  // Biến thể MPC (optimization_goal = MESSAGING_PURCHASE_CONVERSION) = "Trang chưa đủ
+  // điều kiện" — CALL-SITE đổi message riêng (nó biết optimization_goal, hàm này thì không).
   const isEligibility =
     has(
       'not eligible',
@@ -315,7 +320,7 @@ export const classifyMetaError = (metaError: any): MetaErrorClassification => {
       'is deprecated',
     );
   // Subcode targeting/đặc tính đã bị Meta gỡ hoặc không khả dụng cho tài khoản.
-  const deprecatedSubcodes = [1487694, 1870088, 1870065, 2446394];
+  const deprecatedSubcodes = [2490408, 1487694, 1870088, 1870065, 2446394];
   if (isEligibility || deprecatedSubcodes.includes(subcode)) {
     return build('META_LIMITATION');
   }
