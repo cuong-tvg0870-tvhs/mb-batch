@@ -90,6 +90,7 @@ export const parseMetaError = (err: any) => {
     subcode: e?.error_subcode,
     type: e?.type,
     fbtrace_id: e?.fbtrace_id,
+    is_transient: e?.is_transient,
     raw: e,
   };
 };
@@ -193,6 +194,193 @@ export const metaErrorToFriendly = (metaError: any): string | null => {
   )
     return 'Meta đang giới hạn tần suất (rate limit). Vui lòng đợi vài phút rồi publish lại.';
   return null;
+};
+
+/**
+ * Phân loại lỗi Meta theo "AI SỬA ĐƯỢC" để nhân sự marketing tự phán đoán:
+ *
+ *  - DRAFT_CONFIG   🔧  Do bản nháp — sửa 1 thiết lập trong nháp là hết (ngân sách,
+ *                        đối tượng, tuổi, ảnh/video, CID/Catalog, bid...). fixableInDraft=true.
+ *  - META_LIMITATION 🚫  Meta KHÔNG hỗ trợ / ĐÃ DỪNG hỗ trợ (hoặc tài khoản/Trang chưa
+ *                        đủ điều kiện) — KHÔNG sửa được bằng 1 field; phải đổi mục tiêu/
+ *                        đích, hoặc bật tính năng trên Trang/Business (vd MPC chưa đủ điều
+ *                        kiện, đích IG không khả dụng, targeting đã bị Meta gỡ).
+ *                        fixableInDraft=false.
+ *  - SYSTEM         ⚙️  Lỗi hệ thống — token/permission app, payload app dựng sai, hoặc
+ *                        lỗi CHƯA phân loại. "Không phải lỗi của bạn", cần báo kỹ thuật.
+ *  - TRANSIENT      ⏳  Tạm thời — rate limit / Meta outage. Thử lại sau.
+ *
+ * NGUYÊN TẮC: luôn ưu tiên error_user_msg/error_user_title của Meta (đã localize, an
+ * toàn để hiển thị) làm nội dung; ta chỉ phủ thêm NHÓM + cách sửa. Không khớp mẫu nào
+ * → mặc định SYSTEM (không đổ lỗi cho user) và nên log lại để bồi catalog.
+ *
+ * GIỮ SONG SONG với bản ở mb-ads (common/utils/index.ts).
+ */
+export type MetaErrorCategory =
+  | 'DRAFT_CONFIG'
+  | 'META_LIMITATION'
+  | 'SYSTEM'
+  | 'TRANSIENT';
+
+export interface MetaErrorClassification {
+  category: MetaErrorCategory;
+  fixableInDraft: boolean;
+  retryable: boolean;
+  title: string; // tiêu đề ngắn cho badge/mục lỗi
+  userMessage: string; // nội dung chính (ưu tiên error_user_msg của Meta)
+  howToFix: string | null; // hướng dẫn khắc phục (nếu có)
+  code?: number;
+  subcode?: number;
+  fbtrace_id?: string;
+}
+
+export const META_ERROR_CATEGORY_LABEL: Record<
+  MetaErrorCategory,
+  { label: string; hint: string }
+> = {
+  DRAFT_CONFIG: {
+    label: 'Do bản nháp — bạn có thể tự sửa',
+    hint: 'Chỉnh lại thiết lập bên dưới trong nháp rồi đăng lại.',
+  },
+  META_LIMITATION: {
+    label: 'Meta không hỗ trợ / đã dừng hỗ trợ',
+    hint: 'Cấu hình này Meta không hỗ trợ hoặc đã dừng hỗ trợ (hoặc tài khoản/Trang chưa đủ điều kiện) — không sửa được bằng 1 thiết lập; cần đổi mục tiêu/đích hoặc bật tính năng trên Trang/Business.',
+  },
+  SYSTEM: {
+    label: 'Lỗi hệ thống — không phải lỗi của bạn',
+    hint: 'Sự cố này đã được ghi nhận để đội kỹ thuật xử lý.',
+  },
+  TRANSIENT: {
+    label: 'Meta đang bận — thử lại sau',
+    hint: 'Đây là giới hạn tần suất/sự cố tạm thời của Meta, hãy thử lại sau ít phút.',
+  },
+};
+
+export const classifyMetaError = (metaError: any): MetaErrorClassification => {
+  const code = Number(metaError?.code);
+  const subcode = Number(metaError?.subcode);
+  const msg = String(
+    metaError?.message || metaError?.raw?.message || '',
+  ).toLowerCase();
+  const has = (...keys: string[]) => keys.some((k) => msg.includes(k));
+  const friendly = metaErrorToFriendly(metaError);
+  // Nội dung ưu tiên: error_user_msg (Meta đã localize) > friendly của ta > message thô.
+  const metaUserMsg = metaError?.title || metaError?.raw?.error_user_msg;
+  const userMessage =
+    metaUserMsg || friendly || metaError?.message || 'Lỗi không xác định từ Meta.';
+
+  const build = (
+    category: MetaErrorCategory,
+    extra: Partial<MetaErrorClassification> = {},
+  ): MetaErrorClassification => ({
+    category,
+    fixableInDraft: category === 'DRAFT_CONFIG',
+    retryable: category === 'TRANSIENT',
+    title: metaError?.title || META_ERROR_CATEGORY_LABEL[category].label,
+    userMessage,
+    howToFix: friendly,
+    code: Number.isFinite(code) ? code : undefined,
+    subcode: Number.isFinite(subcode) ? subcode : undefined,
+    fbtrace_id: metaError?.fbtrace_id,
+    ...extra,
+  });
+
+  // ⏳ TẠM THỜI — rate limit / outage / mạng. Ưu tiên xét trước.
+  // isRetryableError đã bao trùm rate-limit (4/17/32/613/80004 + subcode 2446079).
+  if (isRetryableError(metaError)) {
+    return build('TRANSIENT');
+  }
+
+  // 🚫 META KHÔNG HỖ TRỢ / ĐÃ DỪNG HỖ TRỢ (hoặc chưa đủ điều kiện) — không sửa được
+  // bằng 1 field trong nháp.
+  // LƯU Ý subcode 2490408 ("không dùng được mục tiêu hiệu quả cho mục tiêu chiến dịch")
+  // lưỡng nghĩa: ngoài MPC = user CHỌN SAI optimization_goal ↔ objective (tự sửa được →
+  // DRAFT_CONFIG, để mặc định bên dưới bắt qua error_user_msg). CHỈ khi optimization_goal
+  // = MESSAGING_PURCHASE_CONVERSION nó mới là "Trang chưa đủ điều kiện" (META_LIMITATION);
+  // ca đó do CALL-SITE tự nâng category (nó biết optimization_goal, còn hàm này thì không).
+  const isEligibility =
+    has(
+      'not eligible',
+      'không đủ điều kiện',
+      'is not supported',
+      'not supported for',
+      'not available for this',
+      'cannot be used with',
+      'incompatible',
+      'không tương thích',
+      'không hợp lệ với mục tiêu',
+      'no longer available',
+      'has been deprecated',
+      'đã ngừng hỗ trợ',
+      'is deprecated',
+    );
+  // Subcode targeting/đặc tính đã bị Meta gỡ hoặc không khả dụng cho tài khoản.
+  const deprecatedSubcodes = [1487694, 1870088, 1870065, 2446394];
+  if (isEligibility || deprecatedSubcodes.includes(subcode)) {
+    return build('META_LIMITATION');
+  }
+
+  // ⚙️ LỖI HỆ THỐNG — token/permission app hoặc payload app dựng sai. User không tự sửa.
+  const isAuthOrPermission =
+    [190, 102, 10, 200, 294, 368].includes(code) ||
+    subcode === 458 ||
+    subcode === 459 ||
+    subcode === 460 ||
+    subcode === 463 ||
+    subcode === 467 ||
+    subcode === 492 ||
+    has(
+      'access token',
+      'session has expired',
+      'do not have permission',
+      'not authorized',
+      'permissions error',
+      'ads_management',
+    );
+  if (isAuthOrPermission) {
+    return build('SYSTEM');
+  }
+
+  // 🔧 DO BẢN NHÁP — lỗi validation (Meta thường kèm error_user_msg) hoặc khớp một
+  // trong các mẫu friendly (ngân sách/ảnh/đối tượng/Catalog/special ad category...).
+  const validationCodes = [100, 1487, 1885, 1870, 2446, 1359, 1443, 1815];
+  const looksValidation =
+    friendly !== null ||
+    !!metaError?.raw?.error_user_msg ||
+    validationCodes.some((c) => code === c || Math.floor(code / 1000) === c);
+  if (looksValidation) {
+    return build('DRAFT_CONFIG');
+  }
+
+  // Không khớp mẫu nào → coi là LỖI HỆ THỐNG (không đổ lỗi cho user) để log & bồi catalog.
+  return build('SYSTEM');
+};
+
+/**
+ * Chọn phân loại ĐẠI DIỆN từ danh sách ad/nhóm lỗi (mỗi phần tử có .classification).
+ * Dùng cho badge TỔNG khi lỗi ném lên là wrapper tổng hợp không mang code Meta (vd
+ * "Tất cả quảng cáo đều lỗi") — classify wrapper sẽ ra SYSTEM sai. Ưu tiên nhóm HÀNH
+ * ĐỘNG ĐƯỢC trước để user thấy việc có thể làm: DRAFT_CONFIG > META_LIMITATION >
+ * TRANSIENT > SYSTEM. GIỮ SONG SONG với bản ở mb-ads.
+ */
+export const pickDominantClassification = (
+  list: any[],
+): MetaErrorClassification | null => {
+  const cls: MetaErrorClassification[] = (Array.isArray(list) ? list : [])
+    .map((x) => x?.classification)
+    .filter((c) => !!c?.category);
+  if (!cls.length) return null;
+  const priority: MetaErrorCategory[] = [
+    'DRAFT_CONFIG',
+    'META_LIMITATION',
+    'TRANSIENT',
+    'SYSTEM',
+  ];
+  for (const cat of priority) {
+    const hit = cls.find((c) => c.category === cat);
+    if (hit) return hit;
+  }
+  return cls[0];
 };
 
 export const ThrowErrorWithFormDatabase = (

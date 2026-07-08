@@ -10,6 +10,8 @@ import {
   metaErrorToFriendly,
   MPC_NOT_ELIGIBLE_MESSAGE,
   parseMetaError,
+  classifyMetaError,
+  pickDominantClassification,
   sleep,
 } from '../../common/utils';
 import {
@@ -327,6 +329,7 @@ export class DraftAutomationMetaPublisherService {
           // Lỗi tạo NHÓM quảng cáo → nhóm + ads của nó coi như lỗi, các nhóm KHÁC
           // vẫn tiếp tục. Ad lỗi giữ meta_id=null nên lần chạy sau tạo lại đúng nó.
           const metaError = parseMetaError(err);
+          const classification = classifyMetaError(metaError);
           let friendlyMsg =
             metaErrorToFriendly(metaError) || metaError?.message || String(err);
           // Meta subcode 2490408 cho MPC = Trang chưa đủ điều kiện mua-hàng-qua-tin-nhắn
@@ -338,6 +341,12 @@ export class DraftAutomationMetaPublisherService {
             adSetData.optimization_goal === 'MESSAGING_PURCHASE_CONVERSION'
           ) {
             friendlyMsg = MPC_NOT_ELIGIBLE_MESSAGE;
+            // Chỉ ca MPC mới là META_LIMITATION (Trang chưa đủ điều kiện). Ngoài MPC,
+            // 2490408 = chọn sai goal↔objective → giữ DRAFT_CONFIG (user tự sửa).
+            classification.category = 'META_LIMITATION';
+            classification.fixableInDraft = false;
+            classification.userMessage = MPC_NOT_ELIGIBLE_MESSAGE;
+            classification.howToFix = MPC_NOT_ELIGIBLE_MESSAGE;
           }
           this.logger.error(
             `[createAdSet] adset ${adSetSystem.id} lỗi:`,
@@ -348,6 +357,7 @@ export class DraftAutomationMetaPublisherService {
             name: adSetName,
             status: 'failed',
             error: friendlyMsg,
+            classification,
           });
           for (const adSystem of adSetSystem.ads) {
             adResults.push({
@@ -356,6 +366,7 @@ export class DraftAutomationMetaPublisherService {
               adSetName,
               status: 'failed',
               error: `Nhóm quảng cáo lỗi: ${friendlyMsg}`,
+              classification,
             });
           }
           adSetsProcessed += 1;
@@ -453,6 +464,7 @@ export class DraftAutomationMetaPublisherService {
           } catch (err) {
             // 1 quảng cáo lỗi KHÔNG làm hỏng các ad còn lại. Ad lỗi giữ meta_id=null.
             const metaError = parseMetaError(err);
+            const classification = classifyMetaError(metaError);
             const friendlyMsg =
               metaErrorToFriendly(metaError) ||
               metaError?.message ||
@@ -465,6 +477,7 @@ export class DraftAutomationMetaPublisherService {
               adSetName,
               status: 'failed',
               error: friendlyMsg,
+              classification,
             });
             await this.updatePublishStep(history.id, 'ads', {
               status: 'processing',
@@ -526,6 +539,7 @@ export class DraftAutomationMetaPublisherService {
       };
     } catch (err: any) {
       const metaError = parseMetaError(err);
+      const classification = classifyMetaError(metaError);
       const errorMessage =
         metaErrorToFriendly(metaError) || metaError?.message || String(err);
 
@@ -548,12 +562,19 @@ export class DraftAutomationMetaPublisherService {
 
       if (hasLiveAds) {
         const failedList = adResults.filter((r) => r.status === 'failed');
+        // Lỗi ném lên có thể là wrapper không mang code Meta → lấy phân loại thực từ
+        // các ad lỗi để badge tổng đúng (khớp mb-ads draft-campaign.service.ts).
+        const topClassification =
+          classification.code != null
+            ? classification
+            : (pickDominantClassification(failedList) ?? classification);
         await this.prisma.systemCampaign.update({
           where: { id: campaignSystem.id },
           data: {
             errors: {
               partial: true,
               message: errorMessage,
+              classification: topClassification,
               failedAds: failedList,
             } as any,
             isPublishing: false,
