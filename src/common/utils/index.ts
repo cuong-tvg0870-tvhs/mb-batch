@@ -83,6 +83,25 @@ export const parseMetaError = (err: any) => {
     err?.response ||
     err?.error ||
     err;
+  // error_data (thường là JSON string) chứa blame_field_specs = mảng đường dẫn field
+  // Meta đổ lỗi, vd [["optimization_goal"]] → dùng để chỉ THẲNG field cần sửa cho user.
+  let blameFields: string[] = [];
+  try {
+    const ed =
+      typeof e?.error_data === 'string'
+        ? JSON.parse(e.error_data)
+        : e?.error_data;
+    const specs = ed?.blame_field_specs;
+    if (Array.isArray(specs)) {
+      blameFields = Array.from(
+        new Set(
+          specs.flat(Infinity).filter((x: any) => typeof x === 'string' && x),
+        ),
+      );
+    }
+  } catch {
+    // error_data không phải JSON hợp lệ → bỏ qua.
+  }
   return {
     message: e?.error_user_msg || e?.message || 'Meta API error',
     title: e?.error_user_title,
@@ -91,6 +110,7 @@ export const parseMetaError = (err: any) => {
     type: e?.type,
     fbtrace_id: e?.fbtrace_id,
     is_transient: e?.is_transient,
+    blameFields,
     raw: e,
   };
 };
@@ -238,6 +258,9 @@ export interface MetaErrorClassification {
   code?: number;
   subcode?: number;
   fbtrace_id?: string;
+  // Field Meta đổ lỗi (từ error_data.blame_field_specs), vd ['optimization_goal'].
+  // FE map sang tên tiếng Việt để chỉ THẲNG chỗ cần sửa trong nháp.
+  blameFields?: string[];
 }
 
 export const META_ERROR_CATEGORY_LABEL: Record<
@@ -288,6 +311,9 @@ export const classifyMetaError = (metaError: any): MetaErrorClassification => {
     code: Number.isFinite(code) ? code : undefined,
     subcode: Number.isFinite(subcode) ? subcode : undefined,
     fbtrace_id: metaError?.fbtrace_id,
+    blameFields: Array.isArray(metaError?.blameFields)
+      ? metaError.blameFields
+      : [],
     ...extra,
   });
 
