@@ -1,0 +1,11 @@
+node_modules
+.nest/cache
+dist
+.git
+.gitignore
+Dockerfile
+docker-compose.yml
+.env*
+README.md
+coverage
+*.log
