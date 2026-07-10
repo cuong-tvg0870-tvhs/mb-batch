@@ -3077,6 +3077,10 @@ enum AutomationInsightBackfillStatus {
   RUNNING
   COMPLETED
   FAILED
+  /// Throttle / circuit-open wait — healthy, auto-resuming (NOT an error).
+  DEFERRED
+  /// Real (non-throttle) error — auto-retrying with capped exponential backoff.
+  RETRYING
 }
 
 /// Daily settled insight bucket (1 dòng/entity/ngày). Chỉ lưu ngày đã "đóng
@@ -3102,23 +3106,41 @@ model AutomationInsightDaily {
 /// sự thật về coverage — nguồn sự thật là các ngày thực có trong
 /// AutomationInsightDaily. Job gap-driven tự reconcile required vs present.
 model AutomationInsightBackfillState {
-  id                String                          @id @default(uuid())
-  accountId         String
-  apiLevel          AutomationInsightApiLevel
-  status            AutomationInsightBackfillStatus @default(PENDING)
-  targetSinceDate   String
-  oldestSettledDate String?
-  lastSettledDate   String?
-  lastRevalidatedAt DateTime?
+  id                  String                          @id @default(uuid())
+  accountId           String
+  apiLevel            AutomationInsightApiLevel
+  status              AutomationInsightBackfillStatus @default(PENDING)
+  targetSinceDate     String
+  oldestSettledDate   String?
+  lastSettledDate     String?
+  lastRevalidatedAt   DateTime?
   /// Last time an ACTIVE rule (run or warmer) confirmed this (account, apiLevel)
   /// is still in use. The maintain scheduler skips states whose lastEvaluatedAt
   /// is null or older than AUTOMATION_INSIGHT_STALE_DAYS so deleted/paused rules
   /// stop being backfilled forever.
-  lastEvaluatedAt   DateTime?
-  errorMessage      String?
-  updatedAt         DateTime                        @updatedAt
+  lastEvaluatedAt     DateTime?
+  errorMessage        String?
+  /// Auto-retry bookkeeping (self-rescheduling seed). retryCount = consecutive
+  /// real-error count driving the backoff exponent (reset to 0 on success);
+  /// nextRetryAt = when the delayed job fires (throttle defer OR real-error
+  /// retry); waitReason = the defer/retry reason for the diagnostics screen;
+  /// phase = durable 'daily' | 'deep' (Redis SeedProgress is ephemeral).
+  retryCount          Int                             @default(0)
+  nextRetryAt         DateTime?
+  waitReason          String?
+  phase               String?
+  /// Structured last-error detail for HTTP-400 root-causing (Graph code/subcode/
+  /// fbtrace/HTTP status) + a redacted request context snapshot.
+  lastErrorCode       Int?
+  lastErrorSubcode    Int?
+  lastErrorFbtrace    String?
+  lastErrorHttpStatus Int?
+  lastErrorAt         DateTime?
+  lastErrorContext    Json?
+  updatedAt           DateTime                        @updatedAt
 
   @@unique([accountId, apiLevel])
+  @@index([nextRetryAt])
 }
 
 /// (PHASE 2) Aggregate đóng băng cho quá khứ sâu của timeframe `maximum`
