@@ -19,7 +19,9 @@ COPY . .
 RUN DATABASE_URL="postgresql://user:pass@localhost:5432/db" \
     npx prisma generate
 
-RUN yarn build
+# nest/tsc build ăn >2GB heap → vượt giới hạn V8 mặc định trong container gây
+# "heap out of memory". Nâng heap cho riêng bước build.
+RUN NODE_OPTIONS=--max-old-space-size=4096 yarn build
 
 
 # ========================
