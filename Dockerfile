@@ -8,7 +8,7 @@ COPY package.json yarn.lock* ./
 # --mount=type=cache keeps the Yarn cache across builds → no re-download on repeat builds
 # target phải đúng thư mục cache thật của yarn v1 (`yarn cache dir` = /usr/local/share/.cache/yarn)
 # Inline registry/timeout so every stage gets the same config
-RUN --mount=type=cache,target=/usr/local/share/.cache/yarn \
+RUN --mount=type=cache,target=/usr/local/share/.cache/yarn,sharing=locked \
     yarn install --frozen-lockfile \
                  --registry https://registry.npmjs.org \
                  --network-timeout 600000
@@ -29,7 +29,7 @@ FROM node:20-alpine AS prod-deps
 WORKDIR /app
 
 COPY package.json yarn.lock* ./
-RUN --mount=type=cache,target=/usr/local/share/.cache/yarn \
+RUN --mount=type=cache,target=/usr/local/share/.cache/yarn,sharing=locked \
     yarn install --frozen-lockfile --production \
                  --registry https://registry.npmjs.org \
                  --network-timeout 600000
