@@ -3166,14 +3166,17 @@ model AutomationInsightDeepAggregate {
 /// `maxPct` = worst of call_count/cputime/total_time (0-100); `regainSec` =
 /// estimated_time_to_regain_access. Upserted (latest wins), throttled ~1/min.
 model AutomationMetaUsage {
-  id         String   @id @default(uuid())
-  scope      String
-  bucket     String
-  maxPct     Float    @default(0)
-  regainSec  Int      @default(0)
-  tier       String?
-  observedAt DateTime
-  updatedAt  DateTime @updatedAt
+  id           String   @id @default(uuid())
+  scope        String
+  bucket       String
+  maxPct       Float    @default(0)
+  callCountPct Float    @default(0)
+  cpuTimePct   Float    @default(0)
+  totalTimePct Float    @default(0)
+  regainSec    Int      @default(0)
+  tier         String?
+  observedAt   DateTime
+  updatedAt    DateTime @updatedAt
 
   @@unique([scope, bucket])
   @@index([scope])
