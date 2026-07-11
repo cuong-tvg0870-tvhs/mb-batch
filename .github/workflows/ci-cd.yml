@@ -78,15 +78,19 @@ jobs:
 
       - name: Deploy to Server via SSH
         uses: appleboy/ssh-action@v1.0.3
+        env:
+          SHORT_SHA: ${{ github.sha }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          ACTOR: ${{ github.actor }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
+          # Chuyển metadata commit từ GHA vào shell trên server
+          envs: SHORT_SHA,COMMIT_MSG,ACTOR,RUN_URL
           script: |
             cd ${{ secrets.DEPLOY_PATH }}
 
-            # Pull the latest mb-batch image
-            docker compose pull mb-batch
-
-            # Restart mb-batch service
-            docker compose up -d mb-batch
+            # Deploy (pull + up -d) + gửi báo cáo về Lark, truyền commit vừa build
+            /root/thanhvinh/deploy-notify.sh mb-batch "$SHORT_SHA" "$COMMIT_MSG" "$ACTOR" "$RUN_URL"
