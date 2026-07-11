@@ -12,6 +12,12 @@ permissions:
   contents: read
   packages: write
 
+# Push nhiều commit sát nhau: tự huỷ run cũ còn đang chạy trên cùng branch,
+# chỉ commit mới nhất build + deploy (tránh build/deploy trùng lặp).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ci:
     name: Continuous Integration
