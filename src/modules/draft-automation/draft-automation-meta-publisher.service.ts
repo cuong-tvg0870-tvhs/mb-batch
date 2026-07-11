@@ -139,6 +139,54 @@ export class DraftAutomationMetaPublisherService {
       return { skipped: true, reason: 'MIN_CONTENTS_NOT_MET' };
     }
 
+    // CHỐT CHẶN GIÁ THẦU (parity mb-ads validateLaunchReadiness): Meta bắt buộc chiến
+    // lược "Giới hạn giá thầu" (LOWEST_COST_WITH_BID_CAP) / "Chi phí mục tiêu"
+    // (COST_CAP, bí danh Meta TARGET_COST) phải kèm bid_amount; "Mục tiêu ROAS"
+    // (LOWEST_COST_WITH_MIN_ROAS) phải kèm bid_constraints.roas_average_floor. Thiếu →
+    // Meta từ chối cả nhóm với lỗi khó hiểu. Bản đăng tay chặn; cron cũng phải chặn.
+    // Bỏ qua SỚM (KHÔNG tự sửa chiến lược để tránh đổi ngầm hành vi chi tiêu), KHÔNG
+    // claim, KHÔNG tạo gì trên Meta. Dưới CBO giá thầu khai ở campaign; ABO ở ad set.
+    const campaignBidData: any =
+      (CleanObjectOrArray(campaignSystem.data || {}) as any)?.campaign ||
+      (CleanObjectOrArray(campaignSystem.data || {}) as any) ||
+      {};
+    const isCboBid = !!(
+      campaignBidData.campaign_budget_optimization ||
+      campaignBidData.daily_budget ||
+      campaignBidData.lifetime_budget
+    );
+    const CAP_BID_STRATEGIES = [
+      'LOWEST_COST_WITH_BID_CAP',
+      'COST_CAP',
+      'TARGET_COST',
+    ];
+    const hasBidAmountGap = (campaignSystem.ad_sets || []).some((adSet) => {
+      const asData: any = (CleanObjectOrArray((adSet.data as any) || {}) ||
+        {}) as any;
+      const strat = String(
+        (isCboBid ? campaignBidData.bid_strategy : asData.bid_strategy) || '',
+      );
+      if (CAP_BID_STRATEGIES.includes(strat)) {
+        const amount = isCboBid
+          ? asData.bid_amount || campaignBidData.bid_amount
+          : asData.bid_amount;
+        return !(Number(amount) > 0);
+      }
+      if (strat === 'LOWEST_COST_WITH_MIN_ROAS') {
+        const floor =
+          asData?.bid_constraints?.roas_average_floor ??
+          campaignBidData?.bid_constraints?.roas_average_floor;
+        return !(Number(floor) > 0);
+      }
+      return false;
+    });
+    if (hasBidAmountGap) {
+      this.logger.warn(
+        `Bỏ qua publish draft ${campaignSystem.id}: có nhóm dùng chiến lược giá thầu cần số tiền (giới hạn giá thầu / chi phí mục tiêu / ROAS) nhưng chưa nhập — Meta sẽ từ chối.`,
+      );
+      return { skipped: true, reason: 'BID_AMOUNT_MISSING' };
+    }
+
     const data = this.clone(
       CleanObjectOrArray(campaignSystem.data || {}) || {},
     );
