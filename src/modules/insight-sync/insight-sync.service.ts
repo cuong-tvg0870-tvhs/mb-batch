@@ -20,6 +20,11 @@ import {
 import { MetaApiService } from '../meta-api/meta-api.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { InsightSyncLevel, InsightSyncRange } from './insight-sync.constants';
+import {
+  aggregateDailyInsights,
+  extractCustomEventType,
+  type EntityGoalInfo,
+} from '../../common/metrics/insight-metrics';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -572,6 +577,117 @@ export class InsightSyncService {
     }
   }
 
+  /**
+   * Bản đồ entityId → optimization_goal (+ custom_event_type) để tính "results"
+   * theo đúng mục tiêu tối ưu (bản đồ ODAX). AdSet lấy trực tiếp; Ad lấy từ AdSet
+   * cha; Campaign lấy goal PHỔ BIẾN nhất trong các AdSet con (single-goal camp —
+   * đa số — thì đếm trên actions của camp ≈ ∑ kết quả con). Thiếu goal → aggregator
+   * tự fallback định nghĩa cũ.
+   */
+  private async resolveEntityGoals(
+    accountId: string,
+    level: InsightSyncLevel,
+  ): Promise<Map<string, EntityGoalInfo>> {
+    const map = new Map<string, EntityGoalInfo>();
+
+    if (level === InsightSyncLevel.ADSET) {
+      const adsets = await this.prisma.adSet.findMany({
+        where: { accountId },
+        select: { id: true, optimizationGoal: true, rawPayload: true },
+      });
+      for (const a of adsets) {
+        map.set(a.id, {
+          optimizationGoal: a.optimizationGoal,
+          customEventType: extractCustomEventType(a.rawPayload),
+        });
+      }
+      return map;
+    }
+
+    if (level === InsightSyncLevel.AD) {
+      const adsets = await this.prisma.adSet.findMany({
+        where: { accountId },
+        select: { id: true, optimizationGoal: true, rawPayload: true },
+      });
+      const adsetGoal = new Map<string, EntityGoalInfo>();
+      for (const a of adsets) {
+        adsetGoal.set(a.id, {
+          optimizationGoal: a.optimizationGoal,
+          customEventType: extractCustomEventType(a.rawPayload),
+        });
+      }
+      const ads = await this.prisma.ad.findMany({
+        where: { accountId },
+        select: { id: true, adsetId: true },
+      });
+      for (const ad of ads) {
+        map.set(ad.id, adsetGoal.get(ad.adsetId) || {});
+      }
+      return map;
+    }
+
+    // CAMPAIGN — goal phổ biến nhất trong các adset con.
+    const adsets = await this.prisma.adSet.findMany({
+      where: { accountId },
+      select: { campaignId: true, optimizationGoal: true, rawPayload: true },
+    });
+    const tally = new Map<string, Map<string, number>>();
+    const sampleRaw = new Map<string, EntityGoalInfo>();
+    for (const a of adsets) {
+      if (!a.campaignId || !a.optimizationGoal) continue;
+      if (!tally.has(a.campaignId)) tally.set(a.campaignId, new Map());
+      const goals = tally.get(a.campaignId)!;
+      goals.set(a.optimizationGoal, (goals.get(a.optimizationGoal) || 0) + 1);
+      const sampleKey = `${a.campaignId}:${a.optimizationGoal}`;
+      if (!sampleRaw.has(sampleKey)) {
+        sampleRaw.set(sampleKey, {
+          optimizationGoal: a.optimizationGoal,
+          customEventType: extractCustomEventType(a.rawPayload),
+        });
+      }
+    }
+    for (const [campaignId, goals] of tally.entries()) {
+      let topGoal = '';
+      let topCount = -1;
+      for (const [g, c] of goals.entries()) {
+        if (c > topCount) {
+          topCount = c;
+          topGoal = g;
+        }
+      }
+      map.set(
+        campaignId,
+        sampleRaw.get(`${campaignId}:${topGoal}`) || {
+          optimizationGoal: topGoal,
+        },
+      );
+    }
+    return map;
+  }
+
+  /** Goal phổ biến nhất trong 1 tập entity (dùng cho creative gộp nhiều ad). */
+  private dominantGoal(
+    infos: Array<EntityGoalInfo | undefined>,
+  ): EntityGoalInfo {
+    const tally = new Map<string, number>();
+    const sample = new Map<string, EntityGoalInfo>();
+    for (const info of infos) {
+      const g = info?.optimizationGoal;
+      if (!g) continue;
+      tally.set(g, (tally.get(g) || 0) + 1);
+      if (!sample.has(g)) sample.set(g, info!);
+    }
+    let topGoal = '';
+    let topCount = -1;
+    for (const [g, c] of tally.entries()) {
+      if (c > topCount) {
+        topCount = c;
+        topGoal = g;
+      }
+    }
+    return sample.get(topGoal) || {};
+  }
+
   private async rollupLevelInsights(
     accountId: string,
     level: InsightSyncLevel,
@@ -580,6 +696,8 @@ export class InsightSyncService {
   ) {
     const windows = this.getRequestedWindows(ranges, tz);
     if (windows.length === 0) return;
+
+    const goalMap = await this.resolveEntityGoals(accountId, level);
 
     this.logger.log(
       `[${accountId}] Rolling up ${level} insights for ${windows.map((w) => w.range).join(', ')}...`,
@@ -690,8 +808,9 @@ export class InsightSyncService {
       for (const parent of parentChunk) {
         const parentDaily = dailyMap.get(parent.id) || [];
 
+        const goalInfo = goalMap.get(parent.id) || {};
+
         for (const window of windows) {
-          const bucket: Record<string, number> = {};
           const matchingDaily = parentDaily.filter((insight) =>
             this.isInsightInWindow(insight, window),
           );
@@ -708,11 +827,14 @@ export class InsightSyncService {
             }
           }
 
-          for (const insight of matchingDaily) {
-            this.sumMetrics(bucket, insight);
-          }
-
-          this.recalculateDerivedMetrics(bucket);
+          // Tổng hợp đúng chiến lược từng field (results theo goal, dedup
+          // purchase, reach≈, weighted-avg video, snapshot ranking).
+          const bucket = aggregateDailyInsights(matchingDaily, {
+            optimizationGoal: goalInfo.optimizationGoal,
+            customEventType: goalInfo.customEventType,
+          });
+          // approxReach KHÔNG phải cột DB — FE tự suy theo range (đa ngày = ≈).
+          delete (bucket as Record<string, unknown>).approxReach;
 
           const dateStart =
             window.range === InsightRange.MAX
@@ -1344,6 +1466,10 @@ export class InsightSyncService {
 
     if (windows.length === 0) return;
 
+    // Creative gộp nhiều ad (có thể khác adset/goal) → dùng goal PHỔ BIẾN nhất
+    // trong các ad của creative để tính "results" (đa số creative cùng goal).
+    const adGoalMap = await this.resolveEntityGoals(accountId, InsightSyncLevel.AD);
+
     const creatives = await this.prisma.creative.findMany({
       where: { accountId },
       select: {
@@ -1453,10 +1579,12 @@ export class InsightSyncService {
         const creativeDaily = creative.ads.flatMap(
           (ad) => adInsightMap.get(ad.id) || [],
         );
-        const rangeBuckets = new Map<InsightRange, Record<string, number>>();
+        const goalInfo = this.dominantGoal(
+          creative.ads.map((ad) => adGoalMap.get(ad.id)),
+        );
+        const rangeBuckets = new Map<InsightRange, Record<string, any>>();
 
         for (const window of windows) {
-          const bucket: Record<string, number> = {};
           const matchingDaily = creativeDaily.filter((insight) =>
             this.isInsightInWindow(insight, window),
           );
@@ -1472,11 +1600,11 @@ export class InsightSyncService {
             }
           }
 
-          for (const insight of matchingDaily) {
-            this.sumMetrics(bucket, insight);
-          }
-
-          this.recalculateDerivedMetrics(bucket);
+          const bucket = aggregateDailyInsights(matchingDaily, {
+            optimizationGoal: goalInfo.optimizationGoal,
+            customEventType: goalInfo.customEventType,
+          });
+          delete (bucket as Record<string, unknown>).approxReach;
           rangeBuckets.set(window.range, bucket);
 
           const dateStart =
@@ -1524,32 +1652,36 @@ export class InsightSyncService {
         // wrote these, so the creative detail DAILY chart was always empty.
         // Upserted by the unique (creativeId, dateStart, range) key; DAILY rows
         // carry no pointer field, so the cleanup step below never touches them.
-        const creativeDailyBuckets = new Map<
+        const creativeDailyByDate = new Map<
           string,
-          { dateStop: string; data: Record<string, number> }
+          { dateStop: string; rows: any[] }
         >();
         for (const insight of creativeDaily) {
           if (!insight.dateStart) continue;
-          if (!creativeDailyBuckets.has(insight.dateStart)) {
-            creativeDailyBuckets.set(insight.dateStart, {
+          if (!creativeDailyByDate.has(insight.dateStart)) {
+            creativeDailyByDate.set(insight.dateStart, {
               dateStop: insight.dateStop || insight.dateStart,
-              data: {},
+              rows: [],
             });
           }
-          const current = creativeDailyBuckets.get(insight.dateStart)!;
+          const current = creativeDailyByDate.get(insight.dateStart)!;
           const stop = insight.dateStop || insight.dateStart;
           if (stop > current.dateStop) current.dateStop = stop;
-          this.sumMetrics(current.data, insight);
+          current.rows.push(insight);
         }
-        for (const [dateStart, dailyBucket] of creativeDailyBuckets.entries()) {
-          this.recalculateDerivedMetrics(dailyBucket.data);
+        for (const [dateStart, dailyBucket] of creativeDailyByDate.entries()) {
+          const data = aggregateDailyInsights(dailyBucket.rows, {
+            optimizationGoal: goalInfo.optimizationGoal,
+            customEventType: goalInfo.customEventType,
+          });
+          delete (data as Record<string, unknown>).approxReach;
           rollupRecords.push({
             creativeId: creative.id,
             level: LevelInsight.AD,
             range: InsightRange.DAILY,
             dateStart,
             dateStop: dailyBucket.dateStop,
-            ...dailyBucket.data,
+            ...data,
           });
         }
 

@@ -1,0 +1,487 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { AdSet, Campaign, FacebookAdsApi } from 'facebook-nodejs-business-sdk';
+import { parseMetaError } from '../../common/utils';
+import { DistributedLockService } from '../distributed-lock/distributed-lock.service';
+import { PrismaService } from '../prisma/prisma.service';
+import {
+  DEFAULT_TIMEZONE,
+  INSIGHT_FIELDS,
+  MAX_GROUP_DEPTH,
+  RULE_LOCK_TTL_SECONDS,
+} from './campaign-rule-runner.constants';
+import { EvalContext, evaluateGroup } from './campaign-rule-evaluator';
+import { buildSpecs, executeBudgetSchedule } from './campaign-rule-executor';
+import { resolveMetric } from './campaign-rule-metric.resolver';
+import {
+  alignedNow,
+  dedupeKey,
+  isRuleDue,
+} from './campaign-rule-schedule.util';
+
+/** Include đệ quy cây group điều kiện tới độ sâu cố định (Prisma cần depth hữu hạn). */
+function groupInclude(depth: number): any {
+  if (depth <= 0) return { conditions: true };
+  return {
+    conditions: true,
+    childGroups: { include: groupInclude(depth - 1) },
+  };
+}
+
+/** Entity tối giản mà runner cần để đánh giá + thực thi. */
+interface RunnerEntity {
+  id: string;
+  name?: string | null;
+  dailyBudget?: number | null;
+  lifetimeBudget?: number | null;
+}
+
+/**
+ * Runner "campaign rule": cron quét rule ACTIVE, chạy nhánh "Theo điều kiện".
+ *
+ * Ràng buộc:
+ * - Chỉ đọc/ghi bảng campaign_rule* + đọc Campaign/AdSet/Account. KHÔNG đụng Automation*.
+ * - Chỉ action BUDGET_SCHEDULE_BUMP; chỉ level CAMPAIGN + ADSET. Các trường hợp khác → SKIPPED/log.
+ * - Idempotent qua dedupeKey (unique trên CampaignRuleRun).
+ * - Metric LIVE fetch trực tiếp từ Meta (date_preset=today), KHÔNG đọc insight cache DB.
+ */
+@Injectable()
+export class CampaignRuleRunnerService {
+  private readonly logger = new Logger(CampaignRuleRunnerService.name);
+  private metaInitialized = false;
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly lock: DistributedLockService,
+  ) {}
+
+  private initMetaApi() {
+    if (this.metaInitialized) return;
+    const token = process.env.SDK_FACEBOOK_ACCESS_TOKEN;
+    if (!token) {
+      throw new Error('SDK_FACEBOOK_ACCESS_TOKEN is missing in environment');
+    }
+    FacebookAdsApi.init(token);
+    this.metaInitialized = true;
+  }
+
+  /** Điểm vào từ scheduler: quét mọi rule ACTIVE, xử lý rule nào đến hạn. */
+  async runDueRules(): Promise<void> {
+    this.initMetaApi();
+    const now = new Date();
+
+    const rules = await this.prisma.campaignRule.findMany({
+      where: {
+        status: 'ACTIVE',
+        deletedAt: null,
+        schedule: { isNot: null },
+      },
+      include: {
+        schedule: true,
+        tasks: {
+          orderBy: { position: 'asc' },
+          include: { rootGroup: { include: groupInclude(MAX_GROUP_DEPTH) } },
+        },
+      },
+    });
+
+    if (rules.length === 0) return;
+    this.logger.log(`🔎 Quét ${rules.length} campaign rule ACTIVE...`);
+
+    for (const rule of rules) {
+      try {
+        await this.processRule(rule, now);
+      } catch (error) {
+        this.logger.error(
+          `Rule ${rule.id} (${rule.name}) lỗi: ${error?.message || error}`,
+        );
+      }
+    }
+  }
+
+  /** Kiểm tra dueness rồi chạy dưới khóa phân tán chống chồng cross-replica. */
+  private async processRule(rule: any, now: Date): Promise<void> {
+    const schedule = rule.schedule;
+    if (!schedule) return;
+
+    const timezone = await this.resolveTimezone(rule);
+    const lastRunAt = await this.getLastRunAt(rule.id);
+    const dueness = isRuleDue(schedule, lastRunAt, now, timezone);
+
+    if (!dueness.due) {
+      if (dueness.outOfDateRange) {
+        this.logger.debug(
+          `Rule ${rule.id} ngoài khoảng ngày hiệu lực → bỏ qua.`,
+        );
+      }
+      return;
+    }
+
+    const aligned = dueness.aligned || alignedNow(now);
+    const key = dedupeKey(rule.id, rule.accountId, aligned);
+
+    await this.lock.runExclusive(
+      `crr:${rule.id}`,
+      RULE_LOCK_TTL_SECONDS,
+      async () => {
+        await this.executeRun(rule, timezone, aligned, key, now);
+      },
+    );
+  }
+
+  /** Tạo run (idempotent) rồi đánh giá + thực thi từng entity. */
+  private async executeRun(
+    rule: any,
+    timezone: string,
+    aligned: Date,
+    key: string,
+    now: Date,
+  ): Promise<void> {
+    let run;
+    try {
+      run = await this.prisma.campaignRuleRun.create({
+        data: {
+          ruleId: rule.id,
+          accountId: rule.accountId,
+          scheduledFor: aligned,
+          startedAt: new Date(),
+          dedupeKey: key,
+          status: 'RUNNING',
+          ruleSnapshot: {
+            name: rule.name,
+            level: rule.level,
+            autoExecute: rule.autoExecute,
+            timezone,
+          },
+        },
+      });
+    } catch (error) {
+      // Unique dedupeKey trùng → một tick/replica khác đã tạo run cho slot này.
+      if (error?.code === 'P2002') {
+        this.logger.log(
+          `Rule ${rule.id} slot ${key} đã có run → SKIPPED_OVERLAP.`,
+        );
+        return;
+      }
+      throw error;
+    }
+
+    let entitiesScanned = 0;
+    let matchedCount = 0;
+    let errorsCount = 0;
+    let fatalError: string | null = null;
+
+    try {
+      // Chỉ hỗ trợ level CAMPAIGN + ADSET, và cần campaignId để scope.
+      if (rule.level !== 'CAMPAIGN' && rule.level !== 'ADSET') {
+        this.logger.warn(
+          `Rule ${rule.id} level ${rule.level} chưa hỗ trợ (chỉ CAMPAIGN/ADSET) → bỏ qua.`,
+        );
+      } else if (!rule.campaignId) {
+        this.logger.warn(
+          `Rule ${rule.id} level ${rule.level} thiếu campaignId (phủ cả account) chưa hỗ trợ → bỏ qua.`,
+        );
+      } else {
+        const entities = await this.loadEntities(rule);
+        for (const entity of entities) {
+          entitiesScanned += 1;
+          const res = await this.processEntity(rule, run.id, entity, timezone, now);
+          matchedCount += res.matched;
+          errorsCount += res.errors;
+        }
+      }
+    } catch (error) {
+      fatalError = parseMetaError(error).message || String(error);
+      this.logger.error(`Rule ${rule.id} run ${run.id} lỗi: ${fatalError}`);
+    }
+
+    await this.prisma.campaignRuleRun.update({
+      where: { id: run.id },
+      data: {
+        status: fatalError ? 'FAILED' : 'COMPLETED',
+        finishedAt: new Date(),
+        entitiesScanned,
+        matchedCount,
+        errorsCount,
+        errorMessage: fatalError,
+      },
+    });
+
+    this.logger.log(
+      `✅ Rule ${rule.id} run ${run.id}: quét ${entitiesScanned}, khớp ${matchedCount}, lỗi ${errorsCount}.`,
+    );
+  }
+
+  /** Nạp entity cần đánh giá theo level. */
+  private async loadEntities(rule: any): Promise<RunnerEntity[]> {
+    if (rule.level === 'CAMPAIGN') {
+      const campaign = await this.prisma.campaign.findUnique({
+        where: { id: rule.campaignId },
+        select: {
+          id: true,
+          name: true,
+          dailyBudget: true,
+          lifetimeBudget: true,
+        },
+      });
+      return campaign ? [campaign] : [];
+    }
+    // ADSET: mọi ad set thuộc campaign này (bỏ ad set đã xoá mềm).
+    return this.prisma.adSet.findMany({
+      where: { campaignId: rule.campaignId, deletedAt: null },
+      select: {
+        id: true,
+        name: true,
+        dailyBudget: true,
+        lifetimeBudget: true,
+      },
+    });
+  }
+
+  /**
+   * Fetch insight live cho 1 entity, đánh giá MỌI task, ghi item tương ứng.
+   * Lỗi fetch insight → tất cả task của entity đó thành FAILED (không làm hỏng entity khác).
+   */
+  private async processEntity(
+    rule: any,
+    runId: string,
+    entity: RunnerEntity,
+    timezone: string,
+    now: Date,
+  ): Promise<{ matched: number; errors: number }> {
+    const level: 'CAMPAIGN' | 'ADSET' = rule.level;
+    let insight: any;
+    try {
+      insight = await this.fetchLiveInsight(level, entity.id);
+    } catch (error) {
+      const msg = parseMetaError(error).message;
+      this.logger.warn(
+        `Lấy insight ${level} ${entity.id} lỗi: ${msg} → item FAILED.`,
+      );
+      let errors = 0;
+      for (const task of rule.tasks) {
+        errors += 1;
+        await this.createItem({
+          runId,
+          task,
+          level,
+          entity,
+          status: 'FAILED',
+          snapshot: { budgets: this.budgetSnapshot(entity) },
+          changePreview: {},
+          evaluation: { matched: false, insightError: msg },
+          errorMessage: `Lỗi lấy insight: ${msg}`,
+        });
+      }
+      return { matched: 0, errors };
+    }
+
+    const ctx: EvalContext = { insight, entity, now, timezone };
+    let matched = 0;
+    let errors = 0;
+
+    for (const task of rule.tasks) {
+      // Chỉ hỗ trợ BUDGET_SCHEDULE_BUMP.
+      if (task.kind !== 'BUDGET_SCHEDULE_BUMP') {
+        this.logger.log(
+          `Task ${task.id} kind ${task.kind} chưa hỗ trợ → SKIPPED.`,
+        );
+        await this.createItem({
+          runId,
+          task,
+          level,
+          entity,
+          status: 'SKIPPED',
+          snapshot: this.buildSnapshot(insight, entity),
+          changePreview: {},
+          evaluation: null,
+          errorMessage: `Task kind ${task.kind} chưa hỗ trợ (chỉ BUDGET_SCHEDULE_BUMP).`,
+        });
+        continue;
+      }
+
+      const isMatched = evaluateGroup(task.rootGroup, ctx);
+      const snapshot = this.buildSnapshot(insight, entity);
+      // % (MULTIPLIER) quy đổi theo ngân sách THẬT của chính đối tượng đang xét.
+      const targetBudget = entity?.dailyBudget ?? entity?.lifetimeBudget ?? null;
+      const specs = buildSpecs(task.params?.periods, targetBudget);
+      const changePreview = { budget_schedule_specs: specs };
+
+      if (!isMatched) {
+        await this.createItem({
+          runId,
+          task,
+          level,
+          entity,
+          status: 'NOT_MATCHED',
+          snapshot,
+          changePreview,
+          evaluation: { matched: false },
+        });
+        continue;
+      }
+
+      matched += 1;
+
+      if (rule.autoExecute) {
+        const result = await executeBudgetSchedule(level, entity.id, specs);
+        if (result.ok) {
+          await this.createItem({
+            runId,
+            task,
+            level,
+            entity,
+            status: 'EXECUTED',
+            snapshot,
+            changePreview,
+            evaluation: { matched: true },
+            matchedConditionSummary: 'Khớp điều kiện → đã đẩy budget schedule.',
+            executedAt: new Date(),
+            executionAttempts: 1,
+            metaTraceId: result.metaTraceId,
+            metaBudgetScheduleIds: result.scheduleIds,
+          });
+        } else {
+          errors += 1;
+          await this.createItem({
+            runId,
+            task,
+            level,
+            entity,
+            status: 'FAILED',
+            snapshot,
+            changePreview,
+            evaluation: { matched: true },
+            matchedConditionSummary: 'Khớp điều kiện nhưng đẩy Meta thất bại.',
+            errorMessage:
+              result.error?.message || 'Đẩy budget schedule thất bại.',
+            executionAttempts: 1,
+            executionError: result.error,
+            metaTraceId: result.metaTraceId,
+            metaBudgetScheduleIds: result.scheduleIds,
+          });
+        }
+      } else {
+        await this.createItem({
+          runId,
+          task,
+          level,
+          entity,
+          status: 'PENDING',
+          snapshot,
+          changePreview,
+          evaluation: { matched: true },
+          matchedConditionSummary: 'Khớp điều kiện → chờ xác nhận.',
+        });
+      }
+    }
+
+    return { matched, errors };
+  }
+
+  /** Fetch insight LIVE (date_preset=today) cho campaign/adset. Trả object phẳng (rỗng nếu không có). */
+  private async fetchLiveInsight(
+    level: 'CAMPAIGN' | 'ADSET',
+    entityId: string,
+  ): Promise<any> {
+    const params = { date_preset: 'today' };
+    const rows =
+      level === 'CAMPAIGN'
+        ? await new Campaign(entityId).getInsights(INSIGHT_FIELDS, params)
+        : await new AdSet(entityId).getInsights(INSIGHT_FIELDS, params);
+    const first = Array.isArray(rows) ? rows[0] : rows?.[0];
+    if (!first) return {};
+    return first._data || first;
+  }
+
+  /** Snapshot metric đọc được + ngân sách, để UI log-detail hiển thị. */
+  private buildSnapshot(insight: any, entity: RunnerEntity) {
+    const metrics: Record<string, number | null> = {};
+    for (const key of [
+      'spend',
+      'impressions',
+      'reach',
+      'frequency',
+      'clicks',
+      'ctr',
+      'cpc',
+      'cpm',
+      'purchase_roas',
+      'purchases',
+    ]) {
+      metrics[key] = resolveMetric(key, insight, entity);
+    }
+    return { metrics, budgets: this.budgetSnapshot(entity) };
+  }
+
+  private budgetSnapshot(entity: RunnerEntity) {
+    return {
+      dailyBudget: entity?.dailyBudget ?? null,
+      lifetimeBudget: entity?.lifetimeBudget ?? null,
+    };
+  }
+
+  /** Ghi một CampaignRuleRunItem. Gom mọi field optional để giữ call-site gọn. */
+  private async createItem(args: {
+    runId: string;
+    task: any;
+    level: 'CAMPAIGN' | 'ADSET';
+    entity: RunnerEntity;
+    status: string;
+    snapshot: any;
+    changePreview: any;
+    evaluation: any;
+    matchedConditionSummary?: string;
+    errorMessage?: string;
+    executedAt?: Date;
+    executionAttempts?: number;
+    executionError?: any;
+    metaTraceId?: string;
+    metaBudgetScheduleIds?: string[];
+  }): Promise<void> {
+    await this.prisma.campaignRuleRunItem.create({
+      data: {
+        runId: args.runId,
+        taskId: args.task?.id ?? null,
+        taskKind: args.task?.kind ?? null,
+        level: args.level as any,
+        entityId: args.entity.id,
+        entityName: args.entity.name || args.entity.id,
+        status: args.status as any,
+        snapshot: args.snapshot ?? {},
+        changePreview: args.changePreview ?? {},
+        evaluation: args.evaluation ?? null,
+        matchedConditionSummary: args.matchedConditionSummary ?? null,
+        errorMessage: args.errorMessage ?? null,
+        executedAt: args.executedAt ?? null,
+        executionAttempts: args.executionAttempts ?? 0,
+        executionError: args.executionError ?? null,
+        metaTraceId: args.metaTraceId ?? null,
+        metaBudgetScheduleIds: args.metaBudgetScheduleIds ?? [],
+      },
+    });
+  }
+
+  /** lastRunAt = max(scheduledFor) của các run trước đó của rule. */
+  private async getLastRunAt(ruleId: string): Promise<Date | null> {
+    const last = await this.prisma.campaignRuleRun.findFirst({
+      where: { ruleId },
+      orderBy: { scheduledFor: 'desc' },
+      select: { scheduledFor: true },
+    });
+    return last?.scheduledFor ?? null;
+  }
+
+  /** rule.timezone hoặc, nếu "account", tz của ad account (fallback default). */
+  private async resolveTimezone(rule: any): Promise<string> {
+    if (rule.timezone && rule.timezone !== 'account') return rule.timezone;
+    try {
+      const account = await this.prisma.account.findUnique({
+        where: { id: rule.accountId },
+        select: { timezone: true },
+      });
+      return account?.timezone || DEFAULT_TIMEZONE;
+    } catch {
+      return DEFAULT_TIMEZONE;
+    }
+  }
+}

@@ -20,6 +20,7 @@ import {
   CAMPAIGN_FIELDS,
   CREATIVE_FIELDS,
 } from '../../common/utils/meta-field';
+import { CampaignRuleSyncService } from '../campaign-rule-runner/campaign-rule-sync.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { META_SYNC_CONFIG } from './meta-sync.constants';
 
@@ -46,7 +47,10 @@ type EntityChanges<T> = { creates: T[]; updates: T[] };
 export class MetaSyncService {
   private readonly logger = new Logger(MetaSyncService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly ruleSyncService: CampaignRuleSyncService,
+  ) {}
 
   /** Ad fields plus the nested creative sub-tree, built once and reused. */
   private readonly adFieldsWithCreative = [
@@ -591,6 +595,16 @@ export class MetaSyncService {
             skipDuplicates: true,
           });
         }
+      }
+    }
+
+    // Đồng bộ NGƯỢC budget schedules từ Meta vào bản ghi "gương" campaign_rule.
+    // CHỈ chạy cho campaign đang bật lịch ngân sách (is_budget_schedule_enabled)
+    // để tránh gọi Meta API thừa cho mọi campaign (batch nhiều + rate limit).
+    // reconcileFromMeta tự nuốt lỗi → 1 campaign lỗi không làm hỏng cả job sync.
+    for (const c of uniqueCampaigns) {
+      if (c?.is_budget_schedule_enabled === true) {
+        await this.ruleSyncService.reconcileFromMeta(c.id);
       }
     }
 

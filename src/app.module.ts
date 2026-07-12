@@ -4,6 +4,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { configLoads } from './config';
 import { BatchRunLogModule } from './modules/batch-run-log/batch-run-log.module';
+import { CampaignRuleRunnerModule } from './modules/campaign-rule-runner/campaign-rule-runner.module';
 import { DistributedLockModule } from './modules/distributed-lock/distributed-lock.module';
 import { DraftAutomationModule } from './modules/draft-automation/draft-automation.module';
 import { EntitySyncModule } from './modules/entity-sync/entity-sync.module';
@@ -55,6 +56,7 @@ export const global_modules = [
     MetaMediaUploadModule,
     HelpAiModule,
     UserLarkSyncModule,
+    CampaignRuleRunnerModule,
   ],
 })
 export class AppModule implements OnModuleInit {

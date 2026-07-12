@@ -167,6 +167,7 @@ model User {
   folderMembers  FolderMember[]
   savedFilters   SavedFilter[]
   exportPresets  ExportPreset[]
+  metricPresets  MetricPreset[]
 
   messageTemplates MessageTemplate[] @relation("UserMessageTemplates")
 
@@ -2338,6 +2339,26 @@ model ExportPreset {
   @@index([userId, exportType])
 }
 
+/// Bộ chỉ số insight tùy biến của TỪNG user cho màn list/detail (campaign/adset/
+/// ad/creative). `scope` = định danh màn (vd "campaign-list", "adset-detail").
+/// `metrics` (Json) = mảng key metric theo thứ tự (khớp INSIGHT_METRIC_REGISTRY).
+/// `isDefault` đánh dấu bộ mặc định của user cho scope đó. Additive, không đụng
+/// model legacy — theo mẫu SavedFilter (có PATCH).
+model MetricPreset {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  scope     String
+  name      String
+  metrics   Json
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, scope, name])
+  @@index([userId, scope])
+}
+
 enum ContributionType {
   PRAISE
   CRITICISM
@@ -2802,6 +2823,7 @@ enum CustomMetricScope {
   GLOBAL
   AD_ACCOUNT
   CATEGORY
+  USER
 }
 
 enum CustomMetricFormat {
@@ -3213,4 +3235,319 @@ model MetaConnection {
   updatedAt DateTime @updatedAt
 
   @@index([status])
+}
+
+// ==========================================================================
+// CAMPAIGN RULE ENGINE (MB-owned)
+// --------------------------------------------------------------------------
+// Rule-engine kiểu Bir.ch/Care Ads NHƯNG là bảng RIÊNG của MB, tiền tố
+// `campaign_rule_*`. Cách ly HOÀN TOÀN khỏi block `Automation*` phía trên vì
+// Care Ads đang chạy live trên CÙNG một Postgres (schema public) — nếu ghi
+// chung bảng, runner Care Ads sẽ nuốt rule của MB và ngược lại.
+//
+// Điểm khác Automation* (đơn giản hoá + tái sử dụng được):
+//   - Bỏ category/folder. Thay bằng scalar FK `accountId` (bắt buộc) + `campaignId`
+//     (tuỳ chọn) để "pin" rule vào 1 campaign khi mở từ campaign detail. `campaignId`
+//     null = rule phủ cả ad account (tái dùng ở scope rộng hơn về sau).
+//   - Mỗi rule gắn 1 ad account (không junction đa-account) — đủ cho use case
+//     campaign detail; muốn đa-account sau này thì thêm junction additive.
+//   - Cây điều kiện + task + schedule + run/run-item GIỮ NGUYÊN shape để engine
+//     đủ tổng quát cho mọi action (DUPLICATE/scale, ±budget, START/PAUSE…).
+//
+// Enum RIÊNG (tiền tố CampaignRule*) — KHÔNG dùng chung enum Automation* của Care
+// Ads để cụm này tự tiến hoá độc lập. CampaignRuleTaskKind là SUPERSET: gồm 13
+// action gốc + 2 action MB-native (BUDGET_SCHEDULE_BUMP, LAUNCH_FROM_TEMPLATE) mà
+// enum Care Ads không có.
+// ==========================================================================
+
+enum CampaignRuleStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+}
+
+enum CampaignRuleLevel {
+  AD_ACCOUNT
+  CAMPAIGN
+  ADSET
+  AD
+}
+
+enum CampaignRuleScheduleType {
+  INTERVAL
+  SPECIFIC
+}
+
+enum CampaignRuleGroupOperator {
+  AND
+  OR
+}
+
+enum CampaignRuleCompareType {
+  VALUE
+  METRIC
+  RANKING
+  TIME
+}
+
+enum CampaignRuleTaskKind {
+  START
+  PAUSE
+  DUPLICATE
+  NOTIFY
+  INCREASE_BUDGET
+  DECREASE_BUDGET
+  SET_SPENDING_LIMITS
+  REMOVE_SPENDING_LIMITS
+  INCREASE_SPENDING_LIMITS
+  DECREASE_SPENDING_LIMITS
+  ADD_TO_NAME
+  REMOVE_FROM_NAME
+  REPLACE_TEXT_IN_NAME
+  // MB-native (không có trong enum Care Ads):
+  BUDGET_SCHEDULE_BUMP // đẩy Meta budget_schedule_specs theo khung giờ, Meta tự revert
+  LAUNCH_FROM_TEMPLATE // lên campaign mới từ template MB; entity khớp chỉ là trigger
+}
+
+enum CampaignRuleRunStatus {
+  RUNNING
+  COMPLETED
+  FAILED
+  SKIPPED_OVERLAP
+  SKIPPED_OUT_OF_DATE_RANGE
+}
+
+enum CampaignRuleRunItemStatus {
+  NOT_MATCHED
+  PENDING
+  CONFIRMED
+  REJECTED
+  EXPIRED
+  EXECUTED
+  FAILED
+  SKIPPED
+}
+
+model CampaignRule {
+  id     String             @id @default(uuid())
+  name   String
+  status CampaignRuleStatus @default(DRAFT)
+  level  CampaignRuleLevel
+
+  // Scope. `accountId` = Account.id (scalar FK, model ngoài cụm này).
+  // `campaignId` = Campaign.id — pin rule vào 1 campaign khi mở từ campaign detail;
+  // null = phủ cả ad account.
+  accountId  String
+  campaignId String?
+
+  timezone            String // IANA name, hoặc sentinel "account" (resolve theo tz ad account lúc chạy)
+  notifyErrorsOnly    Boolean                   @default(false)
+  filterGroupOperator CampaignRuleGroupOperator @default(OR)
+  position            Int                       @default(0)
+
+  useAdSetAttributionWindow Boolean @default(true)
+  attributionWindow         String?
+
+  // true = runner tự confirm + đẩy Meta ngay khi khớp (không cần user duyệt tay).
+  autoExecute Boolean @default(false)
+
+  // true = bản ghi "gương" phản chiếu budget schedules đang có trên Meta (được các
+  // job sync campaign upsert). Mỗi campaign có tối đa 1 bản syncedFromMeta để giữ
+  // đồng bộ 1-1 với Meta. Bản do user "Gửi ngay" tạo = false.
+  syncedFromMeta Boolean @default(false)
+
+  schedule     CampaignRuleSchedule?
+  filterGroups CampaignRuleFilterGroup[]
+  tasks        CampaignRuleTask[]
+  runs         CampaignRuleRun[]
+
+  createdById String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  @@index([campaignId, status])
+  @@index([accountId, updatedAt(sort: Desc)])
+  @@index([createdById, updatedAt(sort: Desc)])
+  @@map("campaign_rule")
+}
+
+model CampaignRuleSchedule {
+  id     String       @id @default(uuid())
+  ruleId String       @unique
+  rule   CampaignRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  type          CampaignRuleScheduleType @default(INTERVAL)
+  interval      String? // "15m","30m","60m","3h","6h","12h","24h","36h","72h"
+  specificSlots Json? // Record<"sun".."sat", string[]> — slot "HH:MM"
+  useDateRange  Boolean                  @default(false)
+  dateFrom      DateTime?
+  dateTo        DateTime?
+
+  @@map("campaign_rule_schedule")
+}
+
+model CampaignRuleFilterGroup {
+  id       String                  @id @default(uuid())
+  ruleId   String
+  rule     CampaignRule            @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  operator CampaignRuleGroupOperator @default(AND)
+  position Int                     @default(0)
+
+  filters CampaignRuleFilter[]
+
+  @@index([ruleId, position])
+  @@map("campaign_rule_filter_group")
+}
+
+model CampaignRuleFilter {
+  id            String                  @id @default(uuid())
+  filterGroupId String
+  filterGroup   CampaignRuleFilterGroup @relation(fields: [filterGroupId], references: [id], onDelete: Cascade)
+
+  field     String
+  operator  String
+  values    Json
+  timeframe String?
+  position  Int     @default(0)
+
+  @@index([filterGroupId, position])
+  @@map("campaign_rule_filter")
+}
+
+model CampaignRuleTask {
+  id          String             @id @default(uuid())
+  ruleId      String
+  rule        CampaignRule       @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  kind        CampaignRuleTaskKind
+  subtitle    String?
+  description String? // ghi chú UI cho task; runner không dùng
+  params      Json?
+  position    Int                @default(0)
+
+  rootGroup CampaignRuleTaskGroup?    @relation("CampaignRuleTaskRoot")
+  groups    CampaignRuleTaskGroup[]   @relation("CampaignRuleTaskAllGroups")
+  runItems  CampaignRuleRunItem[]
+
+  @@index([ruleId, position])
+  @@map("campaign_rule_task")
+}
+
+model CampaignRuleTaskGroup {
+  id     String           @id @default(uuid())
+  taskId String
+  task   CampaignRuleTask @relation("CampaignRuleTaskAllGroups", fields: [taskId], references: [id], onDelete: Cascade)
+
+  rootForTaskId String?           @unique
+  rootForTask   CampaignRuleTask? @relation("CampaignRuleTaskRoot", fields: [rootForTaskId], references: [id], onDelete: Cascade)
+
+  parentGroupId String?
+  parentGroup   CampaignRuleTaskGroup?  @relation("CampaignRuleTaskGroupTree", fields: [parentGroupId], references: [id], onDelete: Cascade)
+  childGroups   CampaignRuleTaskGroup[] @relation("CampaignRuleTaskGroupTree")
+
+  conditions CampaignRuleTaskCondition[]
+
+  operator CampaignRuleGroupOperator @default(AND)
+  position Int                     @default(0)
+
+  @@index([taskId, parentGroupId, position])
+  @@map("campaign_rule_task_group")
+}
+
+model CampaignRuleTaskCondition {
+  id          String                @id @default(uuid())
+  groupId     String
+  group       CampaignRuleTaskGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  compareType CampaignRuleCompareType @default(VALUE)
+  params      Json
+  position    Int                   @default(0)
+
+  @@index([groupId, position])
+  @@map("campaign_rule_task_condition")
+}
+
+/// Một CampaignRuleRun = 1 lần rule được scheduler fire cho ad account của nó.
+model CampaignRuleRun {
+  id String @id @default(uuid())
+
+  ruleId String
+  rule   CampaignRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  accountId String // scalar FK sang Account
+
+  scheduledFor DateTime
+  startedAt    DateTime?
+  finishedAt   DateTime?
+
+  // Idempotency: `ruleId:accountId:<aligned scheduledFor ISO>`. NULL cho row skip.
+  dedupeKey String?
+
+  status CampaignRuleRunStatus @default(RUNNING)
+
+  entitiesScanned Int @default(0)
+  matchedCount    Int @default(0)
+  errorsCount     Int @default(0)
+
+  errorMessage String?
+  ruleSnapshot Json?
+
+  items CampaignRuleRunItem[]
+
+  createdAt DateTime @default(now())
+
+  @@unique([dedupeKey])
+  @@index([ruleId, scheduledFor(sort: Desc)])
+  @@index([accountId, scheduledFor(sort: Desc)])
+  @@index([status, scheduledFor(sort: Desc)])
+  @@map("campaign_rule_run")
+}
+
+/// Mỗi entity match 1 task = 1 row; giữ snapshot + change preview cho UI log-detail.
+model CampaignRuleRunItem {
+  id String @id @default(uuid())
+
+  runId String
+  run   CampaignRuleRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  taskId   String?
+  task     CampaignRuleTask?   @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  taskKind CampaignRuleTaskKind?
+
+  level       CampaignRuleLevel
+  entityId    String // Campaign.id / AdSet.id / Ad.id
+  entityName  String
+  parentLabel String?
+
+  status CampaignRuleRunItemStatus @default(PENDING)
+
+  snapshot      Json
+  changePreview Json
+  evaluation    Json?
+
+  matchedConditionSummary String?
+
+  confirmedAt   DateTime?
+  confirmedById String? // scalar FK sang User
+  executedAt    DateTime?
+  errorMessage  String?
+
+  executionAttempts Int   @default(0)
+  executionError    Json?
+  metaTraceId       String?
+
+  asyncRequestIds   String?
+  asyncPollAttempts Int     @default(0)
+
+  // Id các HighDemandPeriod (budget_schedule) Meta trả về khi đẩy thành công —
+  // lưu để sau này TẮT/XOÁ lịch trên Meta (new HighDemandPeriod(id).delete()).
+  metaBudgetScheduleIds String[] @default([])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([runId])
+  @@index([entityId])
+  @@index([taskId])
+  @@index([status, createdAt(sort: Desc)])
+  @@map("campaign_rule_run_item")
 }
