@@ -1,4 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  OnApplicationBootstrap,
+} from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -19,10 +23,66 @@ import {
 /** Truncate very long error/stack text so a single line can't bloat the file. */
 const MAX_ERROR_LEN = 8000;
 const MAX_LOG_ENTRIES = 200;
+// Marker "đang chạy" tồn tại lâu hơn ngưỡng này = tàn dư của lần crash/deploy giữa
+// chừng (không có job thật nào chạy 6 giờ). Dọn lúc boot để dashboard không hiển thị
+// "đang chạy" ma. Ngưỡng đủ rộng để KHÔNG nhả nhầm job dài đang chạy ở replica khác.
+const STALE_MARKER_MS = 6 * 60 * 60 * 1000;
 
 @Injectable()
-export class BatchRunLoggerService {
+export class BatchRunLoggerService implements OnApplicationBootstrap {
   private readonly logger = new Logger(BatchRunLoggerService.name);
+
+  /**
+   * Lúc app khởi động (sau mỗi deploy), quét thư mục `running/` và xoá các marker
+   * treo — job bị SIGKILL giữa chừng để lại file marker không bao giờ được dọn ở
+   * `finally`. Dựa trên `startedAt` nên an toàn với multi-replica (không đụng job
+   * mới bắt đầu ở instance khác).
+   */
+  onApplicationBootstrap(): void {
+    this.sweepStaleMarkers();
+  }
+
+  private sweepStaleMarkers(): void {
+    try {
+      const dir = resolveRunningDir();
+      if (!fs.existsSync(dir)) return;
+      const now = Date.now();
+      let removed = 0;
+      for (const file of fs.readdirSync(dir)) {
+        if (!file.endsWith('.json')) continue;
+        const full = path.join(dir, file);
+        try {
+          const marker = JSON.parse(
+            fs.readFileSync(full, 'utf8'),
+          ) as BatchRunningMarker;
+          const started = marker.startedAt
+            ? new Date(marker.startedAt).getTime()
+            : 0;
+          if (!started || now - started > STALE_MARKER_MS) {
+            fs.unlinkSync(full);
+            removed += 1;
+          }
+        } catch {
+          // marker hỏng/không đọc được → coi như rác, xoá.
+          try {
+            fs.unlinkSync(full);
+            removed += 1;
+          } catch {
+            // best-effort
+          }
+        }
+      }
+      if (removed > 0) {
+        this.logger.warn(
+          `Đã dọn ${removed} marker "đang chạy" treo (crash/deploy giữa chừng).`,
+        );
+      }
+    } catch (e) {
+      this.logger.error(
+        `Sweep stale markers lỗi: ${(e as Error)?.message ?? e}`,
+      );
+    }
+  }
 
   /**
    * Wrap a batch job body. Records start/end time, duration, status and any

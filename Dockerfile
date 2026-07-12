@@ -61,6 +61,14 @@ COPY package.json ./
 
 USER nestjs
 
-EXPOSE 3000
+# Cổng lấy từ env PORT (compose server đặt PORT=8000); fallback 3000 cho chạy local.
+# Healthcheck đọc CHÍNH env đó để luôn khớp cổng app đang lắng nghe. start-period rộng
+# để chờ boot + startup-sync xong. Dùng global fetch của Node 20 (không cần curl).
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
+# dumb-init forward SIGTERM → node nhận tín hiệu → NestFactory chạy graceful shutdown
+# (Bull drain job đang chạy, Prisma disconnect) trước khi thoát.
 ENTRYPOINT ["dumb-init", "--"]
 CMD ["node", "dist/src/main.js"]

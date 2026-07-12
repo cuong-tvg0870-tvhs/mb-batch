@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { BatchRunLoggerService } from '../batch-run-log/batch-run-logger.service';
+import { DistributedLockService } from '../distributed-lock/distributed-lock.service';
 import {
   HELP_AI_API_KEY_THAW_CRON,
   HELP_AI_KNOWLEDGE_REFRESH_CRON,
@@ -11,6 +12,11 @@ import { GeminiApiKeyManager } from './gemini-api-key-manager.service';
 import { HelpAiService } from './help-ai.service';
 
 const HELP_AI_QUEUE = 'help-ai';
+// TTL khóa cross-replica cho từng job (giây). Đặt rộng hơn thời lượng chạy tối đa để
+// khóa không hết hạn giữa chừng. Thaw API-key rất nhanh nên TTL ngắn.
+const LOCK_TTL_REFRESH = 30 * 60;
+const LOCK_TTL_TRIAGE = 30 * 60;
+const LOCK_TTL_THAW = 5 * 60;
 
 @Injectable()
 export class HelpAiScheduler implements OnModuleInit {
@@ -23,6 +29,7 @@ export class HelpAiScheduler implements OnModuleInit {
     private readonly helpAiService: HelpAiService,
     private readonly geminiKeyManager: GeminiApiKeyManager,
     private readonly batchRunLogger: BatchRunLoggerService,
+    private readonly lock: DistributedLockService,
   ) {}
 
   async onModuleInit() {
@@ -46,7 +53,12 @@ export class HelpAiScheduler implements OnModuleInit {
 
         this.refreshingKnowledge = true;
         try {
-          await this.helpAiService.refreshHelpKnowledge();
+          const ran = await this.lock.runExclusive(
+            'help-ai:refresh-knowledge',
+            LOCK_TTL_REFRESH,
+            () => this.helpAiService.refreshHelpKnowledge(),
+          );
+          if (!ran) ctx.skip('another instance holds the lock');
         } finally {
           this.refreshingKnowledge = false;
         }
@@ -70,7 +82,12 @@ export class HelpAiScheduler implements OnModuleInit {
 
         this.triaging = true;
         try {
-          await this.helpAiService.triagePendingContributions();
+          const ran = await this.lock.runExclusive(
+            'help-ai:triage',
+            LOCK_TTL_TRIAGE,
+            () => this.helpAiService.triagePendingContributions(),
+          );
+          if (!ran) ctx.skip('another instance holds the lock');
         } finally {
           this.triaging = false;
         }
@@ -94,7 +111,12 @@ export class HelpAiScheduler implements OnModuleInit {
 
         this.thawingApiKeys = true;
         try {
-          await this.geminiKeyManager.thawExpiredKeys();
+          const ran = await this.lock.runExclusive(
+            'help-ai:thaw-api-keys',
+            LOCK_TTL_THAW,
+            () => this.geminiKeyManager.thawExpiredKeys(),
+          );
+          if (!ran) ctx.skip('another instance holds the lock');
         } finally {
           this.thawingApiKeys = false;
         }
