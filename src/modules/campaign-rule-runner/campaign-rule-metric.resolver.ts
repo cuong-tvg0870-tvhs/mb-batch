@@ -39,6 +39,30 @@ function toNumber(value: any): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+/** Số lượt mua từ insight.actions (null nếu không có). */
+function resolvePurchases(insight: any): number | null {
+  const actions = insight?.actions;
+  if (!Array.isArray(actions)) return null;
+  const match = actions.find((a) => PURCHASE_ACTION_TYPES.has(a?.action_type));
+  return match ? toNumber(match.value) : null;
+}
+
+/** Chi phí / kết quả (mua) — CPA. Ưu tiên cost_per_action_type của Meta (chính xác
+ *  theo attribution), fallback spend/purchases. purchases=0 → null (KHÔNG coi CPA vô
+ *  cực là hợp lệ để tránh điều kiện "CPA < X" âm thầm khớp khi chưa có đơn nào). */
+function resolveCpa(insight: any): number | null {
+  const cpaRows = insight?.cost_per_action_type;
+  if (Array.isArray(cpaRows)) {
+    const match = cpaRows.find((a) => PURCHASE_ACTION_TYPES.has(a?.action_type));
+    const v = match ? toNumber(match.value) : null;
+    if (v != null && v > 0) return v;
+  }
+  const spend = toNumber(insight?.spend);
+  const purchases = resolvePurchases(insight);
+  if (spend == null || purchases == null || purchases <= 0) return null;
+  return spend / purchases;
+}
+
 export function resolveMetric(
   metricKey: string | null | undefined,
   insight: any,
@@ -56,10 +80,19 @@ export function resolveMetric(
   }
 
   if (key === 'purchases') {
-    const actions = insight?.actions;
-    if (!Array.isArray(actions)) return null;
-    const match = actions.find((a) => PURCHASE_ACTION_TYPES.has(a?.action_type));
-    return match ? toNumber(match.value) : null;
+    return resolvePurchases(insight);
+  }
+
+  // CPA / chi phí mỗi kết quả (mua). Khớp các metric CPA mà UI condition-builder
+  // cho chọn: cost_per_purchase | cost_per_website_purchase | cost_per_unique_website_purchase.
+  if (
+    key === 'cpa' ||
+    key === 'cost_per_purchase' ||
+    key === 'cost_per_website_purchase' ||
+    key === 'cost_per_unique_website_purchase' ||
+    key === 'cost_per_result'
+  ) {
+    return resolveCpa(insight);
   }
 
   if (key === 'results') {

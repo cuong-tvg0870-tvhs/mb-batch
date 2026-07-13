@@ -10,7 +10,15 @@ import {
   RULE_LOCK_TTL_SECONDS,
 } from './campaign-rule-runner.constants';
 import { EvalContext, evaluateGroup } from './campaign-rule-evaluator';
-import { buildSpecs, executeBudgetSchedule } from './campaign-rule-executor';
+import {
+  buildRollingSpec,
+  buildSpecs,
+  deleteBudgetSchedules,
+  executeBudgetSchedule,
+  fetchBudgetSchedules,
+  fetchLiveBudget,
+  type RollingConfig,
+} from './campaign-rule-executor';
 import { resolveMetric } from './campaign-rule-metric.resolver';
 import {
   alignedNow,
@@ -304,6 +312,23 @@ export class CampaignRuleRunnerService {
         continue;
       }
 
+      // Chế độ "cuốn chiếu": khung ĐỘNG nối đuôi theo thời điểm rule nổ (xử lý riêng).
+      if (task.params?.mode === 'ROLLING') {
+        const res = await this.processRollingTask({
+          runId,
+          task,
+          rule,
+          level,
+          entity,
+          insight,
+          timezone,
+          now,
+        });
+        matched += res.matched;
+        errors += res.errors;
+        continue;
+      }
+
       const isMatched = evaluateGroup(task.rootGroup, ctx);
       const snapshot = this.buildSnapshot(insight, entity);
       // % (MULTIPLIER) quy đổi theo ngân sách THẬT của chính đối tượng đang xét.
@@ -383,6 +408,218 @@ export class CampaignRuleRunnerService {
     }
 
     return { matched, errors };
+  }
+
+  /**
+   * Xử lý 1 task BUDGET_SCHEDULE_BUMP ở chế độ CUỐN CHIẾU (mode=ROLLING).
+   *
+   * Mỗi tick tới hạn:
+   *  - Đọc ngân sách LIVE từ Meta (để tính % + cho điều kiện tham chiếu budget).
+   *  - Đánh giá điều kiện trên insight LIVE.
+   *  - Đọc khung budget schedule THẬT trên Meta, tách "của mình" (owned) vs người khác.
+   *  - ĐẠT + sắp hết phủ (coveredUntil − now ≤ lead) → tạo 1 khung KẾ nối đuôi; còn phủ
+   *    xa thì NO-OP ("rule nghỉ"). KHÔNG đạt → dừng nối + HUỶ khung của mình CHƯA bắt đầu.
+   */
+  private async processRollingTask(args: {
+    runId: string;
+    task: any;
+    rule: any;
+    level: 'CAMPAIGN' | 'ADSET';
+    entity: RunnerEntity;
+    insight: any;
+    timezone: string;
+    now: Date;
+  }): Promise<{ matched: number; errors: number }> {
+    const { runId, task, rule, level, entity, insight, timezone, now } = args;
+    const rolling = (task.params?.rolling ?? {}) as RollingConfig;
+    const nowUnix = Math.floor(now.getTime() / 1000);
+
+    // Ngân sách LIVE từ Meta (fallback DB nếu đọc lỗi) — dùng cho cả % tăng lẫn điều kiện.
+    const liveBudget = await fetchLiveBudget(level, entity.id);
+    const liveEntity: RunnerEntity = {
+      ...entity,
+      dailyBudget: liveBudget.dailyBudget ?? entity.dailyBudget ?? null,
+      lifetimeBudget: liveBudget.lifetimeBudget ?? entity.lifetimeBudget ?? null,
+    };
+    const targetBudget = liveEntity.dailyBudget ?? liveEntity.lifetimeBudget ?? null;
+
+    const ctx: EvalContext = { insight, entity: liveEntity, now, timezone };
+    const isMatched = evaluateGroup(task.rootGroup, ctx);
+    const snapshot = this.buildSnapshot(insight, liveEntity);
+
+    // Khung "của mình" = HDP do các lần chạy trước của rule này tạo (theo entity).
+    const ownedIds = await this.gatherOwnedScheduleIds(rule.id, entity.id);
+    const live = await fetchBudgetSchedules(level, entity.id);
+    const ownedWindows = live.filter((w) => ownedIds.has(w.id));
+    const foreignWindows = live.filter((w) => !ownedIds.has(w.id));
+    const coveredUntil = ownedWindows.reduce(
+      (mx, w) => (w.time_end > nowUnix ? Math.max(mx, w.time_end) : mx),
+      nowUnix,
+    );
+
+    // ---- KHÔNG đạt điều kiện: dừng nối + huỷ khung của mình CHƯA bắt đầu ----
+    if (!isMatched) {
+      const toCancel = ownedWindows
+        .filter((w) => w.time_start > nowUnix)
+        .map((w) => w.id);
+      let cancelled = 0;
+      if (toCancel.length) {
+        cancelled = (await deleteBudgetSchedules(toCancel)).removed;
+        await this.clearScheduleIds(rule.id, entity.id, toCancel);
+      }
+      await this.createItem({
+        runId,
+        task,
+        level,
+        entity,
+        status: 'NOT_MATCHED',
+        snapshot,
+        changePreview: { rolling: { mode: 'ROLLING' }, cancelledFutureWindows: cancelled },
+        evaluation: { matched: false },
+        matchedConditionSummary:
+          cancelled > 0
+            ? `Điều kiện không đạt → dừng nối, đã huỷ ${cancelled} khung chưa bắt đầu.`
+            : 'Điều kiện không đạt → không nối khung mới.',
+      });
+      return { matched: 0, errors: 0 };
+    }
+
+    // ---- Đạt điều kiện ----
+    const lead = Math.max(0, Math.round(rolling.leadMinutes ?? 15)) * 60;
+    // Còn phủ xa hơn lead → chưa cần nối (rule "nghỉ" trong khoảng T→T').
+    if (coveredUntil - nowUnix > lead) {
+      await this.createItem({
+        runId,
+        task,
+        level,
+        entity,
+        status: 'SKIPPED',
+        snapshot,
+        changePreview: { rolling: { mode: 'ROLLING', coveredUntil } },
+        evaluation: { matched: true },
+        matchedConditionSummary: 'Đang còn khung phủ → chưa cần nối khung mới.',
+      });
+      return { matched: 1, errors: 0 };
+    }
+
+    const { spec, skipReason } = buildRollingSpec(rolling, {
+      nowUnix,
+      tz: timezone,
+      targetBudget,
+      coveredUntil,
+      ownedWindows,
+      foreignWindows,
+    });
+    if (!spec) {
+      await this.createItem({
+        runId,
+        task,
+        level,
+        entity,
+        status: 'SKIPPED',
+        snapshot,
+        changePreview: { rolling: { mode: 'ROLLING', skipReason } },
+        evaluation: { matched: true },
+        matchedConditionSummary: `Khớp điều kiện nhưng chưa tạo khung (${skipReason ?? 'không rõ'}).`,
+      });
+      return { matched: 1, errors: 0 };
+    }
+
+    const changePreview = {
+      budget_schedule_specs: [spec],
+      rolling: { mode: 'ROLLING', windowMode: rolling.windowMode ?? 'DURATION' },
+    };
+
+    // ROLLING nên tự chạy (đêm không ai duyệt). Nếu rule không autoExecute → chờ duyệt.
+    if (!rule.autoExecute) {
+      await this.createItem({
+        runId,
+        task,
+        level,
+        entity,
+        status: 'PENDING',
+        snapshot,
+        changePreview,
+        evaluation: { matched: true },
+        matchedConditionSummary: 'Khớp điều kiện → chờ xác nhận (khung cuốn chiếu).',
+      });
+      return { matched: 1, errors: 0 };
+    }
+
+    const result = await executeBudgetSchedule(level, entity.id, [spec]);
+    if (result.ok) {
+      await this.createItem({
+        runId,
+        task,
+        level,
+        entity,
+        status: 'EXECUTED',
+        snapshot,
+        changePreview,
+        evaluation: { matched: true },
+        matchedConditionSummary: 'Khớp điều kiện → đã nối khung tăng ngân sách.',
+        executedAt: new Date(),
+        executionAttempts: 1,
+        metaTraceId: result.metaTraceId,
+        metaBudgetScheduleIds: result.scheduleIds,
+      });
+      return { matched: 1, errors: 0 };
+    }
+    await this.createItem({
+      runId,
+      task,
+      level,
+      entity,
+      status: 'FAILED',
+      snapshot,
+      changePreview,
+      evaluation: { matched: true },
+      matchedConditionSummary: 'Khớp điều kiện nhưng đẩy Meta thất bại.',
+      errorMessage: result.error?.message || 'Đẩy budget schedule thất bại.',
+      executionAttempts: 1,
+      executionError: result.error,
+      metaTraceId: result.metaTraceId,
+      metaBudgetScheduleIds: result.scheduleIds,
+    });
+    return { matched: 1, errors: 1 };
+  }
+
+  /** Tập id HDP "của mình" (do các lần chạy trước của rule tạo cho entity này). */
+  private async gatherOwnedScheduleIds(
+    ruleId: string,
+    entityId: string,
+  ): Promise<Set<string>> {
+    const items = await this.prisma.campaignRuleRunItem.findMany({
+      where: {
+        run: { ruleId },
+        entityId,
+        NOT: { metaBudgetScheduleIds: { isEmpty: true } },
+      },
+      select: { metaBudgetScheduleIds: true },
+    });
+    return new Set(items.flatMap((i) => i.metaBudgetScheduleIds).map(String));
+  }
+
+  /** Gỡ các id HDP đã xoá khỏi metaBudgetScheduleIds của các run-item (giữ id còn sống). */
+  private async clearScheduleIds(
+    ruleId: string,
+    entityId: string,
+    ids: string[],
+  ): Promise<void> {
+    const cancelled = new Set(ids.map(String));
+    const items = await this.prisma.campaignRuleRunItem.findMany({
+      where: { run: { ruleId }, entityId },
+      select: { id: true, metaBudgetScheduleIds: true },
+    });
+    for (const it of items) {
+      const kept = it.metaBudgetScheduleIds.filter((id) => !cancelled.has(String(id)));
+      if (kept.length !== it.metaBudgetScheduleIds.length) {
+        await this.prisma.campaignRuleRunItem.update({
+          where: { id: it.id },
+          data: { metaBudgetScheduleIds: kept },
+        });
+      }
+    }
   }
 
   /** Fetch insight LIVE (date_preset=today) cho campaign/adset. Trả object phẳng (rỗng nếu không có). */

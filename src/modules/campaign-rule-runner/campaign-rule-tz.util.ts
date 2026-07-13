@@ -29,6 +29,38 @@ export function wallClockToUnix(wall: string, tz?: string | null): number {
   return dayjs.tz(wall, normalizeAccountTz(tz)).unix();
 }
 
+// Mốc giờ "HH:mm" (theo tz TKQC) KẾ TIẾP sau thời điểm afterUnix → unix seconds.
+// Dùng cho chế độ "nối khung tới 1 mốc giờ" (vd 08:30 sáng): nếu hôm nay đã qua mốc
+// thì lấy mốc của ngày mai. NaN nếu chuỗi giờ không hợp lệ.
+export function nextClockUnix(
+  clock: string,
+  tz: string | null | undefined,
+  afterUnix: number,
+): number {
+  const zone = normalizeAccountTz(tz);
+  const m = /^(\d{1,2}):(\d{2})$/.exec(clock ?? '');
+  if (!m) return NaN;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (h > 23 || min > 59) return NaN;
+  let d = dayjs
+    .unix(afterUnix)
+    .tz(zone)
+    .hour(h)
+    .minute(min)
+    .second(0)
+    .millisecond(0);
+  if (d.unix() <= afterUnix) d = d.add(1, 'day');
+  return d.unix();
+}
+
+// Meta trả time_start/end dạng ISO ("…+0700") hoặc đôi khi unix → chuẩn hoá unix seconds.
+export function metaTimeToUnix(v: string | number): number {
+  if (typeof v === 'number') return Math.floor(v);
+  if (/^\d+$/.test(String(v))) return parseInt(String(v), 10);
+  return Math.floor(new Date(String(v)).getTime() / 1000);
+}
+
 // unix seconds / ISO (Meta trả) → wall-clock "YYYY-MM-DDTHH:mm" theo tz TKQC.
 export function toAccountWallClock(isoOrUnix: string | number, tz?: string | null): string {
   const zone = normalizeAccountTz(tz);
