@@ -2636,6 +2636,14 @@ model AssetAccessRequestItem {
   metaId String // id tài sản trên Meta (hoặc CreativeFolder.id nếu type=FOLDER)
   name   String? // tên khai báo / tên lấy về từ Meta
 
+  // Danh sách người được cấp quyền cho RIÊNG tài sản này + mức quyền từng người
+  // (giống màn "Phân quyền Tài nguyên" của dự án). Mảng JSON:
+  // [{ userId, name, permission }]. permission là enum theo type:
+  //   AD_ACCOUNT → MemberRole (VIEWER/EDITOR); FANPAGE/CATALOG → VIEW/EDIT/ADMIN;
+  //   FOLDER → VIEW/EDIT; PIXEL → không cấp ACL (quyền đi theo TKQC).
+  // Khi admin confirm: tài sản vào dự án + từng user được cấp đúng mức ngay.
+  grants Json?
+
   status     AssetItemStatus @default(PENDING)
   fetchError String?         @db.Text
   fetchedAt  DateTime?
