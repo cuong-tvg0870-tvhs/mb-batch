@@ -55,9 +55,10 @@ export class CampaignRuleSyncService {
 
   /**
    * Kéo budget schedules hiện tại của campaign từ Meta và đồng bộ vào bản ghi lịch
-   * DUY NHẤT của campaign (cùng bản ghi mà user "gửi ngay" dùng — KHÔNG tạo bản
-   * gương thứ hai). CBO → schedules ở campaign; ABO → ở từng ad set.
-   * An toàn: nếu ĐỌC Meta lỗi thì KHÔNG đụng dữ liệu (tránh xoá nhầm lịch user).
+   * theo TỪNG SCOPE: CBO → 1 bản ghi cấp campaign; ABO → 1 bản ghi RIÊNG cho MỖI
+   * nhóm quảng cáo (mỗi nhóm lịch riêng, giống Meta). Dùng chung bản ghi mà user
+   * "gửi ngay" tạo — KHÔNG tạo bản gương thứ hai.
+   * An toàn: nếu ĐỌC Meta lỗi ở scope nào thì bỏ qua scope đó (không xoá nhầm).
    * KHÔNG throw (được gọi trong luồng sync) — lỗi chỉ log.
    */
   async reconcileFromMeta(campaignId: string): Promise<void> {
@@ -75,162 +76,26 @@ export class CampaignRuleSyncService {
       if (!campaign) return;
 
       const isCbo = !!(campaign.dailyBudget || campaign.lifetimeBudget);
-      const level: 'CAMPAIGN' | 'ADSET' = isCbo ? 'CAMPAIGN' : 'ADSET';
-
       FacebookAdsApi.init(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
 
-      // anyEnabled = có ít nhất 1 đối tượng đang BẬT lịch (is_budget_schedule_enabled)
-      // → status ACTIVE/PAUSED phản chiếu đúng công tắc trên Meta.
-      let anyEnabled = false;
-      let readFailed = false;
-      const entities: { id: string; name: string; schedules: MetaSchedule[] }[] =
-        [];
-      const collect = async (
-        kind: 'campaign' | 'adset',
-        id: string,
-        name: string,
-      ) => {
-        const { schedules, failed } = await this.fetchSchedules(kind, id);
-        if (failed) {
-          readFailed = true;
-          return;
-        }
-        if (schedules.length) {
-          entities.push({ id, name, schedules });
-          if (await this.fetchEnabled(kind, id)) anyEnabled = true;
-        }
-      };
       if (isCbo) {
-        await collect('campaign', campaign.id, campaign.name ?? campaign.id);
+        await this.syncScope(campaign.accountId, campaign.id, null, 'CAMPAIGN', {
+          kind: 'campaign',
+          id: campaign.id,
+          name: campaign.name ?? campaign.id,
+        });
       } else {
         const adsets = await this.prisma.adSet.findMany({
           where: { campaignId: campaign.id },
           select: { id: true, name: true },
         });
-        for (const a of adsets) await collect('adset', a.id, a.name ?? a.id);
-      }
-
-      // Đọc Meta lỗi ở bất kỳ đối tượng nào → bỏ qua vòng này, giữ nguyên DB.
-      if (readFailed) return;
-
-      const status: 'ACTIVE' | 'PAUSED' = anyEnabled ? 'ACTIVE' : 'PAUSED';
-      const totalSchedules = entities.reduce((n, e) => n + e.schedules.length, 0);
-
-      // Bản ghi lịch DUY NHẤT (mọi bản không-điều-kiện) + gộp trùng nếu lỡ có nhiều.
-      const canonical = await this.findOrCollapseCanonical(campaign.id);
-
-      // Meta không còn schedule: bản gương thuần → xoá; bản do user tạo → chỉ TẮT
-      // (giữ record + khung để không mất dữ liệu người dùng).
-      if (totalSchedules === 0) {
-        if (canonical) {
-          if (canonical.syncedFromMeta) {
-            await this.prisma.campaignRule.update({
-              where: { id: canonical.id },
-              data: { deletedAt: new Date() },
-            });
-          } else {
-            await this.prisma.campaignRule.update({
-              where: { id: canonical.id },
-              data: { status: 'PAUSED' },
-            });
-          }
-        }
-        return;
-      }
-
-      const repPeriods = entities.flatMap((e) => e.schedules.map(metaToPeriod));
-
-      let ruleId = canonical?.id;
-      let taskId: string;
-      if (!ruleId) {
-        const rule = await this.prisma.campaignRule.create({
-          data: {
-            name: 'Lịch tăng ngân sách (đồng bộ từ Meta)',
-            level,
-            status,
-            accountId: campaign.accountId,
-            campaignId: campaign.id,
-            timezone: 'account',
-            autoExecute: false,
-            syncedFromMeta: true,
-            tasks: {
-              create: [
-                {
-                  kind: 'BUDGET_SCHEDULE_BUMP',
-                  position: 0,
-                  params: { periods: repPeriods },
-                },
-              ],
-            },
-          },
-          include: { tasks: true },
-        });
-        ruleId = rule.id;
-        taskId = rule.tasks[0].id;
-        await this.prisma.campaignRuleTaskGroup.create({
-          data: { taskId, rootForTaskId: taskId, operator: 'AND', position: 0 },
-        });
-      } else {
-        // Giữ nguyên "nguồn gốc" (syncedFromMeta) của bản ghi user — chỉ cập nhật
-        // cấp + trạng thái theo Meta.
-        await this.prisma.campaignRule.update({
-          where: { id: ruleId },
-          data: { level, status },
-        });
-        const task = await this.prisma.campaignRuleTask.findFirst({
-          where: { ruleId },
-          orderBy: { position: 'asc' },
-          select: { id: true },
-        });
-        if (task) {
-          taskId = task.id;
-          await this.prisma.campaignRuleTask.update({
-            where: { id: taskId },
-            data: { params: { periods: repPeriods } },
+        for (const a of adsets) {
+          await this.syncScope(campaign.accountId, campaign.id, a.id, 'ADSET', {
+            kind: 'adset',
+            id: a.id,
+            name: a.name ?? a.id,
           });
-        } else {
-          const created = await this.prisma.campaignRuleTask.create({
-            data: {
-              ruleId,
-              kind: 'BUDGET_SCHEDULE_BUMP',
-              position: 0,
-              params: { periods: repPeriods },
-            },
-          });
-          taskId = created.id;
         }
-        // Làm mới lịch sử run để phản ánh trạng thái Meta hiện tại.
-        await this.prisma.campaignRuleRun.deleteMany({ where: { ruleId } });
-      }
-
-      const run = await this.prisma.campaignRuleRun.create({
-        data: {
-          ruleId,
-          accountId: campaign.accountId,
-          scheduledFor: new Date(),
-          startedAt: new Date(),
-          finishedAt: new Date(),
-          status: 'COMPLETED',
-          entitiesScanned: entities.length,
-          matchedCount: entities.length,
-        },
-      });
-      for (const e of entities) {
-        await this.prisma.campaignRuleRunItem.create({
-          data: {
-            runId: run.id,
-            taskId,
-            taskKind: 'BUDGET_SCHEDULE_BUMP',
-            level,
-            entityId: e.id,
-            entityName: e.name,
-            status: 'EXECUTED',
-            snapshot: {},
-            changePreview: { periods: e.schedules.map(metaToPeriod) },
-            metaBudgetScheduleIds: e.schedules.map((s) => String(s.id)),
-            executedAt: new Date(),
-          },
-        });
       }
     } catch (err) {
       this.logger.warn(
@@ -239,11 +104,142 @@ export class CampaignRuleSyncService {
     }
   }
 
-  // Bản ghi lịch DUY NHẤT (không điều kiện) của campaign; nếu có nhiều bản trùng
-  // → giữ bản do user tạo (syncedFromMeta=false) rồi tới bản cũ nhất, xoá mềm phần dư.
-  private async findOrCollapseCanonical(campaignId: string) {
+  // Đồng bộ lịch của MỘT scope (campaign hoặc 1 nhóm) từ Meta vào đúng 1 bản ghi.
+  private async syncScope(
+    accountId: string,
+    campaignId: string,
+    adSetId: string | null,
+    level: 'CAMPAIGN' | 'ADSET',
+    entity: { kind: 'campaign' | 'adset'; id: string; name: string },
+  ): Promise<void> {
+    const { schedules, failed } = await this.fetchSchedules(entity.kind, entity.id);
+    if (failed) return; // đọc lỗi → giữ nguyên DB scope này
+
+    const canonical = await this.findOrCollapseCanonical(campaignId, adSetId);
+
+    // Meta không còn schedule: bản gương thuần → xoá; bản do user tạo → chỉ TẮT.
+    if (schedules.length === 0) {
+      if (canonical) {
+        if (canonical.syncedFromMeta) {
+          await this.prisma.campaignRule.update({
+            where: { id: canonical.id },
+            data: { deletedAt: new Date() },
+          });
+        } else {
+          await this.prisma.campaignRule.update({
+            where: { id: canonical.id },
+            data: { status: 'PAUSED' },
+          });
+        }
+      }
+      return;
+    }
+
+    const enabled = await this.fetchEnabled(entity.kind, entity.id);
+    const status: 'ACTIVE' | 'PAUSED' = enabled ? 'ACTIVE' : 'PAUSED';
+    const repPeriods = schedules.map(metaToPeriod);
+
+    let ruleId = canonical?.id;
+    let taskId: string;
+    if (!ruleId) {
+      const rule = await this.prisma.campaignRule.create({
+        data: {
+          name: adSetId
+            ? `Lịch tăng ngân sách nhóm "${entity.name}" (đồng bộ từ Meta)`
+            : 'Lịch tăng ngân sách (đồng bộ từ Meta)',
+          level,
+          status,
+          accountId,
+          campaignId,
+          adSetId,
+          timezone: 'account',
+          autoExecute: false,
+          syncedFromMeta: true,
+          tasks: {
+            create: [
+              {
+                kind: 'BUDGET_SCHEDULE_BUMP',
+                position: 0,
+                params: { periods: repPeriods },
+              },
+            ],
+          },
+        },
+        include: { tasks: true },
+      });
+      ruleId = rule.id;
+      taskId = rule.tasks[0].id;
+      await this.prisma.campaignRuleTaskGroup.create({
+        data: { taskId, rootForTaskId: taskId, operator: 'AND', position: 0 },
+      });
+    } else {
+      // Giữ nguyên "nguồn gốc" (syncedFromMeta) của bản ghi user — chỉ cập nhật
+      // cấp + trạng thái theo Meta.
+      await this.prisma.campaignRule.update({
+        where: { id: ruleId },
+        data: { level, status },
+      });
+      const task = await this.prisma.campaignRuleTask.findFirst({
+        where: { ruleId },
+        orderBy: { position: 'asc' },
+        select: { id: true },
+      });
+      if (task) {
+        taskId = task.id;
+        await this.prisma.campaignRuleTask.update({
+          where: { id: taskId },
+          data: { params: { periods: repPeriods } },
+        });
+      } else {
+        const created = await this.prisma.campaignRuleTask.create({
+          data: {
+            ruleId,
+            kind: 'BUDGET_SCHEDULE_BUMP',
+            position: 0,
+            params: { periods: repPeriods },
+          },
+        });
+        taskId = created.id;
+      }
+      // Làm mới lịch sử run để phản ánh trạng thái Meta hiện tại.
+      await this.prisma.campaignRuleRun.deleteMany({ where: { ruleId } });
+    }
+
+    const run = await this.prisma.campaignRuleRun.create({
+      data: {
+        ruleId,
+        accountId,
+        scheduledFor: new Date(),
+        startedAt: new Date(),
+        finishedAt: new Date(),
+        status: 'COMPLETED',
+        entitiesScanned: 1,
+        matchedCount: 1,
+      },
+    });
+    await this.prisma.campaignRuleRunItem.create({
+      data: {
+        runId: run.id,
+        taskId,
+        taskKind: 'BUDGET_SCHEDULE_BUMP',
+        level,
+        entityId: entity.id,
+        entityName: entity.name,
+        status: 'EXECUTED',
+        snapshot: {},
+        changePreview: { periods: repPeriods },
+        metaBudgetScheduleIds: schedules.map((s) => String(s.id)),
+        executedAt: new Date(),
+      },
+    });
+  }
+
+  // Bản ghi lịch DUY NHẤT (không điều kiện) của 1 scope (campaign nếu adSetId null,
+  // hoặc 1 nhóm nếu có adSetId); nhiều bản trùng → giữ bản do user tạo/cũ nhất, xoá
+  // mềm phần dư.
+  private async findOrCollapseCanonical(campaignId: string, adSetId: string | null) {
     const rows = await this.prisma.campaignRule.findMany({
-      where: { campaignId, schedule: { is: null }, deletedAt: null },
+      where: { campaignId, adSetId, schedule: { is: null }, deletedAt: null },
       orderBy: [{ syncedFromMeta: 'asc' }, { createdAt: 'asc' }],
       select: { id: true, syncedFromMeta: true },
     });

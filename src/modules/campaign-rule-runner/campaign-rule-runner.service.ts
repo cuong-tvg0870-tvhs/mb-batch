@@ -225,9 +225,14 @@ export class CampaignRuleRunnerService {
       });
       return campaign ? [campaign] : [];
     }
-    // ADSET: mọi ad set thuộc campaign này (bỏ ad set đã xoá mềm).
+    // ADSET: nếu rule pin adSetId (ABO — mỗi nhóm 1 lịch riêng) thì CHỈ nhóm đó;
+    // không thì mọi ad set thuộc campaign (bỏ ad set đã xoá mềm).
     return this.prisma.adSet.findMany({
-      where: { campaignId: rule.campaignId, deletedAt: null },
+      where: {
+        campaignId: rule.campaignId,
+        deletedAt: null,
+        ...(rule.adSetId ? { id: rule.adSetId } : {}),
+      },
       select: {
         id: true,
         name: true,

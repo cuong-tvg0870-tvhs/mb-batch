@@ -3337,8 +3337,11 @@ model CampaignRule {
   // Scope. `accountId` = Account.id (scalar FK, model ngoài cụm này).
   // `campaignId` = Campaign.id — pin rule vào 1 campaign khi mở từ campaign detail;
   // null = phủ cả ad account.
+  // `adSetId` = AdSet.id — pin rule vào 1 NHÓM QUẢNG CÁO cụ thể (ABO, mỗi nhóm 1
+  // lịch tăng ngân sách riêng); null = cấp campaign (CBO) hoặc phủ account.
   accountId  String
   campaignId String?
+  adSetId    String?
 
   timezone            String // IANA name, hoặc sentinel "account" (resolve theo tz ad account lúc chạy)
   notifyErrorsOnly    Boolean                   @default(false)
@@ -3367,6 +3370,7 @@ model CampaignRule {
   deletedAt   DateTime?
 
   @@index([campaignId, status])
+  @@index([campaignId, adSetId, status])
   @@index([accountId, updatedAt(sort: Desc)])
   @@index([createdById, updatedAt(sort: Desc)])
   @@map("campaign_rule")
