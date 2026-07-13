@@ -308,7 +308,9 @@ export class CampaignRuleRunnerService {
       const snapshot = this.buildSnapshot(insight, entity);
       // % (MULTIPLIER) quy đổi theo ngân sách THẬT của chính đối tượng đang xét.
       const targetBudget = entity?.dailyBudget ?? entity?.lifetimeBudget ?? null;
-      const specs = buildSpecs(task.params?.periods, targetBudget);
+      // Mốc giờ khung lịch diễn giải theo múi giờ TKQC (timezone đã resolve = tz
+      // account khi rule.timezone="account").
+      const specs = buildSpecs(task.params?.periods, targetBudget, timezone);
       const changePreview = { budget_schedule_specs: specs };
 
       if (!isMatched) {

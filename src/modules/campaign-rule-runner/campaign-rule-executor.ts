@@ -1,6 +1,7 @@
 import { Logger } from '@nestjs/common';
 import { AdSet, Campaign } from 'facebook-nodejs-business-sdk';
 import { parseMetaError } from '../../common/utils';
+import { wallClockToUnix } from './campaign-rule-tz.util';
 
 /**
  * Thực thi action BUDGET_SCHEDULE_BUMP: đẩy `budget_schedule_specs` lên Meta cho
@@ -33,27 +34,27 @@ export interface ExecResult {
   scheduleIds: string[];
 }
 
-/** "YYYY-MM-DDTHH:mm" (giờ local của process) → unix seconds. */
-function toUnixSeconds(local: string | undefined): number {
-  const t = new Date(String(local)).getTime();
-  return Math.floor(t / 1000);
-}
-
 /**
  * periods (từ task.params) → budget_schedule_specs của Meta.
  * QUAN TRỌNG: Meta yêu cầu `budget_value` là SỐ NGUYÊN → luôn gửi ABSOLUTE.
  *   %  (MULTIPLIER 1.5)  → ABSOLUTE = round(ngân_sách_hằng_ngày × 1.5) theo ngân
  *                          sách THẬT của đối tượng (`targetBudget`, minor units).
  *   Số tiền (ABSOLUTE)   → round(budget_value).
+ * Mốc giờ "YYYY-MM-DDTHH:mm" được diễn giải theo MÚI GIỜ TKQC (`tz`, IANA) — Meta
+ * chạy budget schedule theo timezone tài khoản quảng cáo, không theo tz server.
  * Bỏ qua period thiếu thời gian hợp lệ, hoặc MULTIPLIER mà không biết targetBudget.
  */
-export function buildSpecs(periods: any, targetBudget?: number | null): BudgetScheduleSpec[] {
+export function buildSpecs(
+  periods: any,
+  targetBudget?: number | null,
+  tz?: string | null,
+): BudgetScheduleSpec[] {
   if (!Array.isArray(periods)) return [];
   const specs: BudgetScheduleSpec[] = [];
   for (const period of periods) {
     if (!period) continue;
-    const timeStart = toUnixSeconds(period.timeStart);
-    const timeEnd = toUnixSeconds(period.timeEnd);
+    const timeStart = wallClockToUnix(String(period.timeStart), tz);
+    const timeEnd = wallClockToUnix(String(period.timeEnd), tz);
     if (!Number.isFinite(timeStart) || !Number.isFinite(timeEnd)) continue;
 
     const type = period.budgetValueType || 'ABSOLUTE';

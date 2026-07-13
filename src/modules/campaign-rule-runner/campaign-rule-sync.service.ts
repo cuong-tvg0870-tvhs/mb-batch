@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { AdSet, Campaign, FacebookAdsApi } from 'facebook-nodejs-business-sdk';
 import { PrismaService } from '../prisma/prisma.service';
+import { normalizeAccountTz, toAccountWallClock } from './campaign-rule-tz.util';
 
 // Đồng bộ NGƯỢC budget schedules từ Meta về DB: mỗi campaign giữ 1 bản ghi
 // campaign_rule "gương" (syncedFromMeta=true) phản chiếu đúng các budget schedule
@@ -20,28 +21,11 @@ type Period = {
   budgetValue: number;
 };
 
-// Meta trả ISO có tz (…+0000) → wall-clock Asia/Ho_Chi_Minh "YYYY-MM-DDTHH:mm".
-function toVnLocal(iso: string): string {
-  const d = new Date(iso);
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Ho_Chi_Minh',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).formatToParts(d);
-  const g = (t: string) => parts.find((p) => p.type === t)?.value ?? '00';
-  let hour = g('hour');
-  if (hour === '24') hour = '00';
-  return `${g('year')}-${g('month')}-${g('day')}T${hour}:${g('minute')}`;
-}
-
-function metaToPeriod(s: MetaSchedule): Period {
+// Meta trả ISO có tz (…+0000)/unix → wall-clock "YYYY-MM-DDTHH:mm" theo múi giờ TKQC.
+function metaToPeriod(s: MetaSchedule, tz: string): Period {
   return {
-    timeStart: toVnLocal(s.time_start),
-    timeEnd: toVnLocal(s.time_end),
+    timeStart: toAccountWallClock(s.time_start, tz),
+    timeEnd: toAccountWallClock(s.time_end, tz),
     budgetValueType: s.budget_value_type,
     budgetValue: Number(s.budget_value),
   };
@@ -78,12 +62,15 @@ export class CampaignRuleSyncService {
       const isCbo = !!(campaign.dailyBudget || campaign.lifetimeBudget);
       FacebookAdsApi.init(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
 
+      // Múi giờ TKQC — dùng khi quy đổi mốc giờ Meta ↔ wall-clock lưu DB.
+      const tz = await this.getAccountTz(campaign.accountId);
+
       if (isCbo) {
         await this.syncScope(campaign.accountId, campaign.id, null, 'CAMPAIGN', {
           kind: 'campaign',
           id: campaign.id,
           name: campaign.name ?? campaign.id,
-        });
+        }, tz);
       } else {
         const adsets = await this.prisma.adSet.findMany({
           where: { campaignId: campaign.id },
@@ -94,7 +81,7 @@ export class CampaignRuleSyncService {
             kind: 'adset',
             id: a.id,
             name: a.name ?? a.id,
-          });
+          }, tz);
         }
       }
     } catch (err) {
@@ -111,6 +98,7 @@ export class CampaignRuleSyncService {
     adSetId: string | null,
     level: 'CAMPAIGN' | 'ADSET',
     entity: { kind: 'campaign' | 'adset'; id: string; name: string },
+    tz: string,
   ): Promise<void> {
     const { schedules, failed } = await this.fetchSchedules(entity.kind, entity.id);
     if (failed) return; // đọc lỗi → giữ nguyên DB scope này
@@ -137,7 +125,7 @@ export class CampaignRuleSyncService {
 
     const enabled = await this.fetchEnabled(entity.kind, entity.id);
     const status: 'ACTIVE' | 'PAUSED' = enabled ? 'ACTIVE' : 'PAUSED';
-    const repPeriods = schedules.map(metaToPeriod);
+    const repPeriods = schedules.map((s) => metaToPeriod(s, tz));
 
     let ruleId = canonical?.id;
     let taskId: string;
@@ -232,6 +220,15 @@ export class CampaignRuleSyncService {
         executedAt: new Date(),
       },
     });
+  }
+
+  // Múi giờ IANA của TKQC (Account.timezone) — mặc định Asia/Ho_Chi_Minh nếu chưa lưu.
+  private async getAccountTz(accountId: string): Promise<string> {
+    const account = await this.prisma.account.findUnique({
+      where: { id: accountId },
+      select: { timezone: true },
+    });
+    return normalizeAccountTz(account?.timezone);
   }
 
   // Bản ghi lịch DUY NHẤT (không điều kiện) của 1 scope (campaign nếu adSetId null,
