@@ -2317,6 +2317,7 @@ model SavedFilter {
   tableKey  String // Identifies the screen/table (e.g., "campaign-table")
   name      String
   filters   Json // Stores search, sortBy, sortOrder, and filters object
+  isDefault Boolean  @default(false) // Bộ lọc mặc định của user cho tableKey này; tối đa 1/(userId,tableKey). Additive, mặc định false → không đổi hành vi cũ.
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
