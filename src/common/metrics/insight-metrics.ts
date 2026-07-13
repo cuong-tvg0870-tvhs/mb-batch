@@ -319,7 +319,10 @@ export function aggregateDailyInsights(
     for (const f of ADDITIVE_FIELDS) out[f] += Number(row[f] ?? 0) || 0;
     for (const f of DEDUP_FIELDS) out[f] += Number(row[f] ?? 0) || 0;
 
-    const w = Number(row.videoView ?? row.videoPlay ?? row.impressions ?? 0) || 0;
+    // `||` (không phải `??`): videoView mặc định 0 (không bao giờ null) nên phải
+    // coi 0 = thiếu để rơi xuống videoPlay (field thực sự có số làm trọng số).
+    const w =
+      Number(row.videoView) || Number(row.videoPlay) || Number(row.impressions) || 0;
     const avg = Number(row.videoAvgWatchTime ?? 0) || 0;
     if (w > 0 && avg > 0) {
       vawtNum += avg * w;
