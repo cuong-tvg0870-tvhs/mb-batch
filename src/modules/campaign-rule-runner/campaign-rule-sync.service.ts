@@ -54,8 +54,10 @@ export class CampaignRuleSyncService {
   constructor(private prisma: PrismaService) {}
 
   /**
-   * Kéo budget schedules hiện tại của campaign từ Meta và upsert bản ghi "gương".
-   * CBO → schedules ở campaign; ABO → ở từng ad set. Meta rỗng → xoá bản gương.
+   * Kéo budget schedules hiện tại của campaign từ Meta và đồng bộ vào bản ghi lịch
+   * DUY NHẤT của campaign (cùng bản ghi mà user "gửi ngay" dùng — KHÔNG tạo bản
+   * gương thứ hai). CBO → schedules ở campaign; ABO → ở từng ad set.
+   * An toàn: nếu ĐỌC Meta lỗi thì KHÔNG đụng dữ liệu (tránh xoá nhầm lịch user).
    * KHÔNG throw (được gọi trong luồng sync) — lỗi chỉ log.
    */
   async reconcileFromMeta(campaignId: string): Promise<void> {
@@ -78,51 +80,67 @@ export class CampaignRuleSyncService {
       FacebookAdsApi.init(process.env.SDK_FACEBOOK_ACCESS_TOKEN!);
 
       // anyEnabled = có ít nhất 1 đối tượng đang BẬT lịch (is_budget_schedule_enabled)
-      // → status bản gương ACTIVE/PAUSED phản chiếu đúng công tắc trên Meta.
+      // → status ACTIVE/PAUSED phản chiếu đúng công tắc trên Meta.
       let anyEnabled = false;
+      let readFailed = false;
       const entities: { id: string; name: string; schedules: MetaSchedule[] }[] =
         [];
-      if (isCbo) {
-        const scheds = await this.fetchSchedules('campaign', campaign.id);
-        if (scheds.length) {
-          entities.push({
-            id: campaign.id,
-            name: campaign.name ?? campaign.id,
-            schedules: scheds,
-          });
-          if (await this.fetchEnabled('campaign', campaign.id)) anyEnabled = true;
+      const collect = async (
+        kind: 'campaign' | 'adset',
+        id: string,
+        name: string,
+      ) => {
+        const { schedules, failed } = await this.fetchSchedules(kind, id);
+        if (failed) {
+          readFailed = true;
+          return;
         }
+        if (schedules.length) {
+          entities.push({ id, name, schedules });
+          if (await this.fetchEnabled(kind, id)) anyEnabled = true;
+        }
+      };
+      if (isCbo) {
+        await collect('campaign', campaign.id, campaign.name ?? campaign.id);
       } else {
         const adsets = await this.prisma.adSet.findMany({
           where: { campaignId: campaign.id },
           select: { id: true, name: true },
         });
-        for (const a of adsets) {
-          const scheds = await this.fetchSchedules('adset', a.id);
-          if (scheds.length) {
-            entities.push({ id: a.id, name: a.name ?? a.id, schedules: scheds });
-            if (await this.fetchEnabled('adset', a.id)) anyEnabled = true;
-          }
-        }
+        for (const a of adsets) await collect('adset', a.id, a.name ?? a.id);
       }
+
+      // Đọc Meta lỗi ở bất kỳ đối tượng nào → bỏ qua vòng này, giữ nguyên DB.
+      if (readFailed) return;
 
       const status: 'ACTIVE' | 'PAUSED' = anyEnabled ? 'ACTIVE' : 'PAUSED';
       const totalSchedules = entities.reduce((n, e) => n + e.schedules.length, 0);
-      const existing = await this.prisma.campaignRule.findFirst({
-        where: { campaignId: campaign.id, syncedFromMeta: true, deletedAt: null },
-        select: { id: true },
-      });
 
-      // Meta không còn schedule → xoá bản gương nếu có.
+      // Bản ghi lịch DUY NHẤT (mọi bản không-điều-kiện) + gộp trùng nếu lỡ có nhiều.
+      const canonical = await this.findOrCollapseCanonical(campaign.id);
+
+      // Meta không còn schedule: bản gương thuần → xoá; bản do user tạo → chỉ TẮT
+      // (giữ record + khung để không mất dữ liệu người dùng).
       if (totalSchedules === 0) {
-        if (existing)
-          await this.prisma.campaignRule.delete({ where: { id: existing.id } });
+        if (canonical) {
+          if (canonical.syncedFromMeta) {
+            await this.prisma.campaignRule.update({
+              where: { id: canonical.id },
+              data: { deletedAt: new Date() },
+            });
+          } else {
+            await this.prisma.campaignRule.update({
+              where: { id: canonical.id },
+              data: { status: 'PAUSED' },
+            });
+          }
+        }
         return;
       }
 
       const repPeriods = entities.flatMap((e) => e.schedules.map(metaToPeriod));
 
-      let ruleId = existing?.id;
+      let ruleId = canonical?.id;
       let taskId: string;
       if (!ruleId) {
         const rule = await this.prisma.campaignRule.create({
@@ -153,6 +171,8 @@ export class CampaignRuleSyncService {
           data: { taskId, rootForTaskId: taskId, operator: 'AND', position: 0 },
         });
       } else {
+        // Giữ nguyên "nguồn gốc" (syncedFromMeta) của bản ghi user — chỉ cập nhật
+        // cấp + trạng thái theo Meta.
         await this.prisma.campaignRule.update({
           where: { id: ruleId },
           data: { level, status },
@@ -179,7 +199,7 @@ export class CampaignRuleSyncService {
           });
           taskId = created.id;
         }
-        // Làm mới lịch sử run của bản gương để phản ánh trạng thái Meta hiện tại.
+        // Làm mới lịch sử run để phản ánh trạng thái Meta hiện tại.
         await this.prisma.campaignRuleRun.deleteMany({ where: { ruleId } });
       }
 
@@ -219,6 +239,25 @@ export class CampaignRuleSyncService {
     }
   }
 
+  // Bản ghi lịch DUY NHẤT (không điều kiện) của campaign; nếu có nhiều bản trùng
+  // → giữ bản do user tạo (syncedFromMeta=false) rồi tới bản cũ nhất, xoá mềm phần dư.
+  private async findOrCollapseCanonical(campaignId: string) {
+    const rows = await this.prisma.campaignRule.findMany({
+      where: { campaignId, schedule: { is: null }, deletedAt: null },
+      orderBy: [{ syncedFromMeta: 'asc' }, { createdAt: 'asc' }],
+      select: { id: true, syncedFromMeta: true },
+    });
+    if (rows.length === 0) return null;
+    const [keep, ...extras] = rows;
+    if (extras.length) {
+      await this.prisma.campaignRule.updateMany({
+        where: { id: { in: extras.map((e) => e.id) } },
+        data: { deletedAt: new Date() },
+      });
+    }
+    return keep;
+  }
+
   // Đọc cờ is_budget_schedule_enabled của entity (công tắc lịch trên Meta).
   private async fetchEnabled(
     kind: 'campaign' | 'adset',
@@ -240,10 +279,12 @@ export class CampaignRuleSyncService {
     }
   }
 
+  // Đọc budget schedules của 1 target. `failed=true` khi gọi Meta lỗi (phân biệt
+  // với "không có schedule") để luồng reconcile không xoá nhầm dữ liệu.
   private async fetchSchedules(
     kind: 'campaign' | 'adset',
     id: string,
-  ): Promise<MetaSchedule[]> {
+  ): Promise<{ schedules: MetaSchedule[]; failed: boolean }> {
     try {
       // SDK types cho union Campaign|AdSet thiếu getBudgetSchedules → cast.
       const target: {
@@ -253,11 +294,15 @@ export class CampaignRuleSyncService {
         ['id', 'time_start', 'time_end', 'budget_value', 'budget_value_type'],
         { limit: 100 },
       );
-      return ((cursor as unknown as { _data?: MetaSchedule }[]) || []).map(
+      const schedules = ((cursor as unknown as { _data?: MetaSchedule }[]) || []).map(
         (s) => (s as { _data?: MetaSchedule })._data ?? (s as unknown as MetaSchedule),
       );
-    } catch {
-      return [];
+      return { schedules, failed: false };
+    } catch (err) {
+      this.logger.warn(
+        `đọc budget schedules ${kind} ${id} lỗi: ${(err as Error)?.message}`,
+      );
+      return { schedules: [], failed: true };
     }
   }
 }
