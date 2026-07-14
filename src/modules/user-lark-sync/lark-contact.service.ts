@@ -234,6 +234,74 @@ export class LarkContactService {
     const key = (email || '').trim().toLowerCase();
     if (!key) return null;
     const dir = await this.getDirectoryMap(force);
-    return dir.get(key) || null;
+    const hit = dir.get(key);
+    if (hit) return hit;
+
+    // Miss danh bạ (scopes chỉ gồm user trong phạm vi khả kiến) → fallback
+    // batch_get_id phủ toàn tenant để bắt cả người ngoài phạm vi (vd CEO).
+    const viaBatch = await this.fetchByBatchGetId(key);
+    if (viaBatch) {
+      const emails: string[] = [];
+      if (viaBatch.raw?.enterprise_email)
+        emails.push(String(viaBatch.raw.enterprise_email).toLowerCase());
+      if (viaBatch.raw?.email)
+        emails.push(String(viaBatch.raw.email).toLowerCase());
+      if (!emails.length) emails.push(key);
+      for (const e of emails) {
+        dir.set(e, viaBatch);
+        for (const a of this.aliasEmails(e))
+          if (!dir.has(a)) dir.set(a, viaBatch);
+      }
+    }
+    return viaBatch;
+  }
+
+  /**
+   * Fallback: tra user theo email qua `contact/v3/users/batch_get_id` (phủ toàn
+   * tenant, KHÔNG giới hạn phạm vi danh bạ khả kiến). Thử cả email gốc lẫn biến
+   * thể domain công ty vì `batch_get_id` chỉ match email primary (không match
+   * enterprise_email). Có open_id thì lấy chi tiết đầy đủ để dựng LarkContactUser.
+   */
+  private async fetchByBatchGetId(
+    email: string,
+  ): Promise<LarkContactUser | null> {
+    const candidates = Array.from(
+      new Set([email, ...this.aliasEmails(email)]),
+    ).filter(Boolean);
+    if (!candidates.length) return null;
+
+    const data = await this.request(
+      'POST',
+      '/open-apis/contact/v3/users/batch_get_id',
+      { params: { user_id_type: 'open_id' }, data: { emails: candidates } },
+    );
+    if (data.code !== 0) {
+      this.logger.warn(
+        `Lark batch_get_id lỗi: ${data.code} ${data.msg} (email=${email})`,
+      );
+      return null;
+    }
+
+    const list: any[] = data.data?.user_list || [];
+    const openId = list.find((u) => u.user_id)?.user_id;
+    if (!openId) return null;
+
+    const detail = await this.request(
+      'GET',
+      `/open-apis/contact/v3/users/${encodeURIComponent(openId)}`,
+      {
+        params: {
+          user_id_type: 'open_id',
+          department_id_type: 'open_department_id',
+        },
+      },
+    );
+    if (detail.code !== 0 || !detail.data?.user) {
+      this.logger.warn(
+        `Lark users/get lỗi: ${detail.code} ${detail.msg} (open_id=${openId})`,
+      );
+      return null;
+    }
+    return this.mapUser(detail.data.user);
   }
 }
