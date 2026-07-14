@@ -3385,6 +3385,31 @@ model CampaignRule {
   @@map("campaign_rule")
 }
 
+// Mẫu quy tắc "lên lịch theo điều kiện" (cuốn chiếu): lưu lại ĐIỀU KIỆN + cấu hình
+// tăng ngân sách để áp nhanh cho campaign khác, khỏi nhập lại. KHÔNG gắn scope (tài
+// khoản/chiến dịch/nhóm) và KHÔNG kèm lịch quét — chỉ phần tái dùng được.
+model CampaignRuleTemplate {
+  id          String  @id @default(uuid())
+  name        String
+  description String?
+
+  // Config tái dùng — ĐÚNG wire shape rule-form dùng: { tasks: [...], filterGroups: [...] }.
+  // Áp mẫu = nạp thẳng vào form (giữ nguyên scope + lịch hiện tại của form).
+  config Json
+
+  // Chia sẻ: false = riêng người tạo; true = cả team thấy & dùng (thư viện chung).
+  isShared Boolean @default(false)
+
+  createdById String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  @@index([createdById, updatedAt(sort: Desc)])
+  @@index([isShared, updatedAt(sort: Desc)])
+  @@map("campaign_rule_template")
+}
+
 model CampaignRuleSchedule {
   id     String       @id @default(uuid())
   ruleId String       @unique
