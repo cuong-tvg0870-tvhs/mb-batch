@@ -3589,3 +3589,110 @@ model CampaignRuleRunItem {
   @@index([status, createdAt(sort: Desc)])
   @@map("campaign_rule_run_item")
 }
+
+// ============================================================================
+// AUTO-LAUNCH RULE — "Quy tắc tự lên Camp"
+// ----------------------------------------------------------------------------
+// Marketer hay tìm creative ROAS/chỉ số ngon rồi nhân lên bằng MẪU có sẵn. Cụm này
+// canh giúp: gom đủ N creative ĐẠT CHUẨN (organic valid-post, KHÔNG dark post) → tự
+// lên 1 chiến dịch từ mẫu (điền mỗi creative vào 1 vị trí) → hoặc để BẢN NHÁP cho
+// người duyệt, hoặc TỰ ĐĂNG lên Meta.
+//
+// Điều kiện + lịch dùng CHUNG bộ rule-builder với "lịch tăng ngân sách" (Care Ads) →
+// lưu theo shape `config = { tasks: [...] }` (cây điều kiện, giống CampaignRuleTemplate)
+// + `schedule` JSON. Runner mb-batch rút VALUE conditions ra chấm từng creative trên
+// CreativeInsight; hành động lên camp bọc pipeline "Lên Camp bằng template" hiện có.
+//
+// CHỐNG SPAM (nhiều lớp): lịch theo KHUNG GIỜ (SPECIFIC) thay vì loop; mỗi lần kiểm
+// tra tối đa 1 camp; trần camp/ngày; creative đã dùng KHÔNG chọn lại (reuse NEW_ONLY).
+//
+// Additive/non-breaking. Migration TAY (chưa `prisma migrate dev` vs prod) — xem
+// prisma/migrations/<ts>_auto_launch_rule/migration.sql.
+// ============================================================================
+
+enum AutoLaunchRuleStatus {
+  ACTIVE
+  PAUSED
+}
+
+enum AutoLaunchRunStatus {
+  LAUNCHED // đã lên 1 chiến dịch (nháp hoặc tự đăng)
+  SKIPPED_NOT_ENOUGH // chưa gom đủ N creative đạt chuẩn
+  SKIPPED_DAILY_CAP // đã chạm trần camp/ngày
+  SKIPPED_NO_NEW // đủ chỉ số nhưng hết creative MỚI (đã dùng hết)
+  FAILED // lỗi khi dựng/đăng
+}
+
+model AutoLaunchRule {
+  id     String               @id @default(uuid())
+  name   String
+  status AutoLaunchRuleStatus @default(ACTIVE)
+
+  // Các Account.id để QUÉT creative (và lên camp cho CHÍNH tài khoản đó — post_id
+  // reuse cùng account, an toàn). Mỗi tài khoản gom đủ N → 1 camp trên nó.
+  accountIds String[]
+
+  // Cây điều kiện rule-builder: { tasks: [{ rootGroup, ... }] } — CHUNG shape với
+  // CampaignRuleTemplate.config. Runner rút các VALUE condition (metric/operator/amount
+  // + timeframe) ra để chấm mỗi creative.
+  config Json
+
+  // Lịch chạy — { type:"INTERVAL"|"SPECIFIC", interval?, specificSlots?, useDateRange?,
+  // dateFrom?, dateTo? } (đúng RHF `schedule.*` của rule-builder). Mặc định SPECIFIC
+  // theo khung giờ để chống spam.
+  schedule Json
+
+  // Mẫu để lên (TemplateCampaign.id, scalar FK). minQualifying = gom đủ N → 1 camp.
+  templateId    String
+  minQualifying Int    @default(5)
+
+  // Xong thì làm gì — tái dùng enum của draft-automation (DRAFT_ONLY | PUBLISH_IMMEDIATELY).
+  publishMode DraftAutomationPublishMode @default(DRAFT_ONLY)
+
+  // CHỐNG SPAM: trần chiến dịch/ngày (áp cả nháp lẫn tự đăng).
+  maxCampaignsPerDay Int @default(2)
+  // Chỉ khi tự đăng: trần ngân sách mỗi chiến dịch (VND, major units).
+  budgetCapPerCampaign Int?
+
+  // Số chiến dịch quy tắc này đã tạo ra (đếm cộng dồn — hiển thị + đối soát).
+  launchedCount Int @default(0)
+
+  runs AutoLaunchRuleRun[]
+
+  createdById String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  @@index([status, updatedAt(sort: Desc)])
+  @@index([createdById, updatedAt(sort: Desc)])
+  @@map("auto_launch_rule")
+}
+
+// Nhật ký chạy (như Care Ads AutomationRuleRun) — mỗi lần runner kiểm tra 1 khung giờ
+// ghi 1 bản ghi: đã lên camp / chưa đủ / chạm trần / hết creative mới / lỗi.
+model AutoLaunchRuleRun {
+  id     String         @id @default(uuid())
+  ruleId String
+  rule   AutoLaunchRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  scheduledFor DateTime // mốc khung giờ đã canh (aligned) — cùng dùng cho dedupe
+  status       AutoLaunchRunStatus
+  scanned      Int                 @default(0) // số creative quét qua
+  qualified    Int                 @default(0) // số đạt chuẩn (đã loại dark + đã dùng)
+  message      String? // diễn giải ngắn cho marketer
+
+  // Khi LAUNCHED:
+  usedCreatives       Json? // [{ id, name, roas }] — creative thực sự đưa vào camp
+  generatedCampaignId String? // SystemCampaign.id sinh ra
+  metaId              String? // meta campaign id (nếu đã tự đăng)
+  mode                DraftAutomationPublishMode?
+
+  // Idempotency chống chạy trùng cùng 1 khung: "ruleId:<aligned scheduledFor ISO>".
+  dedupeKey String? @unique
+
+  createdAt DateTime @default(now())
+
+  @@index([ruleId, createdAt(sort: Desc)])
+  @@map("auto_launch_rule_run")
+}

@@ -18,6 +18,7 @@ import { MetaMediaSyncModule } from './modules/meta-media-sync/meta-media-sync.m
 import { MetaMediaUploadModule } from './modules/meta-media-upload/meta-media-upload.module';
 import { MetaSyncModule } from './modules/meta-sync/meta-sync.module';
 import { UserLarkSyncModule } from './modules/user-lark-sync/user-lark-sync.module';
+import { AutoLaunchTriggerModule } from './modules/auto-launch-trigger/auto-launch-trigger.module';
 
 export const global_modules = [
   ScheduleModule.forRoot(),
@@ -45,6 +46,7 @@ export const global_modules = [
     DistributedLockModule,
     HealthModule,
     BatchRunLogModule,
+    AutoLaunchTriggerModule,
     MetaApiModule,
     InsightSyncModule,
     MetaSyncModule,
