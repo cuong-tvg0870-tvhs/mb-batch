@@ -13,7 +13,6 @@ import { EvalContext, evaluateGroup } from './campaign-rule-evaluator';
 import {
   buildRollingSpec,
   buildSpecs,
-  deleteBudgetSchedules,
   executeBudgetSchedule,
   fetchBudgetSchedules,
   fetchLiveBudget,
@@ -262,6 +261,57 @@ export class CampaignRuleRunnerService {
     now: Date,
   ): Promise<{ matched: number; errors: number }> {
     const level: 'CAMPAIGN' | 'ADSET' = rule.level;
+
+    // ---- Cuốn chiếu: bỏ qua đọc insight khi đang GIỮA khung ----
+    // Rule chỉ toàn task ROLLING: nếu khung "của mình" còn phủ xa hơn lead thì
+    // rule đang "nghỉ" — chỉ cần đánh giá điều kiện ở đuôi khung (T'−lead). Kiểm
+    // tra coveredUntil TRƯỚC (chỉ tốn 1 call budget schedules) để KHÔNG gọi
+    // getInsights suốt thời gian khung chạy (đỡ token). Tail-tick sẽ rơi xuống
+    // luồng dưới, fetch insight bình thường.
+    const allRolling =
+      rule.tasks.length > 0 &&
+      rule.tasks.every(
+        (t: any) =>
+          t.kind === 'BUDGET_SCHEDULE_BUMP' && t.params?.mode === 'ROLLING',
+      );
+    if (allRolling) {
+      const nowUnix = Math.floor(now.getTime() / 1000);
+      const ownedIds = await this.gatherOwnedScheduleIds(rule.id, entity.id);
+      const live = await fetchBudgetSchedules(level, entity.id);
+      const coveredUntil = live.reduce(
+        (mx, w) =>
+          ownedIds.has(w.id) && w.time_end > nowUnix
+            ? Math.max(mx, w.time_end)
+            : mx,
+        nowUnix,
+      );
+      const maxLead = rule.tasks.reduce(
+        (mx: number, t: any) =>
+          Math.max(
+            mx,
+            Math.max(0, Math.round(t.params?.rolling?.leadMinutes ?? 15)) * 60,
+          ),
+        0,
+      );
+      if (coveredUntil - nowUnix > maxLead) {
+        for (const task of rule.tasks) {
+          await this.createItem({
+            runId,
+            task,
+            level,
+            entity,
+            status: 'SKIPPED',
+            snapshot: { budgets: this.budgetSnapshot(entity) },
+            changePreview: { rolling: { mode: 'ROLLING', coveredUntil } },
+            evaluation: { matched: true },
+            matchedConditionSummary:
+              'Đang còn khung phủ → chưa cần nối (bỏ qua đọc insight, đỡ token).',
+          });
+        }
+        return { matched: rule.tasks.length, errors: 0 };
+      }
+    }
+
     let insight: any;
     try {
       insight = await this.fetchLiveInsight(level, entity.id);
@@ -418,7 +468,8 @@ export class CampaignRuleRunnerService {
    *  - Đánh giá điều kiện trên insight LIVE.
    *  - Đọc khung budget schedule THẬT trên Meta, tách "của mình" (owned) vs người khác.
    *  - ĐẠT + sắp hết phủ (coveredUntil − now ≤ lead) → tạo 1 khung KẾ nối đuôi; còn phủ
-   *    xa thì NO-OP ("rule nghỉ"). KHÔNG đạt → dừng nối + HUỶ khung của mình CHƯA bắt đầu.
+   *    xa thì NO-OP ("rule nghỉ"). KHÔNG đạt → dừng nối, GIỮ NGUYÊN khung đã đặt
+   *    (không huỷ; Meta tự revert ngân sách khi khung hết hạn, care-ads lo tắt ads xấu).
    */
   private async processRollingTask(args: {
     runId: string;
@@ -457,16 +508,12 @@ export class CampaignRuleRunnerService {
       nowUnix,
     );
 
-    // ---- KHÔNG đạt điều kiện: dừng nối + huỷ khung của mình CHƯA bắt đầu ----
+    // ---- KHÔNG đạt điều kiện: DỪNG nối, GIỮ NGUYÊN mọi khung đã đặt ----
+    // KHÔNG xoá/huỷ khung nào (kể cả khung chưa bắt đầu): (1) ads xấu đã có rule
+    // care-ads tự tắt, khung đã tăng cũng không tiêu; (2) huỷ/xoá lịch nhiều lần
+    // phá hành vi máy học của camp; (3) Meta tự đưa ngân sách về gốc khi khung hết
+    // hạn. Chỉ số giảm giữa chừng → không cần can thiệp.
     if (!isMatched) {
-      const toCancel = ownedWindows
-        .filter((w) => w.time_start > nowUnix)
-        .map((w) => w.id);
-      let cancelled = 0;
-      if (toCancel.length) {
-        cancelled = (await deleteBudgetSchedules(toCancel)).removed;
-        await this.clearScheduleIds(rule.id, entity.id, toCancel);
-      }
       await this.createItem({
         runId,
         task,
@@ -474,12 +521,10 @@ export class CampaignRuleRunnerService {
         entity,
         status: 'NOT_MATCHED',
         snapshot,
-        changePreview: { rolling: { mode: 'ROLLING' }, cancelledFutureWindows: cancelled },
+        changePreview: { rolling: { mode: 'ROLLING' } },
         evaluation: { matched: false },
         matchedConditionSummary:
-          cancelled > 0
-            ? `Điều kiện không đạt → dừng nối, đã huỷ ${cancelled} khung chưa bắt đầu.`
-            : 'Điều kiện không đạt → không nối khung mới.',
+          'Điều kiện không đạt → dừng nối khung mới (giữ nguyên khung đang chạy).',
       });
       return { matched: 0, errors: 0 };
     }
@@ -598,28 +643,6 @@ export class CampaignRuleRunnerService {
       select: { metaBudgetScheduleIds: true },
     });
     return new Set(items.flatMap((i) => i.metaBudgetScheduleIds).map(String));
-  }
-
-  /** Gỡ các id HDP đã xoá khỏi metaBudgetScheduleIds của các run-item (giữ id còn sống). */
-  private async clearScheduleIds(
-    ruleId: string,
-    entityId: string,
-    ids: string[],
-  ): Promise<void> {
-    const cancelled = new Set(ids.map(String));
-    const items = await this.prisma.campaignRuleRunItem.findMany({
-      where: { run: { ruleId }, entityId },
-      select: { id: true, metaBudgetScheduleIds: true },
-    });
-    for (const it of items) {
-      const kept = it.metaBudgetScheduleIds.filter((id) => !cancelled.has(String(id)));
-      if (kept.length !== it.metaBudgetScheduleIds.length) {
-        await this.prisma.campaignRuleRunItem.update({
-          where: { id: it.id },
-          data: { metaBudgetScheduleIds: kept },
-        });
-      }
-    }
   }
 
   /** Fetch insight LIVE (date_preset=today) cho campaign/adset. Trả object phẳng (rỗng nếu không có). */
