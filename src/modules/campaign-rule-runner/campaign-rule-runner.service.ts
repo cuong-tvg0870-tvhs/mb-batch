@@ -45,6 +45,10 @@ interface RunnerEntity {
   name?: string | null;
   dailyBudget?: number | null;
   lifetimeBudget?: number | null;
+  // Cho hours_since_creation (rawPayload.created_time, fallback startTime) và results
+  // (rawPayload.optimization_goal / promoted_object.custom_event_type ở level ad set).
+  startTime?: Date | null;
+  rawPayload?: any;
 }
 
 /**
@@ -282,6 +286,8 @@ export class CampaignRuleRunnerService {
           name: true,
           dailyBudget: true,
           lifetimeBudget: true,
+          startTime: true,
+          rawPayload: true,
         },
       });
       return campaign ? [campaign] : [];
@@ -299,6 +305,8 @@ export class CampaignRuleRunnerService {
         name: true,
         dailyBudget: true,
         lifetimeBudget: true,
+        startTime: true,
+        rawPayload: true,
       },
     });
   }

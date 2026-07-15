@@ -56,4 +56,19 @@ export const INSIGHT_FIELDS = [
   'action_values',
   'purchase_roas',
   'cost_per_action_type',
+  // Link/outbound clicks (đếm + cost/ctr) — cho các metric tương ứng ở dropdown.
+  'inline_link_clicks',
+  'inline_link_click_ctr',
+  'cost_per_inline_link_click',
+  'outbound_clicks',
+  // Video — field mảng-thống-kê [{action_type,value}], đọc [0].value.
+  'video_thruplay_watched_actions',
+  'video_15_sec_watched_actions',
+  'video_30_sec_watched_actions',
+  'video_p25_watched_actions',
+  'video_p50_watched_actions',
+  'video_p75_watched_actions',
+  'video_p95_watched_actions',
+  'video_p100_watched_actions',
+  'video_avg_time_watched_actions',
 ];
