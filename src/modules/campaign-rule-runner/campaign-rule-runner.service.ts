@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { AdSet, Campaign, FacebookAdsApi } from 'facebook-nodejs-business-sdk';
 import { executeMetaApiWithRetry, parseMetaError } from '../../common/utils';
+import { AppConfigReader } from '../app-config/app-config.reader';
 import { DistributedLockService } from '../distributed-lock/distributed-lock.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
@@ -9,7 +10,11 @@ import {
   MAX_GROUP_DEPTH,
   RULE_LOCK_TTL_SECONDS,
 } from './campaign-rule-runner.constants';
-import { EvalContext, evaluateGroup } from './campaign-rule-evaluator';
+import {
+  EvalContext,
+  explainGroup,
+  summarizeEvaluation,
+} from './campaign-rule-evaluator';
 import {
   buildRollingSpec,
   buildSpecs,
@@ -59,7 +64,56 @@ export class CampaignRuleRunnerService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly lock: DistributedLockService,
+    private readonly appConfig: AppConfigReader,
   ) {}
+
+  /**
+   * SÀN HIỆU QUẢ LIVE: chặn bơm ngân sách khi ROAS HÔM NAY (insight date_preset=today)
+   * của đối tượng thấp hơn sàn cấu hình — đỡ đổ thêm tiền vào camp đang lỗ (phân tích
+   * cho thấy ~40% lượt bơm rơi vào camp ROAS sập). Chỉ chặn khi:
+   *   - sàn > 0 (bật), VÀ
+   *   - đã tiêu ≥ ngưỡng tối thiểu hôm nay (ROAS đầu ngày ít dữ liệu → không chặn nhầm), VÀ
+   *   - đo ĐƯỢC ROAS (null = camp tin nhắn/không mua → KHÔNG chặn).
+   * Trả { block, reason?, roas, spend, floor }.
+   */
+  private async evalBumpGuard(insight: any): Promise<{
+    block: boolean;
+    reason?: string;
+    roas: number | null;
+    spend: number | null;
+    floor: number;
+    minSpend: number;
+  }> {
+    const floor = await this.appConfig.getNumber(
+      'campaign_rule_bump_roas_floor',
+      1,
+      'CAMPAIGN_RULE_BUMP_ROAS_FLOOR',
+    );
+    const minSpend = await this.appConfig.getNumber(
+      'campaign_rule_bump_guard_min_spend',
+      50000,
+      'CAMPAIGN_RULE_BUMP_GUARD_MIN_SPEND',
+    );
+    const spend = resolveMetric('spend', insight, null);
+    const roas = resolveMetric('purchase_roas', insight, null);
+    if (!(floor > 0)) return { block: false, roas, spend, floor, minSpend };
+    if (spend == null || spend < minSpend)
+      return { block: false, roas, spend, floor, minSpend };
+    if (roas == null) return { block: false, roas, spend, floor, minSpend };
+    if (roas < floor) {
+      return {
+        block: true,
+        reason: `Hoãn bơm: ROAS hôm nay ${roas.toFixed(2)} < sàn ${floor} (đã chi ${Math.round(
+          spend,
+        )} ≥ ${minSpend}). Giữ nguyên khung đang chạy, không đổ thêm ngân sách vào camp hiệu quả thấp.`,
+        roas,
+        spend,
+        floor,
+        minSpend,
+      };
+    }
+    return { block: false, roas, spend, floor, minSpend };
+  }
 
   private initMetaApi() {
     if (this.metaInitialized) return;
@@ -379,7 +433,11 @@ export class CampaignRuleRunnerService {
         continue;
       }
 
-      const isMatched = evaluateGroup(task.rootGroup, ctx);
+      // Đánh giá + GIẢI THÍCH điều kiện (ghi vào evaluation để nhật ký hiện vì sao).
+      const evalTree = explainGroup(task.rootGroup, ctx);
+      const isMatched = evalTree.matched;
+      const evalSummary = summarizeEvaluation(evalTree);
+      const evaluation = { matched: isMatched, summary: evalSummary, tree: evalTree };
       const snapshot = this.buildSnapshot(insight, entity);
       // % (MULTIPLIER) quy đổi theo ngân sách THẬT của chính đối tượng đang xét.
       const targetBudget = entity?.dailyBudget ?? entity?.lifetimeBudget ?? null;
@@ -397,7 +455,8 @@ export class CampaignRuleRunnerService {
           status: 'NOT_MATCHED',
           snapshot,
           changePreview,
-          evaluation: { matched: false },
+          evaluation,
+          matchedConditionSummary: evalSummary,
         });
         continue;
       }
@@ -405,6 +464,23 @@ export class CampaignRuleRunnerService {
       matched += 1;
 
       if (rule.autoExecute) {
+        // Sàn hiệu quả live: ROAS hôm nay dưới sàn → HOÃN bơm (không đổ thêm tiền vào
+        // camp đang lỗ). Item SKIPPED, giữ nguyên khung đang chạy.
+        const guard = await this.evalBumpGuard(insight);
+        if (guard.block) {
+          await this.createItem({
+            runId,
+            task,
+            level,
+            entity,
+            status: 'SKIPPED',
+            snapshot,
+            changePreview: { ...changePreview, guard },
+            evaluation: { ...evaluation, guardBlocked: true },
+            matchedConditionSummary: guard.reason,
+          });
+          continue;
+        }
         const result = await executeBudgetSchedule(level, entity.id, specs);
         if (result.ok) {
           await this.createItem({
@@ -415,8 +491,8 @@ export class CampaignRuleRunnerService {
             status: 'EXECUTED',
             snapshot,
             changePreview,
-            evaluation: { matched: true },
-            matchedConditionSummary: 'Khớp điều kiện → đã đẩy budget schedule.',
+            evaluation,
+            matchedConditionSummary: `${evalSummary} → đã đẩy budget schedule.`,
             executedAt: new Date(),
             executionAttempts: 1,
             metaTraceId: result.metaTraceId,
@@ -432,8 +508,8 @@ export class CampaignRuleRunnerService {
             status: 'FAILED',
             snapshot,
             changePreview,
-            evaluation: { matched: true },
-            matchedConditionSummary: 'Khớp điều kiện nhưng đẩy Meta thất bại.',
+            evaluation,
+            matchedConditionSummary: `${evalSummary} nhưng đẩy Meta thất bại.`,
             errorMessage:
               result.error?.message || 'Đẩy budget schedule thất bại.',
             executionAttempts: 1,
@@ -451,8 +527,8 @@ export class CampaignRuleRunnerService {
           status: 'PENDING',
           snapshot,
           changePreview,
-          evaluation: { matched: true },
-          matchedConditionSummary: 'Khớp điều kiện → chờ xác nhận.',
+          evaluation,
+          matchedConditionSummary: `${evalSummary} → chờ xác nhận.`,
         });
       }
     }
@@ -495,7 +571,11 @@ export class CampaignRuleRunnerService {
     const targetBudget = liveEntity.dailyBudget ?? liveEntity.lifetimeBudget ?? null;
 
     const ctx: EvalContext = { insight, entity: liveEntity, now, timezone };
-    const isMatched = evaluateGroup(task.rootGroup, ctx);
+    // Đánh giá + GIẢI THÍCH điều kiện (ghi evaluation để nhật ký hiện vì sao đạt/không).
+    const evalTree = explainGroup(task.rootGroup, ctx);
+    const isMatched = evalTree.matched;
+    const evalSummary = summarizeEvaluation(evalTree);
+    const evaluation = { matched: isMatched, summary: evalSummary, tree: evalTree };
     const snapshot = this.buildSnapshot(insight, liveEntity);
 
     // Khung "của mình" = HDP do các lần chạy trước của rule này tạo (theo entity).
@@ -522,9 +602,8 @@ export class CampaignRuleRunnerService {
         status: 'NOT_MATCHED',
         snapshot,
         changePreview: { rolling: { mode: 'ROLLING' } },
-        evaluation: { matched: false },
-        matchedConditionSummary:
-          'Điều kiện không đạt → dừng nối khung mới (giữ nguyên khung đang chạy).',
+        evaluation,
+        matchedConditionSummary: `${evalSummary} → dừng nối khung mới (giữ nguyên khung đang chạy).`,
       });
       return { matched: 0, errors: 0 };
     }
@@ -541,8 +620,8 @@ export class CampaignRuleRunnerService {
         status: 'SKIPPED',
         snapshot,
         changePreview: { rolling: { mode: 'ROLLING', coveredUntil } },
-        evaluation: { matched: true },
-        matchedConditionSummary: 'Đang còn khung phủ → chưa cần nối khung mới.',
+        evaluation,
+        matchedConditionSummary: `${evalSummary} · đang còn khung phủ → chưa cần nối khung mới.`,
       });
       return { matched: 1, errors: 0 };
     }
@@ -564,8 +643,8 @@ export class CampaignRuleRunnerService {
         status: 'SKIPPED',
         snapshot,
         changePreview: { rolling: { mode: 'ROLLING', skipReason } },
-        evaluation: { matched: true },
-        matchedConditionSummary: `Khớp điều kiện nhưng chưa tạo khung (${skipReason ?? 'không rõ'}).`,
+        evaluation,
+        matchedConditionSummary: `${evalSummary} nhưng chưa tạo khung (${skipReason ?? 'không rõ'}).`,
       });
       return { matched: 1, errors: 0 };
     }
@@ -585,8 +664,26 @@ export class CampaignRuleRunnerService {
         status: 'PENDING',
         snapshot,
         changePreview,
-        evaluation: { matched: true },
-        matchedConditionSummary: 'Khớp điều kiện → chờ xác nhận (khung cuốn chiếu).',
+        evaluation,
+        matchedConditionSummary: `${evalSummary} → chờ xác nhận (khung cuốn chiếu).`,
+      });
+      return { matched: 1, errors: 0 };
+    }
+
+    // Sàn hiệu quả live (giống path FIXED): ROAS hôm nay dưới sàn → HOÃN nối khung mới.
+    // Không huỷ khung đang chạy (Meta tự revert khi hết hạn) — chỉ ngừng ĐỔ THÊM tiền.
+    const guard = await this.evalBumpGuard(insight);
+    if (guard.block) {
+      await this.createItem({
+        runId,
+        task,
+        level,
+        entity,
+        status: 'SKIPPED',
+        snapshot,
+        changePreview: { ...changePreview, guard },
+        evaluation: { ...evaluation, guardBlocked: true },
+        matchedConditionSummary: guard.reason,
       });
       return { matched: 1, errors: 0 };
     }
@@ -601,8 +698,8 @@ export class CampaignRuleRunnerService {
         status: 'EXECUTED',
         snapshot,
         changePreview,
-        evaluation: { matched: true },
-        matchedConditionSummary: 'Khớp điều kiện → đã nối khung tăng ngân sách.',
+        evaluation,
+        matchedConditionSummary: `${evalSummary} → đã nối khung tăng ngân sách.`,
         executedAt: new Date(),
         executionAttempts: 1,
         metaTraceId: result.metaTraceId,
@@ -618,8 +715,8 @@ export class CampaignRuleRunnerService {
       status: 'FAILED',
       snapshot,
       changePreview,
-      evaluation: { matched: true },
-      matchedConditionSummary: 'Khớp điều kiện nhưng đẩy Meta thất bại.',
+      evaluation,
+      matchedConditionSummary: `${evalSummary} nhưng đẩy Meta thất bại.`,
       errorMessage: result.error?.message || 'Đẩy budget schedule thất bại.',
       executionAttempts: 1,
       executionError: result.error,

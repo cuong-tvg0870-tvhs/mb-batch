@@ -121,3 +121,207 @@ export function evaluateCondition(cond: any, ctx: EvalContext): boolean {
       return false;
   }
 }
+
+// ============================================================================
+//  GIẢI THÍCH (EXPLAIN): song song evaluate nhưng GHI LẠI vì sao đạt/không đạt để
+//  hiển thị ở nhật ký. Không thay đổi logic đánh giá — matched giống evaluateGroup.
+// ============================================================================
+
+// Nhãn tiếng Việt cho metric (khớp condition-builder) — hiển thị nhật ký dễ đọc.
+const METRIC_LABEL: Record<string, string> = {
+  spend: 'Chi tiêu hôm nay',
+  purchase_roas: 'ROAS hôm nay',
+  website_purchase_roas: 'ROAS web hôm nay',
+  purchases: 'Số đơn hôm nay',
+  cpa: 'Chi phí/đơn (CPA)',
+  cost_per_purchase: 'Chi phí/đơn (CPA)',
+  cost_per_website_purchase: 'Chi phí/đơn web',
+  cost_per_unique_website_purchase: 'Chi phí/đơn web (unique)',
+  cost_per_result: 'Chi phí/kết quả',
+  results: 'Số kết quả',
+  impressions: 'Lượt hiển thị',
+  reach: 'Tiếp cận',
+  frequency: 'Tần suất',
+  clicks: 'Lượt click',
+  ctr: 'CTR (%)',
+  cpc: 'CPC',
+  cpm: 'CPM',
+  daily_budget: 'Ngân sách ngày',
+  lifetime_budget: 'Ngân sách trọn đời',
+};
+
+const metricLabel = (key?: string | null): string =>
+  (key && METRIC_LABEL[String(key).toLowerCase()]) || String(key ?? '—');
+
+const OP_SYMBOL: Record<string, string> = {
+  GREATER_THAN: '>',
+  LESS_THAN: '<',
+  GREATER_THAN_OR_EQUAL: '≥',
+  LESS_THAN_OR_EQUAL: '≤',
+  EQUAL: '=',
+  NOT_EQUAL: '≠',
+};
+const opSymbol = (op?: string): string => OP_SYMBOL[String(op ?? '')] || String(op ?? '?');
+
+const WEEKDAY_VI = ['CN', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7'];
+
+/** Số gọn: nguyên → không thập phân; lẻ → 2 số. */
+const fmtNum = (n: number): string =>
+  Number.isInteger(n) ? String(n) : n.toFixed(2);
+
+export interface ConditionExplain {
+  kind: 'condition';
+  compareType: string;
+  label: string; // "ROAS hôm nay"
+  actual: number | null; // giá trị đọc được (null = không đo được)
+  actualText: string; // hiển thị (đã format)
+  operator: string; // ký hiệu so sánh
+  threshold: string; // ngưỡng dạng chữ
+  matched: boolean;
+  note?: string; // ghi chú (vd không đọc được số liệu)
+}
+
+export interface GroupExplain {
+  kind: 'group';
+  operator: 'AND' | 'OR';
+  matched: boolean;
+  children: Array<ConditionExplain | GroupExplain>;
+}
+
+/** Giải thích 1 điều kiện lá: giá trị thực vs ngưỡng + đạt/không. */
+export function explainCondition(cond: any, ctx: EvalContext): ConditionExplain {
+  const p = cond?.params || {};
+  const base = (over: Partial<ConditionExplain>): ConditionExplain => ({
+    kind: 'condition',
+    compareType: String(cond?.compareType ?? '—'),
+    label: '—',
+    actual: null,
+    actualText: '—',
+    operator: '',
+    threshold: '',
+    matched: false,
+    ...over,
+  });
+
+  switch (cond?.compareType) {
+    case 'VALUE': {
+      const v = resolveMetric(p.metric, ctx.insight, ctx.entity);
+      const amount = Number(p.amount);
+      const okNums = v != null && Number.isFinite(amount);
+      return base({
+        label: metricLabel(p.metric),
+        actual: v,
+        actualText: v == null ? 'không đo được' : fmtNum(v),
+        operator: opSymbol(p.operator),
+        threshold: Number.isFinite(amount) ? fmtNum(amount) : '—',
+        matched: okNums ? compare(v as number, p.operator, amount) : false,
+        note: v == null ? 'Chưa có/không đọc được số liệu hôm nay' : undefined,
+      });
+    }
+    case 'METRIC': {
+      const left = resolveMetric(p.leftMetric, ctx.insight, ctx.entity);
+      const right = resolveMetric(p.rightMetric, ctx.insight, ctx.entity);
+      const mult =
+        p.multiplier == null || !Number.isFinite(Number(p.multiplier))
+          ? 1
+          : Number(p.multiplier);
+      const rhs = right == null ? null : mult * right;
+      const ok = left != null && rhs != null;
+      return base({
+        label: metricLabel(p.leftMetric),
+        actual: left,
+        actualText: left == null ? 'không đo được' : fmtNum(left),
+        operator: opSymbol(p.operator),
+        threshold:
+          rhs == null
+            ? `${mult !== 1 ? `${fmtNum(mult)}× ` : ''}${metricLabel(p.rightMetric)}`
+            : `${fmtNum(rhs)} (${mult !== 1 ? `${fmtNum(mult)}× ` : ''}${metricLabel(p.rightMetric)})`,
+        matched: ok ? compare(left as number, p.operator, rhs as number) : false,
+        note: !ok ? 'Chưa có/không đọc được số liệu để so sánh' : undefined,
+      });
+    }
+    case 'TIME': {
+      const tz =
+        !p.timezone || p.timezone === 'account'
+          ? ctx.timezone || DEFAULT_TIMEZONE
+          : p.timezone;
+      const { weekday, hour } = zonedTimeParts(ctx.now, tz);
+      const days: number[] = Array.isArray(p.daysOfWeek) ? p.daysOfWeek : [];
+      const dayOk = days.includes(weekday);
+      const targetHour = Number(p.hour);
+      const hourOk = Number.isFinite(targetHour)
+        ? p.operator === 'GREATER_THAN'
+          ? hour > targetHour
+          : hour < targetHour
+        : false;
+      const daysText = days.length
+        ? days.map((d) => WEEKDAY_VI[d] ?? d).join(',')
+        : 'mọi ngày';
+      return base({
+        label: 'Khung giờ',
+        actual: hour,
+        actualText: `${hour}h ${WEEKDAY_VI[weekday] ?? weekday}`,
+        operator: opSymbol(p.operator),
+        threshold: `${Number.isFinite(targetHour) ? `${targetHour}h` : '—'} · ${daysText}`,
+        matched: dayOk && hourOk,
+        note: !dayOk ? 'Ngoài các ngày đã chọn' : undefined,
+      });
+    }
+    case 'RANKING':
+    default:
+      return base({
+        label: 'Xếp hạng',
+        note: 'Loại điều kiện chưa hỗ trợ đánh giá',
+        matched: false,
+      });
+  }
+}
+
+/** Giải thích 1 group đệ quy (matched giống evaluateGroup). */
+export function explainGroup(group: any, ctx: EvalContext): GroupExplain {
+  const operator: 'AND' | 'OR' = group?.operator === 'OR' ? 'OR' : 'AND';
+  const conditions: any[] = Array.isArray(group?.conditions)
+    ? group.conditions
+    : [];
+  const childGroups: any[] = Array.isArray(group?.childGroups)
+    ? group.childGroups
+    : [];
+  const children: Array<ConditionExplain | GroupExplain> = [
+    ...conditions.map((c) => explainCondition(c, ctx)),
+    ...childGroups.map((g) => explainGroup(g, ctx)),
+  ];
+  const matched =
+    children.length === 0
+      ? true
+      : operator === 'OR'
+        ? children.some((c) => c.matched)
+        : children.every((c) => c.matched);
+  return { kind: 'group', operator, matched, children };
+}
+
+/** Gom mọi điều kiện lá (phẳng) từ cây explain. */
+function flattenConditions(node: ConditionExplain | GroupExplain): ConditionExplain[] {
+  if (node.kind === 'condition') return [node];
+  return node.children.flatMap(flattenConditions);
+}
+
+/**
+ * Câu tóm tắt cho nhật ký: nếu KHÔNG đạt → liệt kê điều kiện chưa đạt (số thực vs
+ * ngưỡng). Nếu đạt → "Đạt X/Y điều kiện". Dùng cho matchedConditionSummary.
+ */
+export function summarizeEvaluation(tree: GroupExplain): string {
+  const leaves = flattenConditions(tree);
+  if (leaves.length === 0) return 'Không có điều kiện → luôn đạt.';
+  const failed = leaves.filter((c) => !c.matched);
+  if (tree.matched) {
+    return `Đạt điều kiện (${leaves.length - failed.length}/${leaves.length}).`;
+  }
+  const reasons = failed
+    .slice(0, 4)
+    .map(
+      (c) =>
+        `${c.label} ${c.actualText}${c.operator ? ` (cần ${c.operator} ${c.threshold})` : ''}`,
+    );
+  const more = failed.length > 4 ? ` +${failed.length - 4} điều kiện khác` : '';
+  return `Chưa đạt: ${reasons.join('; ')}${more}.`;
+}
