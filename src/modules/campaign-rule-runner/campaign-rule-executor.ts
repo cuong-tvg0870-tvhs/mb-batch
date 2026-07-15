@@ -2,6 +2,8 @@ import { Logger } from '@nestjs/common';
 import { AdSet, Campaign, HighDemandPeriod } from 'facebook-nodejs-business-sdk';
 import { parseMetaError } from '../../common/utils';
 import {
+  ceilToQuarter,
+  floorToQuarter,
   metaTimeToUnix,
   nextClockUnix,
   wallClockToUnix,
@@ -57,9 +59,11 @@ export function buildSpecs(
   const specs: BudgetScheduleSpec[] = [];
   for (const period of periods) {
     if (!period) continue;
-    const timeStart = wallClockToUnix(String(period.timeStart), tz);
-    const timeEnd = wallClockToUnix(String(period.timeEnd), tz);
+    // Căn mốc 15' (Meta bắt buộc): start làm tròn LÊN, end làm tròn XUỐNG.
+    const timeStart = ceilToQuarter(wallClockToUnix(String(period.timeStart), tz));
+    const timeEnd = floorToQuarter(wallClockToUnix(String(period.timeEnd), tz));
     if (!Number.isFinite(timeStart) || !Number.isFinite(timeEnd)) continue;
+    if (timeEnd <= timeStart) continue; // khung rỗng sau khi căn mốc → bỏ
 
     const type = period.budgetValueType || 'ABSOLUTE';
     const rawValue = Number(period.budgetValue);
@@ -136,6 +140,10 @@ export function buildRollingSpec(
   // Nối LIỀN sau vùng phủ hiện có (start = coveredUntil nếu còn ở tương lai) → không
   // hở khung. Chưa có phủ → bắt đầu ở now + lead (Meta cần khung bắt đầu ở tương lai).
   let start = opts.coveredUntil > opts.nowUnix ? opts.coveredUntil : opts.nowUnix + lead;
+  // Meta bắt mốc khung rơi đúng 00/15/30/45 → căn start LÊN NGAY để DURATION (start+X
+  // giờ) cũng tính từ mốc chuẩn. (Khi nối sau coveredUntil/khung foreign — vốn đã do
+  // Meta enforce đúng mốc — ceil là no-op.)
+  start = ceilToQuarter(start);
 
   let end: number;
   if (rolling.windowMode === 'UNTIL_CLOCK') {
@@ -175,6 +183,11 @@ export function buildRollingSpec(
       break;
     }
   }
+
+  // Căn mốc 15' LẦN CUỐI: end làm tròn XUỐNG (UNTIL_CLOCK/maxChainHours/hardEndAt/né
+  // foreign có thể tạo phút lẻ), start ceil lại phòng hờ. Meta chặn nếu lệch mốc.
+  start = ceilToQuarter(start);
+  end = floorToQuarter(end);
 
   if (end <= start) return { skipReason: 'boundary_reached' };
 

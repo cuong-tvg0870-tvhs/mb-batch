@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { AdSet, Campaign, FacebookAdsApi } from 'facebook-nodejs-business-sdk';
-import { parseMetaError } from '../../common/utils';
+import { executeMetaApiWithRetry, parseMetaError } from '../../common/utils';
 import { DistributedLockService } from '../distributed-lock/distributed-lock.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
@@ -651,10 +651,22 @@ export class CampaignRuleRunnerService {
     entityId: string,
   ): Promise<any> {
     const params = { date_preset: 'today' };
-    const rows =
-      level === 'CAMPAIGN'
-        ? await new Campaign(entityId).getInsights(INSIGHT_FIELDS, params)
-        : await new AdSet(entityId).getInsights(INSIGHT_FIELDS, params);
+    // Meta hay chập chờn "no response was received" (timeout mạng) → retry NGẮN 2 lần
+    // (3s, 6s) cho lỗi transient. getInsights là đọc-only nên retry an toàn; backoff
+    // ngắn để không kéo dài tick runner (mỗi entity 1 lần/tick).
+    const rows = await executeMetaApiWithRetry(
+      () =>
+        level === 'CAMPAIGN'
+          ? new Campaign(entityId).getInsights(INSIGHT_FIELDS, params)
+          : new AdSet(entityId).getInsights(INSIGHT_FIELDS, params),
+      {
+        maxRetries: 2,
+        networkSleepMs: 3000,
+        initialSleepMs: 3000,
+        logger: this.logger,
+        context: { scope: 'campaign-rule insight', level, entityId },
+      },
+    );
     const first = Array.isArray(rows) ? rows[0] : rows?.[0];
     if (!first) return {};
     return first._data || first;

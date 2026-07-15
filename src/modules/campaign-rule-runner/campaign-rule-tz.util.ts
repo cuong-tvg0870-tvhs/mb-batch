@@ -54,6 +54,18 @@ export function nextClockUnix(
   return d.unix();
 }
 
+// Meta YÊU CẦU mốc khung budget schedule rơi ĐÚNG bội số 15 phút (00/15/30/45 theo giờ
+// TKQC) — lệch sẽ bị lỗi "Thời gian bạn nhập cho đợt cao điểm phải cách quãng 15 phút
+// (0, 15, 30, 45)". Mọi múi giờ thực tế đều lệch UTC theo bội số 15' nên căn theo unix
+// (bội số 900s) là đủ để mốc giờ ĐỊA PHƯƠNG cũng rơi đúng 00/15/30/45.
+export const QUARTER_SEC = 15 * 60;
+// start → làm tròn LÊN (giữ ở tương lai, không lùi vào khung/quá khứ).
+export const ceilToQuarter = (unix: number): number =>
+  Number.isFinite(unix) ? Math.ceil(unix / QUARTER_SEC) * QUARTER_SEC : unix;
+// end → làm tròn XUỐNG (không lấn sang khung kế/vượt mốc chốt).
+export const floorToQuarter = (unix: number): number =>
+  Number.isFinite(unix) ? Math.floor(unix / QUARTER_SEC) * QUARTER_SEC : unix;
+
 // Meta trả time_start/end dạng ISO ("…+0700") hoặc đôi khi unix → chuẩn hoá unix seconds.
 export function metaTimeToUnix(v: string | number): number {
   if (typeof v === 'number') return Math.floor(v);
