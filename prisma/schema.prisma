@@ -2607,7 +2607,11 @@ model AssetAccessRequest {
   project   Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
 
   // Thông tin để admin tìm trên trình quảng cáo
-  businessId String? // Business Manager id
+  businessId   String? // Business Manager id
+  businessName String? // Tên BM sở hữu tài sản (giúp admin nhận diện nhanh)
+  // Requester tự đánh dấu ĐÃ chia sẻ tài sản về BM của công ty (BM02) trước khi
+  // gửi phiếu → admin biết chỉ cần cấp token, không phải đi xin share nữa.
+  sharedToBm Boolean @default(false)
   note       String? @db.Text // ghi chú requester (link, owner, hoàn cảnh...)
 
   status        AssetAccessRequestStatus @default(SUBMITTED)
