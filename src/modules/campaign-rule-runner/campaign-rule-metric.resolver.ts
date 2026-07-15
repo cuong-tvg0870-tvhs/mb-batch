@@ -96,15 +96,7 @@ type Spec =
 
 /** metricKey (curated ở FE) → cách phân giải. */
 const SPECS: Record<string, Spec> = {
-  // --- Mua hàng ---
-  purchases: { t: 'count', at: AT.purchase },
-  website_purchases: { t: 'count', at: AT.purchase },
-  purchases_value: { t: 'value', at: AT.purchase },
-  website_purchase_value: { t: 'value', at: AT.purchase },
-  cost_per_purchase: { t: 'cost', at: AT.purchase },
-  cost_per_website_purchase: { t: 'cost', at: AT.purchase },
-  cost_per_unique_website_purchase: { t: 'cost', at: AT.purchase },
-  cost_per_result: { t: 'cost', at: AT.purchase },
+  // --- Mua hàng: xử lý ở nhánh riêng (chuẩn cty purchaseValue/spend, KHÔNG dùng SPECS) ---
   // --- Thêm vào giỏ ---
   adds_to_cart: { t: 'count', at: AT.add_to_cart },
   website_adds_to_cart: { t: 'count', at: AT.add_to_cart },
@@ -191,6 +183,56 @@ function costPerArr(insight: any, field: string): number | null {
   return spend / count;
 }
 
+/**
+ * Số đơn / giá trị đơn theo CHUẨN CÔNG TY (khớp card & Engine 2): CỘNG đúng
+ * `purchase` + `onsite_conversion.purchase` (2 sự kiện khác nhau: web offsite vs
+ * onsite/messaging). Xem `getMetrics` trong common/utils/index.ts.
+ */
+const PURCHASE_SUM_TYPES = ['purchase', 'onsite_conversion.purchase'];
+
+/** Cộng value của MỌI action_type khớp trong danh sách (null nếu mảng không hợp lệ). */
+function sumActionTypes(arr: any, types: string[]): number | null {
+  if (!Array.isArray(arr)) return null;
+  let sum = 0;
+  for (const row of arr) {
+    if (types.includes(row?.action_type)) {
+      const v = toNumber(row.value);
+      if (v != null) sum += v;
+    }
+  }
+  return sum;
+}
+
+/** Số đơn hôm nay (chuẩn cty). */
+function resolvePurchaseCount(insight: any): number | null {
+  return sumActionTypes(insight?.actions, PURCHASE_SUM_TYPES);
+}
+
+/** Giá trị đơn hôm nay (chuẩn cty) — dùng cho ROAS. */
+function resolvePurchaseValue(insight: any): number | null {
+  return sumActionTypes(insight?.action_values, PURCHASE_SUM_TYPES);
+}
+
+/**
+ * ROAS theo CHUẨN CÔNG TY = purchaseValue / spend (KHÔNG dùng field purchase_roas
+ * của Meta) — để rule budget-schedule khớp con số marketer thấy trên card/Engine 2.
+ * Guard bơm-tiền (evalBumpGuard) cũng gọi resolveMetric('purchase_roas') nên tự đi theo.
+ */
+function resolveRoas(insight: any): number | null {
+  const spend = toNumber(insight?.spend);
+  if (spend == null || spend <= 0) return null;
+  const value = resolvePurchaseValue(insight) ?? 0;
+  return value / spend;
+}
+
+/** Chi phí / đơn (chuẩn cty) = spend / số đơn. đơn<=0 → null. */
+function resolvePurchaseCpa(insight: any): number | null {
+  const spend = toNumber(insight?.spend);
+  const purchases = resolvePurchaseCount(insight);
+  if (spend == null || purchases == null || purchases <= 0) return null;
+  return spend / purchases;
+}
+
 /** cpp — chi phí / 1000 người tiếp cận. */
 function resolveCpp(insight: any): number | null {
   const spend = toNumber(insight?.spend);
@@ -217,7 +259,7 @@ function resolveResults(insight: any, entity: any): number | null {
   }
   const v = pickAction(insight?.actions, spec.parts);
   if (v != null) return v;
-  return pickAction(insight?.actions, AT.purchase);
+  return resolvePurchaseCount(insight);
 }
 
 /** Số giờ kể từ khi entity được tạo (rawPayload.created_time, fallback startTime). */
@@ -243,8 +285,29 @@ export function resolveMetric(
     return toNumber(insight?.[key]);
   }
 
+  // ROAS & số đơn theo CHUẨN CÔNG TY (khớp card/Engine 2) — KHÔNG dùng field
+  // purchase_roas của Meta. Đổi ở đây kéo theo cả evalBumpGuard (cùng gọi resolveMetric).
   if (key === 'purchase_roas' || key === 'website_purchase_roas') {
-    return toNumber(insight?.purchase_roas?.[0]?.value);
+    return resolveRoas(insight);
+  }
+  if (key === 'purchases' || key === 'website_purchases') {
+    return resolvePurchaseCount(insight);
+  }
+  if (key === 'purchases_value' || key === 'website_purchase_value') {
+    return resolvePurchaseValue(insight);
+  }
+  if (
+    key === 'cost_per_purchase' ||
+    key === 'cost_per_website_purchase' ||
+    key === 'cost_per_unique_website_purchase'
+  ) {
+    return resolvePurchaseCpa(insight);
+  }
+  if (key === 'cost_per_result') {
+    // spend / results (goal-aware) — kết quả có thể là đơn/lead/tin nhắn tuỳ mục tiêu.
+    const spend = toNumber(insight?.spend);
+    const results = resolveResults(insight, entity);
+    return spend != null && results != null && results > 0 ? spend / results : null;
   }
 
   if (key === 'daily_budget') return toNumber(entity?.dailyBudget);
