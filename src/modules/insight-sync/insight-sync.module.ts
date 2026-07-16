@@ -1,5 +1,6 @@
 import { BullModule } from '@nestjs/bull';
 import { Module } from '@nestjs/common';
+import { AdFatigueModule } from '../ad-fatigue/ad-fatigue.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { INSIGHT_SYNC_QUEUE } from './insight-sync.constants';
 import { InsightSyncProcessor } from './insight-sync.processor';
@@ -9,15 +10,12 @@ import { InsightSyncService } from './insight-sync.service';
 @Module({
   imports: [
     PrismaModule,
+    AdFatigueModule,
     BullModule.registerQueue({
       name: INSIGHT_SYNC_QUEUE,
     }),
   ],
-  providers: [
-    InsightSyncService,
-    InsightSyncProcessor,
-    InsightSyncScheduler,
-  ],
+  providers: [InsightSyncService, InsightSyncProcessor, InsightSyncScheduler],
   exports: [InsightSyncService],
 })
 export class InsightSyncModule {}

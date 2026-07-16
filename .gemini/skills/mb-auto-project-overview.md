@@ -82,3 +82,32 @@ Plain account members receive only their own membership row, not the full team r
 ### Legacy dashboard hardening
 
 The original `/dashboard` payload now scopes `topCampaigns` with the same account access filter. `dailyLogins` is queried and returned only for system admins rather than merely being hidden by the frontend.
+
+## Ad Fatigue detector
+
+Ad creative health is materialized in the canonical Prisma model `AdFatigueState`
+(one row per live `Ad`) so status filtering happens before pagination. Statuses are
+`INSUFFICIENT_DATA`, `HEALTHY`, `WATCH`, and `FATIGUED`; the snapshot also stores
+score, Vietnamese reasons, the compared CTR values, approximate seven-day
+frequency, volumes, rule version, and detection/resolution timestamps. The
+additive migration lives in `mb-db`; schema copies in `mb-ads` and `mb-batch`
+must remain in parity.
+
+`mb-batch/src/modules/ad-fatigue/` evaluates Ads after an AD insight rollup that
+contains both `DAY_3` and `DAY_7`. It compares the last three complete advertiser-
+timezone days with the preceding three complete days and requires sufficient
+impressions in both windows. Defaults are WATCH at frequency ≥2 plus relative CTR
+drop ≥15%, and FATIGUED at frequency ≥3 plus CTR drop ≥25%; environment overrides
+are centralized in `ad-fatigue.constants.ts`. Seven-day frequency is approximate
+because multi-day reach is rolled up from DAILY rows. Detection is advisory only:
+the worker never pauses or mutates Meta delivery status.
+
+`GET /ads` and `GET /ads/:id` include `fatigueState`. The list accepts
+`filter_fatigueStatus`; invalid values are ignored, and `INSUFFICIENT_DATA` also
+matches Ads with no snapshot during rollout. Existing project/account access
+filters and active-first priority pagination still apply.
+
+The Ads UI exposes a “Sức khỏe nội dung” column, a one-click “Ads đang mệt mỏi”
+filter, an explanatory badge/tooltip, and red/amber tones in both table and the
+default card view. CTR and Frequency remain visible together. The existing status
+switch is a separate, explicit user action; the fatigue signal never auto-pauses.
