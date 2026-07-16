@@ -25,6 +25,7 @@ import {
   extractCustomEventType,
   type EntityGoalInfo,
 } from '../../common/metrics/insight-metrics';
+import { AdFatigueService } from '../ad-fatigue/ad-fatigue.service';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -41,6 +42,7 @@ export class InsightSyncService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly metaApi: MetaApiService,
+    private readonly adFatigueService: AdFatigueService,
   ) {}
 
   /**
@@ -62,6 +64,8 @@ export class InsightSyncService {
     if (targetLevels.length === 0) return;
 
     const tz = await this.getAccountTimezone(accountId);
+    let adDailyRefreshComplete = true;
+    let adRollupSucceeded = false;
 
     // Only the near-real-time TODAY job should call Meta. Other range jobs
     // rebuild materialized rollups locally from DAILY records.
@@ -71,8 +75,18 @@ export class InsightSyncService {
         // problem) must NOT skip the local rollups below, which rebuild every
         // range from whatever DAILY data already exists in the DB.
         try {
-          await this.syncRecentDailyInsights(accountId, level, tz);
+          const refreshComplete = await this.syncRecentDailyInsights(
+            accountId,
+            level,
+            tz,
+          );
+          if (level === InsightSyncLevel.AD) {
+            adDailyRefreshComplete = refreshComplete;
+          }
         } catch (error) {
+          if (level === InsightSyncLevel.AD) {
+            adDailyRefreshComplete = false;
+          }
           if (isPermissionError(error)) {
             this.logger.warn(
               `[${accountId}] 🔑 Permission/token error fetching ${level} DAILY. Marking account for reauth.`,
@@ -95,9 +109,33 @@ export class InsightSyncService {
     for (const level of targetLevels) {
       try {
         await this.rollupLevelInsights(accountId, level, ranges, tz);
+        if (level === InsightSyncLevel.AD) adRollupSucceeded = true;
       } catch (error) {
         this.logger.error(
           `[${accountId}] ❌ Rollup failed for ${level}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    if (
+      targetLevels.includes(InsightSyncLevel.AD) &&
+      ranges.includes(InsightSyncRange.LAST_3D) &&
+      ranges.includes(InsightSyncRange.LAST_7D) &&
+      adRollupSucceeded
+    ) {
+      if (adDailyRefreshComplete) {
+        try {
+          await this.adFatigueService.evaluateAccount(accountId, tz);
+        } catch (error) {
+          // Fatigue là snapshot hỗ trợ vận hành; lỗi đánh giá không được làm
+          // hỏng insight rollup. Lần sync theo giờ kế tiếp sẽ tự thử lại.
+          this.logger.error(
+            `[${accountId}] ❌ Đánh giá Ad Fatigue thất bại sau rollup DAY_3/DAY_7: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      } else {
+        this.logger.warn(
+          `[${accountId}] ⏭️ Bỏ qua đánh giá Ad Fatigue vì dữ liệu DAILY cấp Ad vừa đồng bộ không đầy đủ; giữ nguyên snapshot trước đó để tránh cảnh báo sai.`,
         );
       }
     }
@@ -485,7 +523,7 @@ export class InsightSyncService {
     ];
     if (entityIds.length === 0) {
       this.logger.log(`[${accountId}] No ${level} entities need DAILY sync.`);
-      return;
+      return true;
     }
 
     const chunkSize = this.getDefaultInsightChunkSize(level);
@@ -575,6 +613,7 @@ export class InsightSyncService {
         `[${accountId}] ⚠️ ${level}: ${failedChunks}/${idChunks.length} DAILY chunks failed (partial fetch). Rollups will use available DAILY rows.`,
       );
     }
+    return failedChunks === 0;
   }
 
   /**
