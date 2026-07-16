@@ -60,6 +60,15 @@ enum InsightRange {
   DAILY
 }
 
+/// Trạng thái sức khỏe nội dung quảng cáo do bộ phát hiện Ad Fatigue tính toán.
+/// Không tự động thay đổi trạng thái phân phối của Ad.
+enum AdFatigueStatus {
+  INSUFFICIENT_DATA
+  HEALTHY
+  WATCH
+  FATIGUED
+}
+
 enum LevelInsight {
   AD
   CAMPAIGN
@@ -646,6 +655,7 @@ model Ad {
   lastFetchedAt    DateTime?
   rawPayload       Json?
   adInsights       AdInsight[]
+  fatigueState     AdFatigueState?
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @default(now())
@@ -745,6 +755,36 @@ model Ad {
   @@index([adsetId, updatedAt(sort: Desc), id])
   // 🔥 soft delete
   @@index([accountId, deletedAt, updatedAt(sort: Desc)])
+}
+
+/// Snapshot 1:1 được materialize sau insight sync để danh sách Ads có thể lọc,
+/// sắp trang và giải thích cảnh báo fatigue mà không tính lại trên từng request.
+model AdFatigueState {
+  adId String @id
+  ad   Ad     @relation(fields: [adId], references: [id], onDelete: Cascade)
+
+  status  AdFatigueStatus @default(INSUFFICIENT_DATA)
+  score   Int             @default(0)
+  reasons Json?
+
+  /// Frequency của cửa sổ 7 ngày. Đây là số xấp xỉ khi rollup từ DAILY.
+  frequency           Float?
+  currentCtr          Float?
+  previousCtr         Float?
+  ctrDropRate         Float?
+  currentImpressions  Int?
+  previousImpressions Int?
+  currentSpend        Float?
+
+  ruleVersion String   @default("v1")
+  evaluatedAt DateTime @default(now())
+  detectedAt  DateTime?
+  resolvedAt  DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([status, evaluatedAt(sort: Desc)])
+  @@map("ad_fatigue_state")
 }
 
 enum CidStatus {
