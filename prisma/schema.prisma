@@ -650,7 +650,7 @@ model Ad {
   effectiveStatus  String?
   configuredStatus String?
   creativeId       String?
-  creative         Creative?   @relation(fields: [creativeId], references: [id])
+  creative         Creative?       @relation(fields: [creativeId], references: [id])
   remoteUpdatedAt  DateTime?
   lastFetchedAt    DateTime?
   rawPayload       Json?
@@ -776,12 +776,12 @@ model AdFatigueState {
   previousImpressions Int?
   currentSpend        Float?
 
-  ruleVersion String   @default("v1")
-  evaluatedAt DateTime @default(now())
+  ruleVersion String    @default("v1")
+  evaluatedAt DateTime  @default(now())
   detectedAt  DateTime?
   resolvedAt  DateTime?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
   @@index([status, evaluatedAt(sort: Desc)])
   @@map("ad_fatigue_state")
@@ -2651,8 +2651,8 @@ model AssetAccessRequest {
   businessName String? // Tên BM sở hữu tài sản (giúp admin nhận diện nhanh)
   // Requester tự đánh dấu ĐÃ chia sẻ tài sản về BM của công ty (BM02) trước khi
   // gửi phiếu → admin biết chỉ cần cấp token, không phải đi xin share nữa.
-  sharedToBm Boolean @default(false)
-  note       String? @db.Text // ghi chú requester (link, owner, hoàn cảnh...)
+  sharedToBm   Boolean @default(false)
+  note         String? @db.Text // ghi chú requester (link, owner, hoàn cảnh...)
 
   status        AssetAccessRequestStatus @default(SUBMITTED)
   adminFeedback String?                  @db.Text
@@ -2749,6 +2749,11 @@ model AutomationCategory {
   name     String
   position Int    @default(0)
 
+  // Project chủ sở hữu (do dự án khác ghi trên DB dùng chung). Scalar-FK only —
+  // KHÔNG @relation sang Project để tránh coupling migration chéo team. null =
+  // category top-level (cùng cấp với project trên sidebar, giữ hành vi cũ).
+  projectId String?
+
   folders          AutomationFolder[]
   rules            AutomationRule[]
   customMetrics    CustomMetric[]
@@ -2760,6 +2765,7 @@ model AutomationCategory {
   deletedAt   DateTime?
 
   @@index([createdById, position])
+  @@index([projectId])
 }
 
 model AutomationFolder {
@@ -3398,6 +3404,12 @@ model CampaignRule {
 
   timezone            String // IANA name, hoặc sentinel "account" (resolve theo tz ad account lúc chạy)
   notifyErrorsOnly    Boolean                   @default(false)
+  // Email CHỦ ĐỘNG khi rule chạy (opt-in per-rule; người nhận = notifyUsers). Real-time
+  // theo SỰ KIỆN, chống gửi trùng qua CampaignRuleRunItem.notifiedAt. "matched" chỉ bắn
+  // khi CHUYỂN not-matched→matched (không lặp mỗi lần quét khi điều kiện vẫn đang đúng).
+  notifyOnMatch       Boolean                   @default(false) // đủ điều kiện (kể cả PENDING chờ duyệt)
+  notifyOnExecute     Boolean                   @default(false) // đã đẩy Meta thành công
+  notifyOnError       Boolean                   @default(false) // rule/đẩy Meta lỗi
   filterGroupOperator CampaignRuleGroupOperator @default(OR)
   position            Int                       @default(0)
 
@@ -3416,6 +3428,7 @@ model CampaignRule {
   filterGroups CampaignRuleFilterGroup[]
   tasks        CampaignRuleTask[]
   runs         CampaignRuleRun[]
+  notifyUsers  CampaignRuleNotifyUser[]
 
   createdById String?
   createdAt   DateTime  @default(now())
@@ -3427,6 +3440,19 @@ model CampaignRule {
   @@index([accountId, updatedAt(sort: Desc)])
   @@index([createdById, updatedAt(sort: Desc)])
   @@map("campaign_rule")
+}
+
+// Junction người nhận email của 1 campaign_rule (opt-in per-rule). Scalar FK tới User
+// (legacy, ngoài cụm) — chỉ giữ userId, resolve email lúc gửi. Giống AutomationRuleNotifyUser.
+model CampaignRuleNotifyUser {
+  ruleId String
+  userId String
+
+  rule CampaignRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  @@id([ruleId, userId])
+  @@index([userId])
+  @@map("campaign_rule_notify_user")
 }
 
 // Mẫu quy tắc "lên lịch theo điều kiện" (cuốn chiếu): lưu lại ĐIỀU KIỆN + cấu hình
@@ -3470,11 +3496,11 @@ model CampaignRuleSchedule {
 }
 
 model CampaignRuleFilterGroup {
-  id       String                  @id @default(uuid())
+  id       String                    @id @default(uuid())
   ruleId   String
-  rule     CampaignRule            @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  rule     CampaignRule              @relation(fields: [ruleId], references: [id], onDelete: Cascade)
   operator CampaignRuleGroupOperator @default(AND)
-  position Int                     @default(0)
+  position Int                       @default(0)
 
   filters CampaignRuleFilter[]
 
@@ -3498,17 +3524,17 @@ model CampaignRuleFilter {
 }
 
 model CampaignRuleTask {
-  id          String             @id @default(uuid())
+  id          String               @id @default(uuid())
   ruleId      String
-  rule        CampaignRule       @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  rule        CampaignRule         @relation(fields: [ruleId], references: [id], onDelete: Cascade)
   kind        CampaignRuleTaskKind
   subtitle    String?
   description String? // ghi chú UI cho task; runner không dùng
   params      Json?
-  position    Int                @default(0)
+  position    Int                  @default(0)
 
-  rootGroup CampaignRuleTaskGroup?    @relation("CampaignRuleTaskRoot")
-  groups    CampaignRuleTaskGroup[]   @relation("CampaignRuleTaskAllGroups")
+  rootGroup CampaignRuleTaskGroup?  @relation("CampaignRuleTaskRoot")
+  groups    CampaignRuleTaskGroup[] @relation("CampaignRuleTaskAllGroups")
   runItems  CampaignRuleRunItem[]
 
   @@index([ruleId, position])
@@ -3530,19 +3556,19 @@ model CampaignRuleTaskGroup {
   conditions CampaignRuleTaskCondition[]
 
   operator CampaignRuleGroupOperator @default(AND)
-  position Int                     @default(0)
+  position Int                       @default(0)
 
   @@index([taskId, parentGroupId, position])
   @@map("campaign_rule_task_group")
 }
 
 model CampaignRuleTaskCondition {
-  id          String                @id @default(uuid())
+  id          String                  @id @default(uuid())
   groupId     String
-  group       CampaignRuleTaskGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  group       CampaignRuleTaskGroup   @relation(fields: [groupId], references: [id], onDelete: Cascade)
   compareType CampaignRuleCompareType @default(VALUE)
   params      Json
-  position    Int                   @default(0)
+  position    Int                     @default(0)
 
   @@index([groupId, position])
   @@map("campaign_rule_task_condition")
@@ -3592,7 +3618,7 @@ model CampaignRuleRunItem {
   run   CampaignRuleRun @relation(fields: [runId], references: [id], onDelete: Cascade)
 
   taskId   String?
-  task     CampaignRuleTask?   @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  task     CampaignRuleTask?     @relation(fields: [taskId], references: [id], onDelete: SetNull)
   taskKind CampaignRuleTaskKind?
 
   level       CampaignRuleLevel
@@ -3613,7 +3639,7 @@ model CampaignRuleRunItem {
   executedAt    DateTime?
   errorMessage  String?
 
-  executionAttempts Int   @default(0)
+  executionAttempts Int     @default(0)
   executionError    Json?
   metaTraceId       String?
 
@@ -3623,6 +3649,10 @@ model CampaignRuleRunItem {
   // Id các HighDemandPeriod (budget_schedule) Meta trả về khi đẩy thành công —
   // lưu để sau này TẮT/XOÁ lịch trên Meta (new HighDemandPeriod(id).delete()).
   metaBudgetScheduleIds String[] @default([])
+
+  // Đã gửi email thông báo cho item này chưa — chống gửi trùng (1 mail / sự kiện).
+  // null = chưa gửi / không thuộc diện notify. Set khi cron mb-ads gửi mail xong.
+  notifiedAt DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -3694,7 +3724,7 @@ model AutoLaunchRule {
   publishMode DraftAutomationPublishMode @default(DRAFT_ONLY)
 
   // CHỐNG SPAM: trần chiến dịch/ngày (áp cả nháp lẫn tự đăng).
-  maxCampaignsPerDay Int @default(2)
+  maxCampaignsPerDay   Int  @default(2)
   // Chỉ khi tự đăng: trần ngân sách mỗi chiến dịch (VND, major units).
   budgetCapPerCampaign Int?
 
