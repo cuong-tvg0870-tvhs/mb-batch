@@ -40,15 +40,48 @@ export interface ExecResult {
   scheduleIds: string[];
 }
 
+// Trần % tăng của Meta: tổng ngân sách trong khung ≤ 8× ngân sách gốc ⇒ mức TĂNG
+// tối đa = +700%. Kẹp để không bị Meta từ chối (và chặn giá trị vô lý).
+export const META_MAX_INCREASE_PCT = 700;
+
+/**
+ * Quy đổi giá trị nội bộ → `budget_value` + `budget_value_type` mà Meta thực nhận.
+ *
+ * MẤU CHỐT: Meta hiểu `budget_value` là KHOẢN TĂNG THÊM (increase, cộng lên ngân sách
+ * gốc), KHÔNG phải tổng ngân sách mới. (Đã kiểm chứng bằng chi tiêu thực + doc API
+ * "Actual budget increase" + UI Meta "chi tiêu thêm …".)
+ *   - ABSOLUTE  : rawValue là SỐ TIỀN cộng thêm (minor units) → round & gửi thẳng.
+ *   - MULTIPLIER: convention nội bộ lưu HỆ SỐ thập phân (2.01 = ×2.01). Meta nhận % TĂNG
+ *                 dạng SỐ NGUYÊN ⇒ gửi `budget_value = round((hệ_số − 1) × 100)` với
+ *                 type='MULTIPLIER'. Meta tự áp % lên ngân sách LIVE và tự revert —
+ *                 KHÔNG cần đọc ngân sách gốc, KHÔNG bị đóng băng thành tiền tươi.
+ * Trả null nếu không phải mức tăng hợp lệ (≤ ×1 / ≤ 0đ).
+ */
+export function toMetaIncrease(
+  type: string,
+  rawValue: number,
+): { budget_value: number; budget_value_type: 'ABSOLUTE' | 'MULTIPLIER' } | null {
+  if (!Number.isFinite(rawValue)) return null;
+  if (type === 'MULTIPLIER') {
+    const pct = Math.round((rawValue - 1) * 100); // 2.01 → 101 (%), Meta +101% ⇒ ×2.01
+    if (!(pct >= 1)) return null; // ≤ ×1 → không tăng
+    return {
+      budget_value: Math.min(pct, META_MAX_INCREASE_PCT),
+      budget_value_type: 'MULTIPLIER',
+    };
+  }
+  const abs = Math.round(rawValue);
+  if (!(abs > 0)) return null;
+  return { budget_value: abs, budget_value_type: 'ABSOLUTE' };
+}
+
 /**
  * periods (từ task.params) → budget_schedule_specs của Meta.
- * QUAN TRỌNG: Meta yêu cầu `budget_value` là SỐ NGUYÊN → luôn gửi ABSOLUTE.
- *   %  (MULTIPLIER 1.5)  → ABSOLUTE = round(ngân_sách_hằng_ngày × 1.5) theo ngân
- *                          sách THẬT của đối tượng (`targetBudget`, minor units).
- *   Số tiền (ABSOLUTE)   → round(budget_value).
+ * MULTIPLIER (%) gửi thẳng dạng % nguyên; ABSOLUTE gửi số tiền cộng thêm — xem
+ * `toMetaIncrease`. `targetBudget` KHÔNG còn cần cho MULTIPLIER (Meta tự áp % lên
+ * ngân sách live) — giữ tham số cho tương thích call-site.
  * Mốc giờ "YYYY-MM-DDTHH:mm" được diễn giải theo MÚI GIỜ TKQC (`tz`, IANA) — Meta
  * chạy budget schedule theo timezone tài khoản quảng cáo, không theo tz server.
- * Bỏ qua period thiếu thời gian hợp lệ, hoặc MULTIPLIER mà không biết targetBudget.
  */
 export function buildSpecs(
   periods: any,
@@ -66,23 +99,13 @@ export function buildSpecs(
     if (timeEnd <= timeStart) continue; // khung rỗng sau khi căn mốc → bỏ
 
     const type = period.budgetValueType || 'ABSOLUTE';
-    const rawValue = Number(period.budgetValue);
-    if (!Number.isFinite(rawValue)) continue;
-
-    let budgetValue: number;
-    if (type === 'MULTIPLIER') {
-      if (!targetBudget || targetBudget <= 0) continue; // không quy đổi được → bỏ qua
-      budgetValue = Math.round(targetBudget * rawValue);
-    } else {
-      budgetValue = Math.round(rawValue);
-    }
-    if (!(budgetValue > 0)) continue;
+    const conv = toMetaIncrease(type, Number(period.budgetValue));
+    if (!conv) continue;
 
     specs.push({
       time_start: timeStart,
       time_end: timeEnd,
-      budget_value: budgetValue,
-      budget_value_type: 'ABSOLUTE',
+      ...conv,
     });
   }
   return specs;
@@ -191,24 +214,19 @@ export function buildRollingSpec(
 
   if (end <= start) return { skipReason: 'boundary_reached' };
 
-  // Mức tăng: % (MULTIPLIER) quy đổi theo ngân sách THẬT (live) → số tiền tuyệt đối.
-  const raw = Number(rolling.increaseValue);
-  if (!Number.isFinite(raw)) return { skipReason: 'increase_invalid' };
-  let budgetValue: number;
-  if ((rolling.increaseType || 'MULTIPLIER') === 'MULTIPLIER') {
-    if (!opts.targetBudget || opts.targetBudget <= 0) return { skipReason: 'no_budget' };
-    budgetValue = Math.round(opts.targetBudget * raw);
-  } else {
-    budgetValue = Math.round(raw);
-  }
-  if (!(budgetValue > 0)) return { skipReason: 'budget_zero' };
+  // Mức tăng: MULTIPLIER (%) gửi thẳng dạng % nguyên; ABSOLUTE là số tiền cộng thêm.
+  // Meta tự áp % lên ngân sách LIVE và tự revert → KHÔNG cần targetBudget cho MULTIPLIER.
+  const conv = toMetaIncrease(
+    rolling.increaseType || 'MULTIPLIER',
+    Number(rolling.increaseValue),
+  );
+  if (!conv) return { skipReason: 'increase_invalid' };
 
   return {
     spec: {
       time_start: start,
       time_end: end,
-      budget_value: budgetValue,
-      budget_value_type: 'ABSOLUTE',
+      ...conv,
     },
   };
 }

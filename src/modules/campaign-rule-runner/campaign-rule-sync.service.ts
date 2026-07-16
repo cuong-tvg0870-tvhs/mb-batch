@@ -22,12 +22,19 @@ type Period = {
 };
 
 // Meta trả ISO có tz (…+0000)/unix → wall-clock "YYYY-MM-DDTHH:mm" theo múi giờ TKQC.
+// MULTIPLIER: Meta lưu % TĂNG dạng SỐ NGUYÊN (100 = +100%). Convention nội bộ (UI/DB)
+// dùng HỆ SỐ thập phân (2.0 = ×2.0) → quy đổi `1 + pct/100` để UI hiện đúng "+100%",
+// KHÔNG phải "+9900%". ABSOLUTE giữ nguyên số tiền (minor units).
 function metaToPeriod(s: MetaSchedule, tz: string): Period {
+  const raw = Number(s.budget_value);
   return {
     timeStart: toAccountWallClock(s.time_start, tz),
     timeEnd: toAccountWallClock(s.time_end, tz),
     budgetValueType: s.budget_value_type,
-    budgetValue: Number(s.budget_value),
+    budgetValue:
+      s.budget_value_type === 'MULTIPLIER'
+        ? Math.round((1 + raw / 100) * 1e4) / 1e4
+        : raw,
   };
 }
 
