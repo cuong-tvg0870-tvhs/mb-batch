@@ -3195,6 +3195,15 @@ model AutomationInsightBackfillState {
   oldestSettledDate   String?
   lastSettledDate     String?
   lastRevalidatedAt   DateTime?
+  /// Recent-window shared cache (P0-a): the background refresher re-fetches the
+  /// still-volatile `[today-freeze .. today]` days into the daily table every
+  /// ~AUTOMATION_INSIGHT_RECENT_REFRESH_MIN minutes so rules read them from DB
+  /// instead of a live Meta query. `recentThroughDate` = the last day covered
+  /// (= today at refresh); `lastRecentRefreshAt` = when it last ran. The read
+  /// path serves the volatile zone from DB only while this is fresh (within
+  /// 2× the cadence) — otherwise it falls back to the live path (fail-safe).
+  recentThroughDate   String?
+  lastRecentRefreshAt DateTime?
   /// Last time an ACTIVE rule (run or warmer) confirmed this (account, apiLevel)
   /// is still in use. The maintain scheduler skips states whose lastEvaluatedAt
   /// is null or older than AUTOMATION_INSIGHT_STALE_DAYS so deleted/paused rules
@@ -3424,6 +3433,12 @@ model CampaignRule {
   // đồng bộ 1-1 với Meta. Bản do user "Gửi ngay" tạo = false.
   syncedFromMeta Boolean @default(false)
 
+  // Mẫu (CampaignRuleTemplate.id) mà rule này được áp từ — đóng dấu lúc TẠO nếu user bấm
+  // "Dùng mẫu". Scalar (không relation, mẫu ngoài cụm scope). Dùng để đếm "mẫu đã áp cho
+  // bao nhiêu chiến dịch" → biết mẫu nào hiệu quả để giữ / mẫu nào chưa ai dùng để clear.
+  // CHỈ có từ lúc thêm cột trở đi (rule cũ = null, không lấp ngược được).
+  sourceTemplateId String?
+
   schedule     CampaignRuleSchedule?
   filterGroups CampaignRuleFilterGroup[]
   tasks        CampaignRuleTask[]
@@ -3439,6 +3454,7 @@ model CampaignRule {
   @@index([campaignId, adSetId, status])
   @@index([accountId, updatedAt(sort: Desc)])
   @@index([createdById, updatedAt(sort: Desc)])
+  @@index([sourceTemplateId])
   @@map("campaign_rule")
 }
 
@@ -3694,7 +3710,7 @@ enum AutoLaunchRunStatus {
   SKIPPED_NOT_ENOUGH // chưa gom đủ N creative đạt chuẩn
   SKIPPED_DAILY_CAP // đã chạm trần camp/ngày
   SKIPPED_NO_NEW // đủ chỉ số nhưng hết creative MỚI (đã dùng hết)
-  FAILED // lỗi khi dựng/đăng
+  FAILED // lỗi khi dựng/đăng (cũng dùng làm trạng thái CLAIM tạm: insert-first mang dedupeKey rồi update thành trạng thái cuối)
 }
 
 model AutoLaunchRule {
@@ -3757,8 +3773,8 @@ model AutoLaunchRuleRun {
   message      String? // diễn giải ngắn cho marketer
 
   // Khi LAUNCHED:
-  usedCreatives       Json? // [{ id, name, roas }] — creative thực sự đưa vào camp
-  generatedCampaignId String? // SystemCampaign.id sinh ra
+  usedCreatives       Json? // [{ id, name, roas, campaignId }] — creative đưa vào camp + camp nào (ledger per-campaign + đếm trần theo distinct campaignId, KHÔNG cần migration)
+  generatedCampaignId String? // SystemCampaign.id sinh ra (camp ĐẦU — tương thích ngược)
   metaId              String? // meta campaign id (nếu đã tự đăng)
   mode                DraftAutomationPublishMode?
 
