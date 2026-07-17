@@ -6,6 +6,7 @@ import {
   floorToQuarter,
   metaTimeToUnix,
   nextClockUnix,
+  QUARTER_SEC,
   wallClockToUnix,
 } from './campaign-rule-tz.util';
 
@@ -140,6 +141,43 @@ export interface RollingBuildResult {
 }
 
 /**
+ * Mốc bắt đầu của CHUỖI KHUNG LIÊN TỤC đang phủ tới hiện tại — dùng để tính trần
+ * `maxChainHours` cho đúng nghĩa "một đợt tăng liền mạch".
+ *
+ * BUG đã sửa: trước đây lấy min(time_start) của MỌI khung "của mình" còn nằm trên
+ * Meta, KỂ CẢ khung đã HẾT HẠN từ nhiều ngày trước (Meta giữ khung hết hạn lại làm
+ * lịch sử, không tự xoá). Hệ quả: trần 24h bị neo mãi vào khung ĐẦU TIÊN từng tạo →
+ * sau 24h là rule "chết" vĩnh viễn, qua ngày mới cũng KHÔNG reset (dù chuỗi đã ĐỨT,
+ * không còn khung nào phủ hiện tại) → mọi tick đạt điều kiện đều `boundary_reached`.
+ *
+ * Cách đúng: chỉ tính chuỗi khung NỐI LIỀN nhau phủ tới `now`. Không còn khung nào
+ * còn hiệu lực (time_end > now) → chuỗi đã đứt → trả `fallback` (mốc khung mới) để
+ * trần tính lại từ đầu. Khung hết hạn nhưng NỐI LIỀN với khung sống vẫn được gộp, để
+ * trần vẫn chặn đúng cho một đợt chạy liên tục dài hơn maxChainHours.
+ */
+export function activeChainStart(
+  ownedWindows: LiveWindow[],
+  nowUnix: number,
+  fallback: number,
+): number {
+  const sorted = [...ownedWindows].sort((a, b) => a.time_start - b.time_start);
+  // Khung sống sớm nhất (còn phủ hiện tại/tương lai). Không có → chuỗi đã đứt.
+  const firstLive = sorted.findIndex((w) => w.time_end > nowUnix);
+  if (firstLive < 0) return fallback;
+  let chainStart = sorted[firstLive].time_start;
+  // Lùi qua khung phía trước: gộp nếu NỐI LIỀN (end chạm start, cho lệch ≤ 15' do căn
+  // mốc); gặp khoảng hở → chuỗi trước đó không liên tục, dừng.
+  for (let i = firstLive - 1; i >= 0; i--) {
+    if (sorted[i].time_end + QUARTER_SEC >= chainStart) {
+      chainStart = Math.min(chainStart, sorted[i].time_start);
+    } else {
+      break;
+    }
+  }
+  return chainStart;
+}
+
+/**
  * Dựng 1 khung "cuốn chiếu" kế tiếp:
  *   start = max(now + lead, coveredUntil)  → nối liền sau khung của mình (end-to-end,
  *           không tự-overlap); end = start + X giờ HOẶC tới mốc giờ untilClock.
@@ -183,9 +221,9 @@ export function buildRollingSpec(
   }
 
   // Chốt an toàn: tổng chuỗi (từ khung đầu của mình) ≤ maxChainHours; và ≤ hardEndAt.
-  const chainStart = opts.ownedWindows.length
-    ? Math.min(...opts.ownedWindows.map((w) => w.time_start))
-    : start;
+  // Mốc đầu chuỗi = khung đầu của chuỗi LIÊN TỤC còn hiệu lực (KHÔNG tính khung hết
+  // hạn đã đứt chuỗi — nếu không trần 24h bị neo mãi vào khung cũ, xem activeChainStart).
+  const chainStart = activeChainStart(opts.ownedWindows, opts.nowUnix, start);
   if (rolling.maxChainHours && rolling.maxChainHours > 0) {
     end = Math.min(end, chainStart + Math.round(rolling.maxChainHours * 3600));
   }
