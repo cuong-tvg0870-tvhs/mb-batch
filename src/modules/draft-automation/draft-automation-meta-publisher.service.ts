@@ -191,14 +191,10 @@ export class DraftAutomationMetaPublisherService {
       return { skipped: true, reason: 'BID_AMOUNT_MISSING' };
     }
 
-    // CHỐT CHẶN DARK POST (parity mb-ads validateLaunchReadiness): mẫu "Dùng bài viết có
-    // sẵn" tham chiếu object_story_id vốn là bài NỘI BỘ của một quảng cáo khác — Meta chỉ
-    // trả qua effective_object_story_id, KHÔNG có object_story_id THẬT (vd bài của quảng
-    // cáo động Shops/Catalog, hoặc ad gốc đã xoá). Đăng bằng story này → Meta từ chối
-    // (subcode 1815017) hoặc lặng lẽ REMAP sang bài khác ("nháp 1 đằng, Meta 1 nẻo").
-    // Tín hiệu CHẮC: story xuất hiện dưới dạng effectObjectStoryId mà KHÔNG là
-    // objectStoryId ở bất kỳ creative đã đồng bộ nào. Story lạ hoàn toàn (chưa đồng bộ)
-    // KHÔNG chặn để tránh báo nhầm bài mới hợp lệ. Bỏ qua SỚM, KHÔNG claim/tạo gì trên Meta.
+    // Gom mọi story "Dùng bài viết có sẵn" để gate quyền Trang bên dưới (promotePages).
+    // (Đã BỎ chặn "dark post": dark post là bài hợp lệ thuộc Trang, đăng lại được như bài
+    // thường nếu TKQC có quyền page — do gate promotePages lo; bài thật sự không đăng lại
+    // được thì để Meta tự báo.)
     const postStories = [
       ...new Set(
         (campaignSystem.ad_sets || []).flatMap((adSet) =>
@@ -217,33 +213,6 @@ export class DraftAutomationMetaPublisherService {
         ),
       ),
     ].filter(Boolean);
-    if (postStories.length) {
-      const [organicRows, effectRows] = await Promise.all([
-        this.prisma.creative.findMany({
-          where: { objectStoryId: { in: postStories } },
-          select: { objectStoryId: true },
-        }),
-        this.prisma.creative.findMany({
-          where: { effectObjectStoryId: { in: postStories } },
-          select: { effectObjectStoryId: true },
-        }),
-      ]);
-      const organic = new Set(
-        organicRows.map((r) => r.objectStoryId).filter(Boolean) as string[],
-      );
-      const darkSeen = new Set(
-        effectRows.map((r) => r.effectObjectStoryId).filter(Boolean) as string[],
-      );
-      const darkStory = postStories.find(
-        (s) => !organic.has(s) && darkSeen.has(s),
-      );
-      if (darkStory) {
-        this.logger.warn(
-          `Bỏ qua publish draft ${campaignSystem.id}: có mẫu "bài viết có sẵn" là dark post (${darkStory}) — Meta không đăng lại đúng được (đổi bài hoặc lỗi).`,
-        );
-        return { skipped: true, reason: 'DARK_POST' };
-      }
-    }
 
     const data = this.clone(
       CleanObjectOrArray(campaignSystem.data || {}) || {},
