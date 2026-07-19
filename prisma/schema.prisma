@@ -319,6 +319,15 @@ model Account {
   pixels          Json?
   customAudiences Json?
 
+  /// Danh sách Fanpage mà CHÍNH TKQC này được phép quảng bá (Meta edge
+  /// `act_<id>?fields=promote_pages{id,name}`). KHÁC với `pages` (là danh sách
+  /// Trang user quản lý, giống nhau ở mọi account) — `promotePages` là quyền THẬT
+  /// per-TKQC. Dùng để gate scale/re-use dark post cross-account: chỉ cho dùng
+  /// `object_story_id = {pageId}_...` khi pageId nằm trong promotePages của TKQC
+  /// đích (tránh Meta 1815017). Shape: [{ id, name }]. Do entity-sync (mb-batch)
+  /// + các nút Sync/onboard (mb-ads) ghi vào; null = chưa sync lần nào.
+  promotePages    Json?
+
   /// FK to the MetaConnection whose access token authorises Meta Graph calls
   /// targeting this ad account. Nullable while a connection has not yet been
   /// bound — the executor refuses to push changes for accounts without one.
@@ -3035,6 +3044,11 @@ enum AutomationRuleRunStatus {
   FAILED
   SKIPPED_OVERLAP
   SKIPPED_OUT_OF_DATE_RANGE
+  // Proactively skipped this tick because the ad account was near its Meta
+  // rate/insights-throttle limit (or over the per-account concurrency cap). A
+  // HEALTHY skip, not a failure: the next tick retries. Running fewer times but
+  // succeeding beats running every tick and failing on #4.
+  SKIPPED_RATE_LIMIT
 }
 
 enum AutomationRuleRunItemStatus {

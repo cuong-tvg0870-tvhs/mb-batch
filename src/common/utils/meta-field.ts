@@ -341,3 +341,11 @@ export const PAGE_FIELDS = [
   'has_whatsapp_number',
   'has_whatsapp_business_number',
 ];
+
+/**
+ * Fields cho edge `promote_pages` của TKQC — danh sách Fanpage mà chính ad
+ * account này được phép quảng bá. Chỉ cần id + name để gate scale/re-use dark
+ * post cross-account (pageId ∈ promotePages ⇒ TKQC đích có quyền). Giữ khớp
+ * với mb-ads `meta-field.ts` để hai writer ghi cùng shape (parity).
+ */
+export const PROMOTE_PAGE_FIELDS = ['id', 'name'];

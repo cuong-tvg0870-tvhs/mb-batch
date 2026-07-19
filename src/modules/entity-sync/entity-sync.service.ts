@@ -9,6 +9,7 @@ import {
   AD_ACCOUNT_FIELDS,
   AD_PIXEL_FIELDS,
   PAGE_FIELDS,
+  PROMOTE_PAGE_FIELDS,
 } from '../../common/utils/meta-field';
 import { BatchRunContext } from '../batch-run-log/batch-run-log.types';
 import { PrismaService } from '../prisma/prisma.service';
@@ -35,6 +36,7 @@ export interface EntitySyncStats {
   fanpagesWithInstagram: number;
   pixels: number;
   audiences: number;
+  promotePages: number;
   catalogs: number;
   productSets: number;
   productFeeds: number;
@@ -51,7 +53,9 @@ export interface EntitySyncStats {
  * theo từng account để một TKQC lỗi token không làm hỏng cả lượt chạy.
  *
  * Mọi field Meta trả về được lưu nguyên vào cột JSON (`Account.rawPayload/pixels/
- * customAudiences/pages`, `Fanpage.rawPayload`) — không tách cột (theo chốt của user).
+ * customAudiences/pages/promotePages`, `Fanpage.rawPayload`) — không tách cột
+ * (theo chốt của user). `promotePages` = quyền THẬT per-TKQC (edge promote_pages),
+ * khác `pages` (danh sách Trang user quản lý, giống nhau ở mọi account).
  */
 @Injectable()
 export class EntitySyncService {
@@ -126,8 +130,32 @@ export class EntitySyncService {
   }
 
   /**
+   * Kéo `promote_pages` của MỘT TKQC — danh sách Fanpage account này được phép
+   * quảng bá. Trả về `undefined` nếu đọc lỗi (để bên gọi KHÔNG ghi đè cột cũ
+   * bằng mảng rỗng); trả về `[]` nếu account thật sự không có Trang nào.
+   */
+  private async fetchPromotePages(
+    adAccount: AdAccount,
+    accountId: string,
+    ctx?: BatchRunContext,
+  ): Promise<any[] | undefined> {
+    try {
+      const cursor = await adAccount.getPromotePages([...PROMOTE_PAGE_FIELDS], {
+        limit: ENTITY_SYNC_CONFIG.pageLimit,
+      });
+      return await fetchAll(cursor);
+    } catch (error) {
+      const msg = `promote_pages ${accountId}: ${parseMetaError(error).message}`;
+      ctx?.warn(msg);
+      this.logger.warn(`⚠️ ${msg}`);
+      return undefined;
+    }
+  }
+
+  /**
    * Liệt kê tất cả ad account (edge me/adaccounts), với mỗi TKQC kéo thêm pixel +
-   * custom audience rồi upsert vào bảng `Account`. Bọc try/catch theo account.
+   * custom audience + promote_pages rồi upsert vào bảng `Account`. Bọc try/catch
+   * theo account.
    */
   private async syncAccounts(
     me: User,
@@ -156,11 +184,20 @@ export class EntitySyncService {
         );
         const customAudiences = await fetchAll(audienceCursor);
 
+        // Quyền THẬT per-TKQC: Fanpage mà chính account này được phép quảng bá.
+        // Đọc lỗi (một số TKQC không cho đọc edge) → undefined ⇒ KHÔNG ghi đè
+        // (giữ nguyên giá trị cũ), tránh xoá mất data đã sync trước đó.
+        const promotePages = await this.fetchPromotePages(adAccount, acc.id, ctx);
+
         const rawPayload = this.buildAccountRawPayload(acc, {
           pages: pagePayloads,
           pixels,
           customAudiences,
+          ...(promotePages !== undefined ? { promotePages } : {}),
         });
+
+        const promotePatch =
+          promotePages !== undefined ? { promotePages } : {};
 
         await this.prisma.account.upsert({
           where: { id: acc.id },
@@ -173,6 +210,7 @@ export class EntitySyncService {
             pages: pagePayloads,
             pixels,
             customAudiences,
+            ...promotePatch,
             rawPayload,
             needsReauth: false,
             lastFetchedAt: new Date(),
@@ -188,6 +226,7 @@ export class EntitySyncService {
             pages: pagePayloads,
             pixels,
             customAudiences,
+            ...promotePatch,
             rawPayload,
             needsReauth: false,
             lastFetchedAt: new Date(),
@@ -197,6 +236,7 @@ export class EntitySyncService {
         stats.accountsOk += 1;
         stats.pixels += pixels.length;
         stats.audiences += customAudiences.length;
+        stats.promotePages += promotePages?.length ?? 0;
       } catch (error) {
         stats.accountsFailed += 1;
         const msg = `Account ${acc.id}: ${parseMetaError(error).message}`;
@@ -207,6 +247,10 @@ export class EntitySyncService {
 
       await sleep(ENTITY_SYNC_CONFIG.accountSleepMs);
     }
+
+    this.logger.log(
+      `🏦 Accounts: ${stats.accountsOk}/${stats.accountsTotal} (pixels ${stats.pixels}, audiences ${stats.audiences}, promotePages ${stats.promotePages})`,
+    );
   }
 
   /**
@@ -325,6 +369,7 @@ export class EntitySyncService {
       fanpagesWithInstagram: 0,
       pixels: 0,
       audiences: 0,
+      promotePages: 0,
       catalogs: 0,
       productSets: 0,
       productFeeds: 0,
