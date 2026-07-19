@@ -36,10 +36,14 @@ export const AD_PIXEL_FIELDS = [
   AdsPixel.Fields.last_fired_time,
   AdsPixel.Fields.is_created_by_business,
   AdsPixel.Fields.is_unavailable,
-  AdsPixel.Fields.is_restricted_use,
-  'valid_entries',
+  // ⚠️ ĐÃ BỎ `is_restricted_use`, `valid_entries`, `usage`: với một số pixel (vd
+  // pixel bị hạn chế / thuộc BM khác) Meta trả OAuthException code 1 "An unknown
+  // error" hoặc #100/2044062 "Invalid parameter" cho RIÊNG các field này. Vì SDK
+  // gom hết field vào 1 request `fields=...`, chỉ 1 field độc là CẢ `getAdsPixels`
+  // chết → hỏng onboard/sync TKQC. Ba field này không được đọc ở downstream nào
+  // (chỉ `da_checks` dùng cho pixel-health).
+  // PARITY: giữ khớp mb-ads/src/common/utils/meta-field.ts.
   'da_checks',
-  AdsPixel.Fields.usage,
 ];
 
 export const CAMPAIGN_FIELDS = [

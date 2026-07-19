@@ -2693,6 +2693,15 @@ model AssetAccessRequestItem {
   fetchError String?         @db.Text
   fetchedAt  DateTime?
 
+  // Người xử lý ở Business Manager tự tích "đã phân quyền cho token trên BM cho
+  // tài sản này". Tách khỏi status (do hệ đọc Meta): item đã tick nhưng VẪN lỗi
+  // (#200/#10) = việc BM đã xong nhưng phía token hệ thống còn vướng → admin hệ
+  // thống ưu tiên vào soi. Lưu kèm ai/khi (denormalize tên, khỏi join User).
+  grantedOnBm       Boolean   @default(false)
+  grantedOnBmAt     DateTime?
+  grantedOnBmById   String?
+  grantedOnBmByName String?
+
   createdAt DateTime @default(now())
 
   @@index([requestId])
@@ -3449,6 +3458,10 @@ model CampaignRule {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   deletedAt   DateTime?
+  // Ai đã xóa (soft delete). Scalar (không relation, User ngoài cụm này — giống
+  // createdById). Chỉ để truy vết "ai gỡ lịch", resolve tên lúc hiển thị. rule cũ
+  // bị xóa TRƯỚC cột này = null. Cặp với ChangeLog action DELETE_CAMPAIGN_RULE.
+  deletedById String?
 
   @@index([campaignId, status])
   @@index([campaignId, adSetId, status])
