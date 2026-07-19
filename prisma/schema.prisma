@@ -963,6 +963,10 @@ model Creative {
   // optional
   @@index([imageHash])
   @@index([videoId])
+  // Lọc list theo Fanpage (Campaign/AdSet/Ad/Creative) dùng EXISTS lồng tới
+  // Creative theo pageId/systemPageId — index để subquery không quét toàn bảng.
+  @@index([pageId])
+  @@index([systemPageId])
 }
 
 model CreativeInsight {

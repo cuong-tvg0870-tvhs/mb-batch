@@ -19,6 +19,10 @@ import {
   ADSET_FIELDS,
   CAMPAIGN_FIELDS,
 } from '../../common/utils/meta-field';
+import {
+  accountCanPromotePage,
+  pageIdFromStory,
+} from '../../common/utils/promote-pages.util';
 import { PrismaService } from '../prisma/prisma.service';
 
 type PublishStepStatus =
@@ -252,6 +256,28 @@ export class DraftAutomationMetaPublisherService {
 
     const adAccountId = this.normalizeAdAccountId(accountId);
     const adAccount = new AdAccount(adAccountId);
+
+    // CHỐT CHẶN "TKQC thiếu quyền Trang" (parity mb-ads validateLaunchReadiness):
+    // story organic hợp lệ vẫn bị Meta từ chối (1815017) nếu TKQC ĐÍCH không được
+    // cấp quyền quảng bá Trang của bài (không nằm trong promote_pages). Chỉ chặn khi
+    // promotePages ĐÃ sync (có dữ liệu); null → bỏ qua (fallback). Chặn TRƯỚC khi
+    // claim để không tạo gì trên Meta.
+    if (postStories.length) {
+      const acc = await this.prisma.account.findUnique({
+        where: { id: adAccountId },
+        select: { promotePages: true },
+      });
+      const blockedStory = postStories.find((s) => {
+        const pageId = pageIdFromStory(s);
+        return pageId && !accountCanPromotePage(acc?.promotePages, pageId);
+      });
+      if (blockedStory) {
+        this.logger.warn(
+          `Bỏ qua publish draft ${campaignSystem.id}: TKQC ${adAccountId} chưa được cấp quyền quảng bá Trang ${pageIdFromStory(blockedStory)} của bài "${blockedStory}" — Meta sẽ từ chối (1815017).`,
+        );
+        return { skipped: true, reason: 'PAGE_NOT_PROMOTABLE' };
+      }
+    }
 
     // Khóa chống trùng: chỉ MỘT tiến trình được publish một draft tại một thời điểm.
     // updateMany đặt isPublishing=true một cách nguyên tử khi draft đang rảnh và
