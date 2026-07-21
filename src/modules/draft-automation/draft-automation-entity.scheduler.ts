@@ -4,6 +4,10 @@ import { DraftAutomation } from '@prisma/client';
 import { CronExpressionParser } from 'cron-parser';
 import { PrismaService } from '../prisma/prisma.service';
 import {
+  normalizeRuleSchedule,
+  nextRunFromSchedule,
+} from './draft-automation-schedule';
+import {
   AutomationRunResult,
   DraftAutomationScheduler,
 } from './draft-automation.scheduler';
@@ -85,7 +89,12 @@ export class DraftAutomationEntityScheduler {
         // CRON vừa tạo/sửa/resume có nextRunAt=null (mb-ads chưa tính mốc cron). Query
         // coi null là "tới hạn" → nếu chạy ngay sẽ SAI GIỜ HẸN (đăng sớm). Thay vì chạy,
         // SEED mốc cron kế tiếp để nó chỉ chạy đúng khung giờ đã đặt (finding A6).
-        if (row.scheduleType === 'CRON' && row.nextRunAt === null) {
+        // Lịch KHUNG GIỜ (cron cũ, hoặc lịch JSON SPECIFIC mới) vừa tạo/sửa/resume có
+        // nextRunAt=null. Query coi null là "tới hạn" → chạy ngay sẽ SAI GIỜ HẸN.
+        const isSlotSchedule =
+          row.scheduleType === 'CRON' ||
+          normalizeRuleSchedule(row.schedule)?.type === 'SPECIFIC';
+        if (isSlotSchedule && row.nextRunAt === null) {
           const seeded = this.computeNextRunAt(row, now);
           await this.prisma.draftAutomation
             .updateMany({
@@ -94,7 +103,7 @@ export class DraftAutomationEntityScheduler {
             })
             .catch(() => undefined);
           this.logger.log(
-            `DraftAutomation "${row.name}" (${row.id}): CRON — hẹn mốc chạy đầu tiên ${seeded.toISOString()}.`,
+            `DraftAutomation "${row.name}" (${row.id}): lịch khung giờ — hẹn mốc chạy đầu tiên ${seeded.toISOString()}.`,
           );
           continue;
         }
@@ -235,6 +244,28 @@ export class DraftAutomationEntityScheduler {
    *   Cron không hợp lệ / quá dày → fallback from + 30 phút để row không bị treo.
    */
   private computeNextRunAt(row: DraftAutomation, from: Date): Date {
+    // Lịch JSON (rule-builder, dùng chung với "Scale bài hiệu quả") là nguồn ƯU TIÊN.
+    // Vẫn ép sàn 30 phút như đường cũ: cron quét của scheduler này chạy mỗi 30 phút nên
+    // hẹn dày hơn thế là hẹn suông. Xem draft-automation-schedule.ts.
+    const ruleSchedule = normalizeRuleSchedule(row.schedule);
+    if (ruleSchedule) {
+      const next = nextRunFromSchedule(
+        ruleSchedule,
+        from,
+        row.timezone ?? DEFAULT_TIMEZONE,
+      );
+      if (next) {
+        const floor = new Date(from.getTime() + MIN_INTERVAL_MS);
+        return next.getTime() < floor.getTime() ? floor : next;
+      }
+      // null = lịch đã hết hạn (dateTo đã qua) hoặc không còn khung giờ nào. Hẹn xa để
+      // row không bị quét lại mỗi tick; status sẽ do người dùng đổi.
+      this.logger.log(
+        `DraftAutomation "${row.name}" (${row.id}): lịch JSON không còn mốc kế tiếp — hoãn 24h.`,
+      );
+      return new Date(from.getTime() + 24 * 60 * 60 * 1000);
+    }
+
     if (row.scheduleType === 'CRON' && row.cronExpression) {
       const next = this.computeCronNextRunAt(
         row.cronExpression,

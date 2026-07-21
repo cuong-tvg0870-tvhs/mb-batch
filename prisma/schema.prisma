@@ -1858,6 +1858,17 @@ model DraftAutomation {
   timezone        String?
   runMode         DraftAutomationRunMode      @default(LOOP)
 
+  /// Lịch dạng rule-builder — CÙNG shape với `AutoLaunchRule.schedule` và
+  /// `CampaignRuleTemplate.config.schedule`:
+  ///   { type:"INTERVAL"|"SPECIFIC", interval?, specificSlots?, useDateRange?, dateFrom?, dateTo? }
+  /// Có cột riêng vì lưới SPECIFIC (7 ngày × 24 giờ, sub-slot 15/30/45') KHÔNG nén hết
+  /// được về một chuỗi cron — mỗi ngày có thể một khung phút khác nhau.
+  ///
+  /// NULL = automation cũ, vẫn chạy bằng scheduleType/intervalMinutes/cronExpression.
+  /// Reader (mb-batch computeNextRunAt + mb-ads runNow) đọc cột này TRƯỚC, thiếu thì
+  /// fallback cột phẳng — nên writer cũ chưa deploy không vỡ.
+  schedule Json?
+
   // Chế độ đăng — mặc định chỉ tạo nháp (an toàn). Dùng lại enum sẵn có.
   publishMode DraftAutomationPublishMode @default(DRAFT_ONLY)
 

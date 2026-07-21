@@ -6,6 +6,7 @@ import {
   applyCidToAdName,
   extractCidFromName,
 } from '../../common/utils/cid.util';
+import { matchesAnyNameTerm } from './name-term-match';
 
 const DEFAULT_AUTOMATION_CRON = '*/30 * * * *';
 const DEFAULT_AUTOMATION_TIMEZONE = 'Asia/Ho_Chi_Minh';
@@ -1579,11 +1580,10 @@ export class DraftAutomationScheduler {
               : assetReuseMode === 'USED_ONLY'
                 ? !!isUsedBySystemOrPublished
                 : !isUsedBySystemOrPublished; // NEW_ONLY (mặc định)
-          const matchesNameRule =
-            !automation.nameRule ||
-            (asset.name || '')
-              .toLowerCase()
-              .includes(automation.nameRule.toLowerCase());
+          const matchesNameRule = matchesAnyNameTerm(
+            asset.name,
+            automation.nameRule,
+          );
           // Yêu cầu: chỉ lấy content có chứa mã CID trong tên (vd CID00046478).
           const hasCid = !!extractCidFromName(asset.name);
 
