@@ -1704,6 +1704,24 @@ model TemplateCampaign {
   name String
   data Json?
 
+  /// MẪU DÙNG ĐỂ LÀM GÌ — thuộc tính của mẫu, KHÁC với "lần launch này nhân cấu trúc ra sao"
+  /// (cái đó là StructureMode, quyết định lúc bấm nút, không lưu ở đây).
+  /// Trước đây "purpose" duy nhất của hệ thống là substring 'testingcontent' trong TÊN campaign,
+  /// bị đọc ở 7 điểm qua 3 repo — cột này là đường thoát khỏi cách đó.
+  /// NULL = mẫu legacy chưa phân loại (95 mẫu hiện có); code phải coi NULL là "cho phép tất cả".
+  purpose TemplatePurpose?
+
+  /// Hợp đồng launch: mode cấu trúc/nội dung được phép, chính sách ngân sách & lịch.
+  /// PHẢI là cột riêng, KHÔNG nhét vào `data`: updateTemplate ghi `data: slottedValues` đè
+  /// TOÀN BỘ cột data, và ValidationPipe(whitelist:true) cắt field lạ khỏi payload — cơ chế đó
+  /// hôm nay đang xoá mất `description` mỗi lần lưu mẫu, launchContract sẽ chịu số phận y hệt.
+  /// NULL = permissive (không khoá gì) ⇒ mẫu cũ không bị đóng băng.
+  launchContract Json?
+
+  /// Khoá mẫu là OPT-IN: chỉ chặn sửa khi được bật rõ ràng. Mặc định false vì `updateTemplate`
+  /// hiện là đường DUY NHẤT vá một mẫu hỏng — khoá đại trà sẽ giết một tính năng đang dùng.
+  locked Boolean @default(false)
+
   reference_id String?
   reference    SystemCampaign? @relation(fields: [reference_id], references: [id])
 
@@ -1718,6 +1736,18 @@ model TemplateCampaign {
   @@index([name])
   @@index([reference_id])
   @@index([createdById, createdAt(sort: Desc)])
+  @@index([purpose])
+}
+
+/// Phân loại mẫu theo mục đích sử dụng. Cố ý KHÔNG suy từ tên campaign nữa.
+enum TemplatePurpose {
+  /// Test nội dung mới: nhiều ô nội dung, ngân sách nhỏ. Là nhóm được miễn cổng min-5-content
+  /// (trước đây nhận diện bằng substring 'testingcontent' trong tên).
+  TESTING_CONTENT
+  /// Scale một bài đã thắng: dùng lại object_story_id để giữ engagement.
+  SCALE_POST_WIN
+  /// Mẫu thường, không thuộc hai nhóm trên.
+  STANDARD
 }
 
 enum DraftAutomationRunStatus {

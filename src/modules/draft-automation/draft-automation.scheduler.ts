@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { AssetType, Status } from '@prisma/client';
+import { AssetType, Status, TemplatePurpose } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { DraftAutomationMetaPublisherService } from './draft-automation-meta-publisher.service';
 import {
@@ -1239,6 +1239,16 @@ export class DraftAutomationScheduler {
       published: false,
     };
 
+    if (override.template?.purpose !== TemplatePurpose.TESTING_CONTENT) {
+      return {
+        status: 'SKIPPED',
+        reason:
+          'Tự động hóa lấy asset mới chỉ chạy với mẫu có mục đích “Test content mới”.',
+        isComplete: false,
+        published: false,
+      };
+    }
+
     const activeTemplates = [override.template];
 
     for (const template of activeTemplates) {
@@ -1672,16 +1682,16 @@ export class DraftAutomationScheduler {
         // requiredVideos+requiredImages < ngưỡng creative/chiến dịch → gom bao nhiêu
         // content cũng vô ích, chỉ tốn tài nguyên mỗi 30'. PAUSE row DraftAutomation +
         // ghi lý do (parity với gate lúc lưu ở mb-ads). Chỉ PUBLISH_IMMEDIATELY; miễn
-        // tên chiến dịch của mẫu chứa "TestingContent". Chỉ áp dụng cho nhánh mới
+        // purpose của mẫu là TESTING_CONTENT. Chỉ áp dụng cho nhánh mới
         // (có draftAutomationId) — nhánh legacy không có row để tạm dừng.
         const MIN_AUTO_PUBLISH_CONTENTS = await this.getMinPublishContents();
         const projectedContents = requiredVideos + requiredImages;
         const templateCampaignName = String(
           (template.data as any)?.campaign?.name || '',
         );
-        const isTestingTemplate = templateCampaignName
-          .toLowerCase()
-          .includes('testingcontent');
+        const isTestingTemplate = template.purpose
+          ? template.purpose === TemplatePurpose.TESTING_CONTENT
+          : templateCampaignName.toLowerCase().includes('testingcontent');
         if (
           publishRequested &&
           override?.draftAutomationId &&
@@ -1692,7 +1702,7 @@ export class DraftAutomationScheduler {
             `Tạm dừng tự động: mẫu chỉ tạo ${projectedContents} mẫu nội dung/chiến dịch ` +
             `(cần tối thiểu ${MIN_AUTO_PUBLISH_CONTENTS} để đăng tự động lên Meta). Hãy chọn ` +
             `mẫu có ≥${MIN_AUTO_PUBLISH_CONTENTS} ô nội dung, tăng số lượng video/ảnh, hoặc ` +
-            `thêm "TestingContent" vào tên chiến dịch của mẫu nếu là nội dung thử nghiệm.`;
+            `dùng mẫu có mục đích “Test content mới”.`;
           this.logger.warn(
             `DraftAutomation ${override.draftAutomationId} (mẫu "${template.name}") tạm dừng: chỉ tạo ${projectedContents} < ${MIN_AUTO_PUBLISH_CONTENTS} nội dung.`,
           );

@@ -1,6 +1,6 @@
 # MB Auto — Shared Project Overview
 
-Last updated: 2026-07-16
+Last updated: 2026-07-21
 
 ## Service map
 
@@ -82,3 +82,31 @@ Plain account members receive only their own membership row, not the full team r
 ### Legacy dashboard hardening
 
 The original `/dashboard` payload now scopes `topCampaigns` with the same account access filter. `dailyLogins` is queried and returned only for system admins rather than merely being hidden by the frontend.
+
+## Campaign template playbooks
+
+`TemplateCampaign` keeps the existing `data` skeleton and adds three dedicated fields so launch behavior is not lost when the structure is re-saved:
+
+- `purpose`: `STANDARD`, `TESTING_CONTENT`, or `SCALE_POST_WIN`.
+- `launchContract`: versioned JSON containing `allowedStructureModes`, `defaultStructureMode`, and `contentMode`.
+- `locked`: defaults to `true`. Full structure updates are rejected once saved; metadata and launch behavior remain editable through quick-edit.
+
+The canonical migration is `mb-db/prisma/migrations/20260721090000_add_template_purpose_and_launch_contract`. It classifies legacy templates from the existing TestingContent naming convention or pinned-post signal, then locks existing populated templates. Do not run migrations automatically; apply them through the normal deployment process.
+
+The backend normalizes the JSON allow-list in `draft-campaign/template-contract.ts`. `SCALE_POST_WIN` is constrained to `REUSE_EXISTING_POST`; `TESTING_CONTENT` is constrained to `NEW_CREATIVE`. Template create, clone, list, and quick-edit preserve these fields. `PATCH /draft-campaigns/template/:id/quick-edit` is the supported way to change name, description, purpose, or launch contract without changing objective, targeting, placement, or the campaign/ad-set structure.
+
+The frontend shared contract is `lib/campaign-template.ts`. Save and quick-edit dialogs use `TemplateModeFields`. When content is already selected, `TemplatePickerButton` opens `TemplateLaunchPlanPanel` before applying a template:
+
+- `KEEP_TEMPLATE`: fill only the existing creative slots; surplus content is explicitly reported.
+- `ADD_ADS`: preserve the ad-set structure and append enough ads to use all selected content.
+- `CLONE_ADSETS`: clone the first strategic ad-set per fanpage or per selected content.
+
+`SCALE_POST_WIN` must resolve or already contain a compatible `object_story_id`; it fails closed when a selected item has no reusable post on the target Page. `AUTO` may fall back to a new creative and tells the marketer that social proof will not be retained. Multiple source Pages require ad-set cloning or one explicit target Page, and Page-promotion permissions are checked before the wizard can confirm.
+
+Automation routing also uses `purpose` rather than template-name substrings. Draft Automation (watch folders and fill new image/video assets) accepts only `TESTING_CONTENT`; Auto Launch Rule (rank winning posts and reuse `object_story_id`) accepts only `SCALE_POST_WIN`. Both frontend pickers filter to the compatible purpose, while API create/update/preview/run and the `mb-batch` scheduler fail closed if a template is later changed to an incompatible purpose. The sidebar presents these workflows as `Tự động hóa Ads` → `Scale bài hiệu quả`, `Test content tự động`, and `Mẫu lịch chạy`.
+
+Auto Launch preview and execution share `packGroupPure` and default to `DELIVERY_CAP` with six ads per ad set, including legacy rules that have no packing field. A run creates one campaign, groups reusable Post-ID ads by source Page, and splits another ad set for the same Page only when that Page exceeds the cap. `launchFromTemplateWithPostGroups` clones the first template ad set as the strategic blueprint, assigns `promoted_object.page_id` per generated ad set, and gives repeated Page groups a sequence suffix. Preview therefore reflects the structure that is actually persisted and published. CBO keeps the campaign budget; ABO preserves the template's total ad-set budget and redistributes it across generated ad sets, so Page grouping never multiplies spend.
+
+The Auto Launch create/edit form keeps submit errors inside the dialog. Client validation is collected into one inline summary, affected controls receive inline messages and destructive styling, and the left form pane scrolls/focuses the first issue. API messages are mapped to a known field when possible and otherwise focus the summary; save errors must not use an external destructive toast. Success confirmation may still use the standard toast.
+
+The Scale template picker uses the rich mode of `components/ui/searchable-select.tsx`. `listLaunchTemplates()` keeps the encoded technical name as hidden search keywords but also returns a cleaned display name, Vietnamese objective/optimization labels, budget mode, ad-set count, and ad count. The trigger shows the short name plus strategic summary; dropdown options render wrapped card rows with reuse-post, CBO/ABO, group, and ad badges. Compact consumers of the shared searchable select retain their original single-line layout.
