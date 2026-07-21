@@ -79,10 +79,18 @@ enum LevelInsight {
 // MODELS
 // =======================
 model TargetingInterest {
+  // Khoá cache. Với locale mặc định (en_US) `id` CHÍNH LÀ Meta id — giữ nguyên
+  // ngữ nghĩa cũ để không phá dữ liệu/đường đọc hiện có. Với locale khác, `id`
+  // là khoá tổng hợp "<metaId>__<locale>" để 2 bản dịch của cùng 1 interest
+  // không ghi đè lẫn nhau. LUÔN dùng `metaId` khi cần id thật gửi cho Meta.
   id                        String  @id @default(uuid())
   // Loại targeting: interests | behaviors | demographics | life_events | locales.
   // Dữ liệu cũ mặc định là "interests"; giá trị mới được search lưu đúng loại.
   type                      String  @default("interests")
+  // Locale của BẢN GHI (tên/mô tả theo ngôn ngữ nào). Hàng cũ = en_US.
+  locale                    String  @default("en_US")
+  // Id thật bên Meta (locales dùng `key`). Hàng cũ được backfill = id.
+  metaId                    String?
   name                      String
   description               String?
   audience_size_lower_bound Int?
@@ -90,7 +98,9 @@ model TargetingInterest {
   path                      Json?
   topic                     String?
 
+  @@unique([metaId, locale])
   @@index([type])
+  @@index([type, locale])
 }
 
 model DropdownCategory {
@@ -307,6 +317,12 @@ model Account {
   name          String?
   currency      String?
   timezone      String?
+  /// Mã quốc gia ISO-3166 của TKQC (Meta `business_country_code`) = THỊ TRƯỜNG tài
+  /// khoản đang chạy. Dùng để search targeting theo đúng thị trường (locale) và cho
+  /// reach estimate theo quốc gia. KHÔNG suy từ `currency` — rất nhiều TKQC chạy
+  /// Đông Nam Á nhưng để USD. Null = chưa sync lại kể từ khi thêm cột; khi null thì
+  /// app suy tạm từ `timezone` (xem meta-locale.util).
+  countryCode   String?
   businessId    String?
   businessName  String?
   needsReauth   Boolean     @default(false)

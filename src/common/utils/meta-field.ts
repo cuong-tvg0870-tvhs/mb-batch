@@ -17,6 +17,9 @@ export const AD_ACCOUNT_FIELDS = [
   AdAccount.Fields.currency,
   AdAccount.Fields.timezone_name,
   AdAccount.Fields.timezone_offset_hours_utc,
+  // Mã quốc gia ISO-3166 = THỊ TRƯỜNG của TKQC → Account.countryCode. Dùng cho
+  // search targeting theo thị trường. GIỮ SONG SONG với bản ở mb-ads.
+  AdAccount.Fields.business_country_code,
   // AdAccount.Fields.business_name,
   AdAccount.Fields.owner,
   AdAccount.Fields.spend_cap,
@@ -24,6 +27,10 @@ export const AD_ACCOUNT_FIELDS = [
   AdAccount.Fields.created_time,
   AdAccount.Fields.disable_reason,
   AdAccount.Fields.is_personal,
+  // entity-sync đọc `acc?.business?.id/name` để ghi businessId/businessName, nhưng
+  // list này TRƯỚC ĐÂY thiếu `business` nên Meta không trả về → hai cột đó không bao
+  // giờ được cron sync điền (chỉ mb-ads điền). Thêm lại cho khớp bản mb-ads.
+  AdAccount.Fields.business,
 ];
 
 export const AD_PIXEL_FIELDS = [
