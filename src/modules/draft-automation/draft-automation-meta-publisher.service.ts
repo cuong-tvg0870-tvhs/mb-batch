@@ -177,6 +177,10 @@ export class DraftAutomationMetaPublisherService {
         return !(Number(amount) > 0);
       }
       if (strat === 'LOWEST_COST_WITH_MIN_ROAS') {
+        // ROAS chỉ hợp lệ khi optimization_goal = VALUE; goal ≠ VALUE sẽ được
+        // normalizeRoasBidStrategy tự hạ về "Chi phí thấp nhất" → KHÔNG skip ở đây.
+        // Chỉ đòi ROAS floor khi thật sự tối ưu theo Giá trị (parity mb-ads gate).
+        if (String(asData.optimization_goal || '') !== 'VALUE') return false;
         const floor =
           asData?.bid_constraints?.roas_average_floor ??
           campaignBidData?.bid_constraints?.roas_average_floor;
@@ -217,6 +221,14 @@ export class DraftAutomationMetaPublisherService {
     const data = this.clone(
       CleanObjectOrArray(campaignSystem.data || {}) || {},
     );
+
+    // Hạ "Mục tiêu ROAS" (LOWEST_COST_WITH_MIN_ROAS) về "Chi phí thấp nhất" khi mục tiêu
+    // tối ưu KHÔNG phải VALUE — Meta cấm cặp này, luôn nổ khi publish. Nhiều template cố
+    // định (combo scale) để ROAS nhưng goal là OFFSITE/MESSAGING_* → sửa TẠI CHỖ trên
+    // data.campaign + ad_sets[].data trước khi build payload (loop dưới re-clone adSet.data
+    // nên bắt được thay đổi). Idempotent, không ghi DB. Parity mb-ads pushToMetaCore.
+    this.normalizeRoasBidStrategy(data.campaign, campaignSystem.ad_sets || []);
+
     const accountId =
       campaignSystem.accountId || data.ad_account_id || data.account_id;
     if (!accountId) {
@@ -853,6 +865,48 @@ export class DraftAutomationMetaPublisherService {
   private normalizeMetaStatus(status?: string, fallback = 'PAUSED') {
     const allowedStatuses = ['ACTIVE', 'PAUSED', 'ARCHIVED', 'DELETED'];
     return status && allowedStatuses.includes(status) ? status : fallback;
+  }
+
+  // Hạ "Mục tiêu ROAS" về "Chi phí thấp nhất" khi optimization_goal ≠ VALUE (Meta cấm).
+  // Dưới CBO giá thầu ở campaign (hợp lệ chỉ khi MỌI ad set = VALUE); ABO ở từng ad set.
+  // Sửa tại chỗ trên object in-memory; idempotent. Parity mb-ads normalizeRoasBidStrategy.
+  private normalizeRoasBidStrategy(
+    campaignData: any,
+    adSets: Array<{ data: any }>,
+  ): void {
+    if (!campaignData) return;
+    const ROAS = 'LOWEST_COST_WITH_MIN_ROAS';
+    const SAFE = 'LOWEST_COST_WITHOUT_CAP';
+    const isValueGoal = (g: any) => String(g || '') === 'VALUE';
+    const isCbo = !!(
+      campaignData.campaign_budget_optimization ||
+      campaignData.daily_budget ||
+      campaignData.lifetime_budget
+    );
+
+    if (isCbo) {
+      if (String(campaignData.bid_strategy || '') !== ROAS) return;
+      const allValue =
+        adSets.length > 0 &&
+        adSets.every((as) => isValueGoal((as?.data as any)?.optimization_goal));
+      if (!allValue) {
+        campaignData.bid_strategy = SAFE;
+        delete campaignData.bid_constraints;
+      }
+      return;
+    }
+
+    for (const as of adSets) {
+      const d: any = as?.data;
+      if (!d) continue;
+      if (
+        String(d.bid_strategy || '') === ROAS &&
+        !isValueGoal(d.optimization_goal)
+      ) {
+        d.bid_strategy = SAFE;
+        delete d.bid_constraints;
+      }
+    }
   }
 
   private buildCampaignCreatePayload(payload: any) {
