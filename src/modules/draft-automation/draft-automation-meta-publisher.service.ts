@@ -171,10 +171,10 @@ export class DraftAutomationMetaPublisherService {
         (isCboBid ? campaignBidData.bid_strategy : asData.bid_strategy) || '',
       );
       if (CAP_BID_STRATEGIES.includes(strat)) {
-        const amount = isCboBid
-          ? asData.bid_amount || campaignBidData.bid_amount
-          : asData.bid_amount;
-        return !(Number(amount) > 0);
+        // Meta đòi bid_amount TRÊN TỪNG ad set (kể cả CBO): buildCampaignCreatePayload
+        // XOÁ campaign.bid_amount và KHÔNG hạ xuống ad set, nên amount khai ở cấp campaign
+        // KHÔNG bao giờ tới Meta → không được coi là "đã có". Chỉ xét bid_amount của ad set.
+        return !(Number(asData.bid_amount) > 0);
       }
       if (strat === 'LOWEST_COST_WITH_MIN_ROAS') {
         // ROAS chỉ hợp lệ khi optimization_goal = VALUE; goal ≠ VALUE sẽ được
