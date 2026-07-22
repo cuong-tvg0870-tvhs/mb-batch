@@ -342,7 +342,7 @@ model Account {
   /// `object_story_id = {pageId}_...` khi pageId nằm trong promotePages của TKQC
   /// đích (tránh Meta 1815017). Shape: [{ id, name }]. Do entity-sync (mb-batch)
   /// + các nút Sync/onboard (mb-ads) ghi vào; null = chưa sync lần nào.
-  promotePages    Json?
+  promotePages Json?
 
   /// FK to the MetaConnection whose access token authorises Meta Graph calls
   /// targeting this ad account. Nullable while a connection has not yet been
@@ -2833,6 +2833,13 @@ model AutomationCategory {
   // category top-level (cùng cấp với project trên sidebar, giữ hành vi cũ).
   projectId String?
 
+  // Nhân bản danh mục chạy nền (BullMQ). null = category thường (mọi row cũ).
+  // Khi PENDING/RUNNING, FE hiện spinner + màn "đang nhân bản" thay cây folder và
+  // BE từ chối rename/move/reorder (nhưng vẫn cho xoá bản FAILED).
+  cloneStatus   AutomationCategoryCloneStatus?
+  cloneError    String?
+  cloneSourceId String?
+
   folders          AutomationFolder[]
   rules            AutomationRule[]
   customMetrics    CustomMetric[]
@@ -2845,6 +2852,13 @@ model AutomationCategory {
 
   @@index([createdById, position])
   @@index([projectId])
+}
+
+enum AutomationCategoryCloneStatus {
+  PENDING
+  RUNNING
+  DONE
+  FAILED
 }
 
 model AutomationFolder {
@@ -3110,6 +3124,10 @@ enum AutomationRuleRunStatus {
   // HEALTHY skip, not a failure: the next tick retries. Running fewer times but
   // succeeding beats running every tick and failing on #4.
   SKIPPED_RATE_LIMIT
+  // The job sat in the queue past its usefulness (backlog) and only reached a
+  // worker long after `scheduledFor`. Evaluating it would spend Meta calls to
+  // act on stale intent, so it is dropped instead — visibly, not silently.
+  SKIPPED_STALE
 }
 
 enum AutomationRuleRunItemStatus {
