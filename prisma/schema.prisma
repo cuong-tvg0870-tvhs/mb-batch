@@ -3832,6 +3832,12 @@ model AutoLaunchRule {
   // Chỉ khi tự đăng: trần ngân sách mỗi chiến dịch (VND, major units).
   budgetCapPerCampaign Int?
 
+  // Email best-effort về cho CHỦ quy tắc (resolve User.email từ createdById).
+  // Tách 2 cờ để user chọn đúng tín hiệu cần theo dõi; mặc định tắt để
+  // rule cũ không tự phát sinh mail sau deploy.
+  notifyOnLaunch Boolean @default(false)
+  notifyOnError  Boolean @default(false)
+
   // Số chiến dịch quy tắc này đã tạo ra (đếm cộng dồn — hiển thị + đối soát).
   launchedCount Int @default(0)
 
@@ -3869,8 +3875,15 @@ model AutoLaunchRuleRun {
   // Idempotency chống chạy trùng cùng 1 khung: "ruleId:<aligned scheduledFor ISO>".
   dedupeKey String? @unique
 
+  // `completedAt` phân biệt row CLAIM đang chạy với kết quả cuối (status CLAIM tạm
+  // cũng là FAILED). Notify service chỉ quét row đã hoàn tất, tránh báo lỗi
+  // giả trong lúc Meta publish còn chạy. `notifiedAt` là claim chống gửi trùng.
+  completedAt DateTime?
+  notifiedAt  DateTime?
+
   createdAt DateTime @default(now())
 
   @@index([ruleId, createdAt(sort: Desc)])
+  @@index([notifiedAt, completedAt])
   @@map("auto_launch_rule_run")
 }
