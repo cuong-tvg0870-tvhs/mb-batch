@@ -278,6 +278,13 @@ function actionsToMap(actions: any): Record<string, number> {
   return map;
 }
 
+/** map action_type→value (đã cộng) → mảng [{action_type, value}] chuẩn Meta. */
+function mapToActionArray(
+  map: Record<string, number>,
+): { action_type: string; value: number }[] {
+  return Object.entries(map).map(([action_type, value]) => ({ action_type, value }));
+}
+
 /** Đếm result từ map action đã cộng, theo spec (ưu tiên unified đã dedup). */
 export function countResult(
   actionMap: Record<string, number>,
@@ -310,6 +317,9 @@ export function aggregateDailyInsights(
   let vawtDen = 0;
   // gộp actions toàn kỳ để đếm result theo goal
   const totalActions: Record<string, number> = {};
+  // gộp action_values toàn kỳ (để tái sử dụng: tách omni vs website pixel, ROAS chuẩn…).
+  // Cộng theo action_type là ĐÚNG chuẩn khi gộp nhiều ngày (giá trị đơn cộng thẳng).
+  const totalActionValues: Record<string, number> = {};
   // snapshot ranking theo ngày mới nhất
   const dates = new Set<string>();
   let latestDate = '';
@@ -332,6 +342,11 @@ export function aggregateDailyInsights(
     const am = actionsToMap(row.actions);
     for (const [t, v] of Object.entries(am)) {
       totalActions[t] = (totalActions[t] || 0) + v;
+    }
+    // camelCase (dòng DB) hoặc snake (raw Meta) — nhận cả hai cho chắc.
+    const avm = actionsToMap(row.actionValues ?? row.action_values);
+    for (const [t, v] of Object.entries(avm)) {
+      totalActionValues[t] = (totalActionValues[t] || 0) + v;
     }
 
     const d = row.dateStart || '';
@@ -361,6 +376,13 @@ export function aggregateDailyInsights(
 
   // ===== derived (tính lại từ tổng) =====
   recomputeDerived(out, spec);
+
+  // ===== actions/action_values đã gộp (mảng chuẩn Meta) — để rollup CreativeInsight có
+  // dữ liệu thô đầy đủ, tái sử dụng sau (tách omni vs website pixel, ROAS theo nhu cầu).
+  // Các model insight đều có cột actions/actionValues (Json) nên spread thẳng vào upsert.
+  out.actions = mapToActionArray(totalActions);
+  out.actionValues = mapToActionArray(totalActionValues);
+
   return out as AggregatedInsight;
 }
 

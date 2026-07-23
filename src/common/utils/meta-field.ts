@@ -249,6 +249,7 @@ export const AD_INSIGHT_FIELDS = [
   AdsInsights.Fields.cost_per_result,
 
   AdsInsights.Fields.purchase_roas,
+  AdsInsights.Fields.website_purchase_roas,
 
   // quality
   AdsInsights.Fields.quality_ranking,
@@ -308,6 +309,7 @@ export const SUMMARY_AD_INSIGHT_FIELDS = [
   AdsInsights.Fields.cost_per_result,
 
   AdsInsights.Fields.purchase_roas,
+  AdsInsights.Fields.website_purchase_roas,
 
   // quality
 
