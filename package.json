@@ -60,6 +60,7 @@
     "@nestjs/cli": "11.0.0",
     "@types/express": "4.17.17",
     "@types/facebook-nodejs-business-sdk": "23.0.0",
+    "@types/jest": "^30.0.0",
     "@types/multer": "2.0.0",
     "@types/node": "22.10.7",
     "@types/passport-jwt": "4.0.1",

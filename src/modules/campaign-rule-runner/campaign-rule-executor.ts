@@ -293,6 +293,46 @@ export async function fetchBudgetSchedules(
   }
 }
 
+/**
+ * Như fetchBudgetSchedules nhưng NÉM LỖI nếu đọc thất bại (không nuốt về []). Dùng khi cần
+ * reconcile an toàn: đọc-lỗi mà coi như rỗng rồi tạo mới → dễ nhân đôi lịch. Caller nên
+ * abort + cảnh báo nếu hàm này ném.
+ */
+export interface LiveSchedule extends LiveWindow {
+  budget_value: number | null;
+  budget_value_type: string | null;
+}
+
+export async function fetchBudgetSchedulesStrict(
+  level: 'CAMPAIGN' | 'ADSET' | string,
+  entityId: string,
+): Promise<LiveSchedule[]> {
+  const target = (level === 'CAMPAIGN'
+    ? new Campaign(entityId)
+    : new AdSet(entityId)) as unknown as {
+    getBudgetSchedules: (fields: string[], params: object) => Promise<unknown[]>;
+  };
+  const cursor = await target.getBudgetSchedules(
+    ['id', 'time_start', 'time_end', 'budget_value', 'budget_value_type'],
+    { limit: 100 },
+  );
+  const rows = ((cursor as { _data?: any }[]) || []).map(
+    (s) => (s as { _data?: any })._data ?? s,
+  );
+  return rows
+    .filter((r) => r && r.id != null)
+    .map((r) => ({
+      id: String(r.id),
+      time_start: metaTimeToUnix(r.time_start),
+      time_end: metaTimeToUnix(r.time_end),
+      budget_value:
+        r.budget_value != null && Number.isFinite(Number(r.budget_value))
+          ? Number(r.budget_value)
+          : null,
+      budget_value_type: r.budget_value_type != null ? String(r.budget_value_type) : null,
+    }));
+}
+
 /** Đọc ngân sách hằng ngày/trọn đời LIVE từ Meta (minor units). null nếu lỗi/không có. */
 export async function fetchLiveBudget(
   level: 'CAMPAIGN' | 'ADSET' | string,
@@ -318,21 +358,27 @@ export async function fetchLiveBudget(
   }
 }
 
-/** Xoá các budget schedule (HighDemandPeriod) theo id trên Meta. Best-effort. */
+/**
+ * Xoá các budget schedule (HighDemandPeriod) theo id trên Meta. Best-effort: KHÔNG throw,
+ * trả kết quả từng id. `failedIds` = các id XOÁ KHÔNG THÀNH CÔNG (vẫn còn LIVE trên Meta) →
+ * caller phải GIỮ ownership để retry sau còn dọn (không bỏ rơi lịch sót).
+ */
 export async function deleteBudgetSchedules(
   ids: string[],
-): Promise<{ removed: number; errors: string[] }> {
+): Promise<{ removed: number; errors: string[]; failedIds: string[] }> {
   let removed = 0;
   const errors: string[] = [];
+  const failedIds: string[] = [];
   for (const id of ids) {
     try {
       await new HighDemandPeriod(id).delete([]);
       removed += 1;
     } catch (e) {
       errors.push(parseMetaError(e).message);
+      failedIds.push(id);
     }
   }
-  return { removed, errors };
+  return { removed, errors, failedIds };
 }
 
 /**
@@ -343,6 +389,12 @@ export async function executeBudgetSchedule(
   level: 'CAMPAIGN' | 'ADSET' | string,
   entityId: string,
   specs: BudgetScheduleSpec[],
+  // manageToggle: có TỰ bật `is_budget_schedule_enabled=true` sau khi tạo khung không.
+  //   - true (mặc định): runner "gửi ngay" — tạo xong bật luôn (hành vi cũ).
+  //   - false: activator pending-automation gọi — activator là NƠI DUY NHẤT đặt cờ (theo
+  //     đúng scheduleEnabled), nên ở đây KHÔNG đụng cờ để tránh bật/tắt hai lần (bật nhầm
+  //     lịch khác trên entity khi cấu hình mong muốn là TẮT).
+  manageToggle = true,
 ): Promise<ExecResult> {
   if (!specs || specs.length === 0) {
     return { ok: false, error: { message: 'Không có budget_schedule_specs để đẩy' }, scheduleIds: [] };
@@ -378,7 +430,8 @@ export async function executeBudgetSchedule(
 
     // Bật cờ tổng để Meta tick "Schedule budget increases" + thực sự áp dụng
     // (tạo khung qua edge không tự bật). Best-effort — lỗi không làm hỏng kết quả.
-    if (scheduleIds.length > 0) {
+    // CHỈ khi manageToggle=true (runner); activator tự đặt cờ theo scheduleEnabled.
+    if (manageToggle && scheduleIds.length > 0) {
       try {
         if (level === 'CAMPAIGN')
           await new Campaign(entityId).update([], { is_budget_schedule_enabled: true });

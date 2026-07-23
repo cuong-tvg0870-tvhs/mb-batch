@@ -7,6 +7,7 @@ import {
   extractCidFromName,
 } from '../../common/utils/cid.util';
 import { matchesAnyNameTerm } from './name-term-match';
+import { normalizePendingAutomation } from './pending-automation.util';
 
 const DEFAULT_AUTOMATION_CRON = '*/30 * * * *';
 const DEFAULT_AUTOMATION_TIMEZONE = 'Asia/Ho_Chi_Minh';
@@ -1138,6 +1139,12 @@ export class DraftAutomationScheduler {
         automationTemplateId: template.id,
         automationTemplateName: template.name,
         automationPublishMode: publishMode,
+        // NHÂN config "Tự động hoá sau khi lên Camp" từ MẪU xuống camp automation sinh ra →
+        // đi theo luồng publish (publishDraftCampaign) để tự áp lên Meta. ABO áp cho MỌI ad set.
+        pendingAutomation:
+          (normalizePendingAutomation(
+            (template as any)?.pendingAutomation,
+          ) as any) ?? undefined,
         cid: substitutedValues.cid,
         data: substitutedValues as any,
         campaign_bidAmount:

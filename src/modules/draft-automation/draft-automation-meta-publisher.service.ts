@@ -24,6 +24,7 @@ import {
   pageIdFromStory,
 } from '../../common/utils/promote-pages.util';
 import { PrismaService } from '../prisma/prisma.service';
+import { activatePendingAutomationForCampaign } from './pending-automation-activator';
 
 type PublishStepStatus =
   | 'pending'
@@ -614,6 +615,59 @@ export class DraftAutomationMetaPublisherService {
         results: adResults,
         summary: { total: adResults.length, live: liveAds, failed: failedAds },
       });
+
+      // TỰ ĐỘNG HOÁ SAU KHI LÊN CAMP (đường cron DraftAutomation): vật chất hoá config
+      // pendingAutomation (đã nhân từ mẫu) thành CampaignRule thật — khung giờ đẩy Meta,
+      // điều kiện bật ACTIVE cho runner. CHẠY TRƯỚC khi chốt publish (history SUCCESS +
+      // isPublishing=false) để warning được ghi CÙNG NHỊP — không có race "chốt xong mới
+      // ghi warning". Best-effort: lỗi automation KHÔNG fail publish (chỉ warning). CHỈ khi
+      // publish ĐỦ (failedAds===0) — không scale/đẩy lịch cho camp thiếu QC.
+      let autoSummary: { failed: number; errors: string[] } = {
+        failed: 0,
+        errors: [],
+      };
+      if (campaignMetaId && failedAds === 0) {
+        try {
+          autoSummary = await activatePendingAutomationForCampaign({
+            prisma: this.prisma,
+            systemCampaignId: campaignSystem.id,
+            userId: campaignSystem.createdById,
+            accountId: campaignSystem.accountId as string,
+            campaignMetaId,
+            // Suy CBO/ABO từ trạng thái THẬT của campaign, không tin entry.level. CBO đọc
+            // config cấp campaign; ABO tự re-query SystemAdSet.data.pendingAutomation từng nhóm.
+            isCbo: !!campaignSystem.campaign_CBO,
+            campaignPendingAutomation: (campaignSystem as any).pendingAutomation,
+          });
+        } catch (e: any) {
+          // activatePendingAutomationForCampaign vốn NUỐT lỗi & trả {failed,errors}; throw ở
+          // đây là ngoài dự kiến → vẫn coi là 1 lỗi automation để SINH WARNING (không nuốt
+          // thành log câm).
+          this.logger.warn(
+            `activatePendingAutomation (camp ${campaignMetaId}) lỗi: ${e?.message ?? e}`,
+          );
+          autoSummary = { failed: 1, errors: [String(e?.message ?? e)] };
+        }
+      }
+
+      // errors: PARTIAL (ad lỗi) ƯU TIÊN; nếu publish đủ mà automation lỗi → automationWarning
+      // (banner + nút Thử lại ở màn chi tiết, parity mb-ads); còn lại DbNull.
+      const errorsValue =
+        failedAds > 0
+          ? ({
+              partial: true,
+              message: `${failedAds}/${adResults.length} quảng cáo lỗi — các quảng cáo còn lại đã lên Meta.`,
+              failedAds: adResults.filter((r) => r.status === 'failed'),
+            } as any)
+          : autoSummary.failed > 0
+            ? ({
+                automationWarning: {
+                  failed: autoSummary.failed,
+                  messages: autoSummary.errors.slice(0, 5),
+                },
+              } as any)
+            : Prisma.DbNull;
+
       await this.updatePublishStep(
         history.id,
         'sync',
@@ -621,19 +675,14 @@ export class DraftAutomationMetaPublisherService {
         failedAds > 0 ? 'PARTIAL' : 'SUCCESS',
       );
 
-      // PARTIAL: giữ campaign + ad tốt live, KHÔNG rollback; lưu danh sách ad lỗi;
+      // PARTIAL: giữ campaign + ad tốt live, KHÔNG rollback; lưu danh sách ad lỗi / warning;
       // hasMetaChanges=true để lần publish/automation sau retry các ad meta_id=null.
+      // isPublishing=false đặt CUỐI CÙNG (sau history SUCCESS) → FE dừng poll khi mọi thứ đã
+      // chốt (warning + success cùng nhịp).
       await this.prisma.systemCampaign.update({
         where: { id: campaignSystem.id },
         data: {
-          errors:
-            failedAds > 0
-              ? ({
-                  partial: true,
-                  message: `${failedAds}/${adResults.length} quảng cáo lỗi — các quảng cáo còn lại đã lên Meta.`,
-                  failedAds: adResults.filter((r) => r.status === 'failed'),
-                } as any)
-              : Prisma.DbNull,
+          errors: errorsValue,
           isPublishing: false,
           hasMetaChanges: failedAds > 0 ? true : false,
         },
@@ -940,6 +989,8 @@ export class DraftAutomationMetaPublisherService {
     delete metaPayload.id;
     delete metaPayload.ads;
     delete metaPayload.timezone_type;
+    // Cấu hình tự-động-hoá RIÊNG cho nhóm — chỉ lưu ở SystemAdSet.data, KHÔNG gửi lên Meta.
+    delete metaPayload.pendingAutomation;
 
     // ABO (ngân sách nằm ở ad set) BẮT BUỘC có bid_strategy ở cấp ad set — nếu
     // thiếu, Meta từ chối bằng thông báo khó hiểu ("Cần có giá thầu… đặt GIÁ TRỊ

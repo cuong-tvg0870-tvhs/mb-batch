@@ -208,7 +208,26 @@ model User {
   assignedAssetRequests  AssetAccessRequest[] @relation("AssetReqAssignee")
   processedAssetRequests AssetAccessRequest[] @relation("AssetReqProcessor")
 
+  passwordResetTokens PasswordResetToken[]
+
   @@index([larkOpenId]) // tra nhanh mọi tài khoản MB của 1 người Lark (notify/Larkbase)
+}
+
+// Token khôi phục mật khẩu (luồng "Quên mật khẩu" ở màn đăng nhập).
+// Chỉ lưu HASH (SHA-256) của token; token thô chỉ nằm trong link email gửi cho
+// user → DB rò rỉ cũng không dùng lại được. Token dùng MỘT LẦN (usedAt) + hết
+// hạn ngắn (expiresAt). Additive thuần: bảng mới, không đụng model cũ.
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique // SHA-256 của token thô
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
 }
 
 model UserActivity {
@@ -1734,6 +1753,14 @@ model TemplateCampaign {
   /// NULL = permissive (không khoá gì) ⇒ mẫu cũ không bị đóng băng.
   launchContract Json?
 
+  /// Cấu hình "Tự động hoá sau khi lên Camp" gắn theo MẪU: lịch tăng ngân sách (khung giờ)
+  /// và/hoặc bộ rule theo điều kiện, sẽ được NHÂN xuống mọi campaign sinh ra từ mẫu này
+  /// (cron DraftAutomation / auto-launch / "Lên Camp từ mẫu") và tự áp lên Meta khi publish.
+  /// PHẢI là cột riêng (cùng lý do launchContract): updateTemplate ghi đè TOÀN BỘ `data` +
+  /// ValidationPipe(whitelist) cắt field lạ. Shape: { version, entries: PendingAutomationEntry[] }.
+  /// NULL = mẫu không kèm tự động hoá (mọi mẫu cũ) → additive, không đụng luồng hiện tại.
+  pendingAutomation Json?
+
   /// Khoá mẫu là OPT-IN: chỉ chặn sửa khi được bật rõ ràng. Mặc định false vì `updateTemplate`
   /// hiện là đường DUY NHẤT vá một mẫu hỏng — khoá đại trà sẽ giết một tính năng đang dùng.
   locked Boolean @default(false)
@@ -1960,6 +1987,25 @@ model SystemCampaign {
   automationTemplateName String?
   automationPublishMode  DraftAutomationPublishMode @default(DRAFT_ONLY)
 
+  // Nguồn gốc mẫu (TemplateCampaign) đã sinh ra campaign này — dùng cho truy vết
+  // "mẫu nào đã tạo campaign nào" (màn Mẫu chiến dịch). Gắn ở CẢ 2 luồng:
+  //  - automation (rule Tự lên Camp): = automationTemplateId
+  //  - thủ công ("Lên Camp từ mẫu"): FE gửi kèm khi tạo nháp
+  // Additive/nullable: camp thủ công CŨ không truy hồi được (chưa từng lưu) → null.
+  sourceTemplateId String?
+
+  // Cấu hình "Tự động hoá sau khi lên Camp" của bản nháp: lịch tăng ngân sách (khung giờ)
+  // và/hoặc bộ rule theo điều kiện. Khi publish thành công (có meta_id + meta_id của ad set),
+  // mb-ads (pushToMetaCore) / mb-batch (publishDraftCampaign) VẬT CHẤT HOÁ thành CampaignRule
+  // thật với campaignId = meta_id rồi đẩy khung giờ lên Meta / bật rule điều kiện cho runner.
+  // Shape: { version, entries: PendingAutomationEntry[] } — mỗi entry có `uid` ổn định; sau khi
+  // áp, backend ghi ngược `appliedRuleIds`/`appliedAt` vào entry (idempotent: republish bỏ qua
+  // entry đã có ruleId còn sống). Runner mb-batch chỉ chạy rule status=ACTIVE + có campaignId,
+  // nên config chưa publish KHÔNG BAO GIỜ chạy nhầm. Cột RIÊNG để lần lưu nháp của FE (chỉ gửi
+  // phần config) không xoá mất materialization-state; update phải MERGE theo uid.
+  // NULL = nháp không kèm tự động hoá (mọi nháp cũ) → additive, không đụng luồng publish hiện tại.
+  pendingAutomation Json?
+
   campaign_name        String?
   campaign_objective   String?
   campaign_budgetType  String?
@@ -1984,6 +2030,7 @@ model SystemCampaign {
   @@index([createdByAutomation, createdAt(sort: Desc)])
   @@index([automationTemplateId, createdAt(sort: Desc)])
   @@index([automationPublishMode, createdAt(sort: Desc)])
+  @@index([sourceTemplateId, createdAt(sort: Desc)])
 }
 
 model SystemAdSet {
