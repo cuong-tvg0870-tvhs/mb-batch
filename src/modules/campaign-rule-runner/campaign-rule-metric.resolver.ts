@@ -7,7 +7,8 @@ import { extractCustomEventType, resolveResultSpec } from '../../common/metrics/
  * Nguồn dữ liệu (tất cả đã có sẵn trong 1 lần getInsights, KHÔNG thêm request):
  * - Số trực tiếp (field số của insight): spend/impressions/reach/frequency/clicks/
  *   ctr/cpc/cpm/inline_link_clicks/inline_link_click_ctr/cost_per_inline_link_click.
- * - ROAS: insight.purchase_roas[0].value (purchase_roas & website_purchase_roas alias chung).
+ * - ROAS: đọc THẲNG field Meta — purchase_roas (omni) & website_purchase_roas (pixel web)
+ *   là HAI field riêng, mỗi cái [{action_type,value}] → khớp số Ads Manager (KHÔNG tự chia).
  * - Sự kiện pixel/tương tác (đếm): dò insight.actions[] theo danh sách action_type ưu
  *   tiên (LẤY PHẦN TỬ ĐẦU khớp → không cộng trùng nhiều biểu diễn cùng 1 sự kiện).
  * - Giá trị sự kiện: insight.action_values[] cùng cách.
@@ -48,13 +49,6 @@ const DIRECT_INSIGHT_KEYS = new Set([
  * (vd purchase + omni_purchase + offsite_conversion.fb_pixel_purchase).
  */
 const AT = {
-  // Ưu tiên offsite pixel (đúng nghĩa "website purchase"); giữ tương thích resolver cũ.
-  purchase: [
-    'purchase',
-    'omni_purchase',
-    'offsite_conversion.fb_pixel_purchase',
-    'onsite_web_purchase',
-  ],
   add_to_cart: [
     'add_to_cart',
     'omni_add_to_cart',
@@ -96,7 +90,7 @@ type Spec =
 
 /** metricKey (curated ở FE) → cách phân giải. */
 const SPECS: Record<string, Spec> = {
-  // --- Mua hàng: xử lý ở nhánh riêng (chuẩn cty purchaseValue/spend, KHÔNG dùng SPECS) ---
+  // --- Mua hàng (purchases/value/cost/ROAS): xử lý ở nhánh riêng khớp Meta, KHÔNG dùng SPECS ---
   // --- Thêm vào giỏ ---
   adds_to_cart: { t: 'count', at: AT.add_to_cart },
   website_adds_to_cart: { t: 'count', at: AT.add_to_cart },
@@ -184,53 +178,32 @@ function costPerArr(insight: any, field: string): number | null {
 }
 
 /**
- * Số đơn / giá trị đơn theo CHUẨN CÔNG TY (khớp card & Engine 2): CỘNG đúng
- * `purchase` + `onsite_conversion.purchase` (2 sự kiện khác nhau: web offsite vs
- * onsite/messaging). Xem `getMetrics` trong common/utils/index.ts.
+ * KHỚP META (bằng số trên Ads Manager). Mỗi "cột" mua hàng của Meta ứng với MỘT
+ * action_type cụ thể — KHÔNG cộng dồn nhiều biểu diễn của cùng sự kiện:
+ *   - Họ omni    (Purchases, Purchases value, Cost per purchase, Purchase ROAS)
+ *     = `omni_purchase` — gộp mọi Facebook Business Tools (pixel + onsite + app + offline).
+ *   - Họ website (Website purchases, Website purchase value, Cost per website purchase,
+ *     Website purchase ROAS) = `offsite_conversion.fb_pixel_purchase` — chỉ purchase trên
+ *     website qua Meta pixel.
+ * Lịch sử: trước đây tính (purchase + onsite_conversion.purchase) / spend theo "chuẩn công
+ * ty" (khớp card/Engine 2) nên LỆCH số Meta; đã đổi sang khớp Meta theo yêu cầu — số rule
+ * giờ trùng Ads Manager (nhưng có thể khác con số trên card).
  */
-const PURCHASE_SUM_TYPES = ['purchase', 'onsite_conversion.purchase'];
-
-/** Cộng value của MỌI action_type khớp trong danh sách (null nếu mảng không hợp lệ). */
-function sumActionTypes(arr: any, types: string[]): number | null {
-  if (!Array.isArray(arr)) return null;
-  let sum = 0;
-  for (const row of arr) {
-    if (types.includes(row?.action_type)) {
-      const v = toNumber(row.value);
-      if (v != null) sum += v;
-    }
-  }
-  return sum;
-}
-
-/** Số đơn hôm nay (chuẩn cty). */
-function resolvePurchaseCount(insight: any): number | null {
-  return sumActionTypes(insight?.actions, PURCHASE_SUM_TYPES);
-}
-
-/** Giá trị đơn hôm nay (chuẩn cty) — dùng cho ROAS. */
-function resolvePurchaseValue(insight: any): number | null {
-  return sumActionTypes(insight?.action_values, PURCHASE_SUM_TYPES);
-}
+const OMNI_PURCHASE_AT = ['omni_purchase', 'purchase'];
+const WEB_PURCHASE_AT = ['offsite_conversion.fb_pixel_purchase'];
 
 /**
- * ROAS theo CHUẨN CÔNG TY = purchaseValue / spend (KHÔNG dùng field purchase_roas
- * của Meta) — để rule budget-schedule khớp con số marketer thấy trên card/Engine 2.
- * Guard bơm-tiền (evalBumpGuard) cũng gọi resolveMetric('purchase_roas') nên tự đi theo.
+ * ROAS đọc THẲNG field Meta (`purchase_roas` / `website_purchase_roas`) — mỗi field là
+ * mảng [{action_type, value}]. Lấy đúng action_type kỳ vọng, fallback phần tử đầu. Đây là
+ * con số Meta đã tự tính → khớp Ads Manager tuyệt đối (không tự chia value/spend nữa).
  */
-function resolveRoas(insight: any): number | null {
-  const spend = toNumber(insight?.spend);
-  if (spend == null || spend <= 0) return null;
-  const value = resolvePurchaseValue(insight) ?? 0;
-  return value / spend;
-}
-
-/** Chi phí / đơn (chuẩn cty) = spend / số đơn. đơn<=0 → null. */
-function resolvePurchaseCpa(insight: any): number | null {
-  const spend = toNumber(insight?.spend);
-  const purchases = resolvePurchaseCount(insight);
-  if (spend == null || purchases == null || purchases <= 0) return null;
-  return spend / purchases;
+function readRoasField(insight: any, field: string, preferAt: string): number | null {
+  const arr = insight?.[field];
+  if (!Array.isArray(arr) || arr.length === 0) return null;
+  const hit = arr.find((r) => r?.action_type === preferAt);
+  const v = toNumber(hit?.value);
+  if (v != null) return v;
+  return toNumber(arr[0]?.value);
 }
 
 /** cpp — chi phí / 1000 người tiếp cận. */
@@ -259,7 +232,7 @@ function resolveResults(insight: any, entity: any): number | null {
   }
   const v = pickAction(insight?.actions, spec.parts);
   if (v != null) return v;
-  return resolvePurchaseCount(insight);
+  return pickAction(insight?.actions, OMNI_PURCHASE_AT);
 }
 
 /** Số giờ kể từ khi entity được tạo (rawPayload.created_time, fallback startTime). */
@@ -285,23 +258,24 @@ export function resolveMetric(
     return toNumber(insight?.[key]);
   }
 
-  // ROAS & số đơn theo CHUẨN CÔNG TY (khớp card/Engine 2) — KHÔNG dùng field
-  // purchase_roas của Meta. Đổi ở đây kéo theo cả evalBumpGuard (cùng gọi resolveMetric).
-  if (key === 'purchase_roas' || key === 'website_purchase_roas') {
-    return resolveRoas(insight);
+  // ROAS — đọc THẲNG field Meta tương ứng (khớp Ads Manager). evalBumpGuard gọi
+  // resolveMetric('purchase_roas') nên guard cũng tự đi theo số omni của Meta.
+  if (key === 'purchase_roas') {
+    return readRoasField(insight, 'purchase_roas', 'omni_purchase');
   }
-  if (key === 'purchases' || key === 'website_purchases') {
-    return resolvePurchaseCount(insight);
+  if (key === 'website_purchase_roas') {
+    return readRoasField(insight, 'website_purchase_roas', 'offsite_conversion.fb_pixel_purchase');
   }
-  if (key === 'purchases_value' || key === 'website_purchase_value') {
-    return resolvePurchaseValue(insight);
+  // Số đơn / giá trị đơn / CPA — mỗi họ MỘT action_type (không cộng dồn), khớp Meta.
+  if (key === 'purchases') return pickAction(insight?.actions, OMNI_PURCHASE_AT);
+  if (key === 'website_purchases') return pickAction(insight?.actions, WEB_PURCHASE_AT);
+  if (key === 'purchases_value') return pickAction(insight?.action_values, OMNI_PURCHASE_AT);
+  if (key === 'website_purchase_value') {
+    return pickAction(insight?.action_values, WEB_PURCHASE_AT);
   }
-  if (
-    key === 'cost_per_purchase' ||
-    key === 'cost_per_website_purchase' ||
-    key === 'cost_per_unique_website_purchase'
-  ) {
-    return resolvePurchaseCpa(insight);
+  if (key === 'cost_per_purchase') return pickCost(insight, OMNI_PURCHASE_AT);
+  if (key === 'cost_per_website_purchase' || key === 'cost_per_unique_website_purchase') {
+    return pickCost(insight, WEB_PURCHASE_AT);
   }
   if (key === 'cost_per_result') {
     // spend / results (goal-aware) — kết quả có thể là đơn/lead/tin nhắn tuỳ mục tiêu.
@@ -345,8 +319,16 @@ export function resolveMetric(
  */
 export const BUDGET_SCHEDULE_SUPPORTED_METRICS: readonly string[] = [
   ...DIRECT_INSIGHT_KEYS,
+  // Họ mua hàng khớp Meta (omni vs website pixel) — xử lý ở nhánh riêng, không nằm trong SPECS.
   'purchase_roas',
   'website_purchase_roas',
+  'purchases',
+  'website_purchases',
+  'purchases_value',
+  'website_purchase_value',
+  'cost_per_purchase',
+  'cost_per_website_purchase',
+  'cost_per_unique_website_purchase',
   'daily_budget',
   'lifetime_budget',
   'hours_since_creation',

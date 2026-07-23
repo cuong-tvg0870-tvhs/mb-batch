@@ -55,6 +55,7 @@ export const INSIGHT_FIELDS = [
   'actions',
   'action_values',
   'purchase_roas',
+  'website_purchase_roas',
   'cost_per_action_type',
   // Link/outbound clicks (đếm + cost/ctr) — cho các metric tương ứng ở dropdown.
   'inline_link_clicks',
