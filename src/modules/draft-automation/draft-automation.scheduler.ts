@@ -711,6 +711,7 @@ export class DraftAutomationScheduler {
         status: Status.DRAFT,
         deletedAt: null,
         meta_id: null,
+        appendOnly: false,
       },
       include: {
         ad_sets: {
@@ -1410,6 +1411,7 @@ export class DraftAutomationScheduler {
             status: Status.DRAFT,
             deletedAt: null,
             meta_id: null,
+            appendOnly: false,
             OR: [{ is_template: false }, { is_template: null }],
           },
           select: {
@@ -1481,6 +1483,7 @@ export class DraftAutomationScheduler {
               where: {
                 createdByAutomation: true,
                 deletedAt: null,
+                appendOnly: false,
                 OR: [
                   { meta_id: { not: null } },
                   { status: { not: Status.DRAFT } },

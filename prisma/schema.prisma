@@ -412,7 +412,11 @@ model Campaign {
   account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
 
   systemCampaignId String?
-  systemCampaign   SystemCampaign? @relation(fields: [systemCampaignId], references: [id], onDelete: Cascade)
+  // onDelete: SetNull (KHÔNG Cascade): xoá 1 bản nháp/vỏ SystemCampaign KHÔNG được kéo
+  // xoá bản ghi Campaign LIVE (mirror của campaign đang chạy trên Meta) + toàn bộ
+  // AdSet/Ad/insight cascade theo. Nháp không phải "chủ" của campaign live. Khi mất
+  // link chỉ set null; meta-sync sẽ tự gắn lại systemCampaignId theo meta_id.
+  systemCampaign   SystemCampaign? @relation(fields: [systemCampaignId], references: [id], onDelete: SetNull)
 
   name             String?
   status           String?
@@ -1994,6 +1998,24 @@ model SystemCampaign {
   // Additive/nullable: camp thủ công CŨ không truy hồi được (chưa từng lưu) → null.
   sourceTemplateId String?
 
+  // ===== "Vỏ bơm-thêm" (append-shell) — bơm adset/ad MỚI vào 1 campaign đang chạy
+  // trên Meta mà KHÔNG đụng gì đã live. Mỗi lần bơm = 1 vỏ riêng.
+  //  - appendOnly=true → publisher BỎ upsertCampaignToMeta (không sửa campaign),
+  //    chỉ CREATE con meta_id=null dưới appendTargetCampaignId; con có meta_id thì SKIP.
+  //  - appendTargetCampaignId = id campaign Meta live cần bơm vào. Là STRING LỎNG,
+  //    KHÔNG FK tới Campaign (theo convention accountId/createdById) để tránh thêm
+  //    cạnh cascade nguy hiểm.
+  //  - meta_id của vỏ LUÔN NULL (né @unique khi camp hệ-thống-tạo đã sở hữu meta_id
+  //    đó, và để sync-back không kéo cascade-delete campaign live).
+  // Additive/nullable → an toàn, camp/nháp cũ mặc định appendOnly=false.
+  appendOnly             Boolean @default(false)
+  appendTargetCampaignId String?
+  // Snapshot id các adset/ad ĐÃ CÓ trên campaign đích TRƯỚC khi bơm (chụp ở preflight lần
+  // publish đầu). Dùng cho reconcile-by-name an toàn: chỉ những entity live KHÔNG nằm
+  // trong snapshot này mới được coi là "do lần bơm này tạo ra" → tránh nhận nhầm nhóm cũ
+  // trùng tên rồi bơm ad vào nhóm đang chạy tốt. Shape: { adSetIds: string[], adIds: string[] }.
+  appendPreexisting      Json?
+
   // Cấu hình "Tự động hoá sau khi lên Camp" của bản nháp: lịch tăng ngân sách (khung giờ)
   // và/hoặc bộ rule theo điều kiện. Khi publish thành công (có meta_id + meta_id của ad set),
   // mb-ads (pushToMetaCore) / mb-batch (publishDraftCampaign) VẬT CHẤT HOÁ thành CampaignRule
@@ -2031,6 +2053,9 @@ model SystemCampaign {
   @@index([automationTemplateId, createdAt(sort: Desc)])
   @@index([automationPublishMode, createdAt(sort: Desc)])
   @@index([sourceTemplateId, createdAt(sort: Desc)])
+  // Tra nhanh các "vỏ bơm-thêm" đang trỏ về 1 campaign live (nhiều vỏ cùng target OK
+  // vì meta_id NULL, không đụng @unique).
+  @@index([appendTargetCampaignId])
 }
 
 model SystemAdSet {
@@ -2040,6 +2065,18 @@ model SystemAdSet {
 
   // Xem SystemCampaign.publishedSnapshot.
   publishedSnapshot Json?
+
+  // Ledger idempotency cho luồng BƠM THÊM (append). Đặt 'CREATING' NGAY TRƯỚC khi gọi
+  // Meta createAdSet; sau khi ghi meta_id thành công → clear (null). Nếu Meta tạo XONG
+  // mà ghi DB lỗi (crash/mất kết nối) → kẹt ở 'CREATING' + meta_id=null → lần publish
+  // sau chạy reconcile (đối chiếu tên với live, loại trừ appendPreexisting) trước khi
+  // tạo lại: khớp→adopt meta_id; không khớp→tạo mới; mơ hồ→'UNCERTAIN' + BỎ QUA (không
+  // tạo trùng). null = luồng thường / chưa từng thử tạo.
+  metaCreateState String?
+  // Mốc (UTC) BẮT ĐẦU gọi Meta create entity này. Reconcile chỉ adopt ứng viên live có
+  // created_time >= mốc NÀY (cửa sổ CHẶT theo từng entity, hẹp hơn snapshot toàn vỏ) →
+  // thu nhỏ tối đa khả năng nhận nhầm entity người khác tạo trùng tên sau đó.
+  metaCreateStartedAt DateTime?
 
   status Status @default(DRAFT)
 
@@ -2075,6 +2112,15 @@ model SystemAd {
   // Xem SystemCampaign.publishedSnapshot. Bao gồm cả creative đã đẩy để phát hiện
   // creative đổi so với lần publish trước (không tạo lại creative khi không cần).
   publishedSnapshot Json?
+
+  // Ledger idempotency append — xem SystemAdSet.metaCreateState. 'CREATING' trước Meta
+  // createAd, clear sau khi ghi meta_id; kẹt 'CREATING' → reconcile ở lần sau; 'UNCERTAIN'
+  // = mơ hồ, bỏ qua không tạo trùng.
+  metaCreateState String?
+  // Mốc (UTC) BẮT ĐẦU gọi Meta create entity này. Reconcile chỉ adopt ứng viên live có
+  // created_time >= mốc NÀY (cửa sổ CHẶT theo từng entity, hẹp hơn snapshot toàn vỏ) →
+  // thu nhỏ tối đa khả năng nhận nhầm entity người khác tạo trùng tên sau đó.
+  metaCreateStartedAt DateTime?
 
   status Status @default(DRAFT)
 
@@ -3175,6 +3221,13 @@ enum AutomationRuleRunStatus {
   // worker long after `scheduledFor`. Evaluating it would spend Meta calls to
   // act on stale intent, so it is dropped instead — visibly, not silently.
   SKIPPED_STALE
+  // Meta could not serve this run's data right now (a transient #1/#2/5xx, a
+  // throttle, or our own pacing) and the run is WAITING to be retried inside the
+  // same schedule slot. NOT terminal and NOT a failure: the same run row is put
+  // back to RUNNING when the retry starts. Meta's documented penalties are
+  // seconds-to-minutes, so a retry costs far less than skipping a whole interval
+  // — which for a long-interval rule (up to 72h) used to be the only outcome.
+  DEFERRED
 }
 
 enum AutomationRuleRunItemStatus {
@@ -3213,6 +3266,14 @@ model AutomationRuleRun {
   matchedCount    Int @default(0)
   errorsCount     Int @default(0)
 
+  // Retry/checkpoint metadata for DEFERRED runs. These fields are informational
+  // for the UI and operational for the runner's same-slot resume.
+  deferReason   String?
+  deferAttempt  Int       @default(0)
+  nextRetryAt   DateTime?
+  resumePhase   String?
+  checkpointKey String?
+
   errorMessage String?
   ruleSnapshot Json?
 
@@ -3224,6 +3285,7 @@ model AutomationRuleRun {
   @@index([ruleId, scheduledFor(sort: Desc)])
   @@index([accountId, scheduledFor(sort: Desc)])
   @@index([status, scheduledFor(sort: Desc)])
+  @@index([ruleId, accountId, status])
 }
 
 /// Mỗi entity match 1 task = 1 row, lưu snapshot + change preview cho UI log-detail.
@@ -3283,6 +3345,7 @@ model AutomationRuleRunItem {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([runId, taskId, entityId])
   @@index([runId])
   @@index([entityId])
   @@index([taskId])
