@@ -37,6 +37,9 @@ export class MetaSyncProcessor {
           creativesUpdated: stats.creativesUpdated,
           images: stats.images,
           videos: stats.videos,
+          statusReconciled: stats.statusReconciled,
+          statusArchived: stats.statusArchived,
+          statusDeleted: stats.statusDeleted,
         });
         this.logger.log('✨ [JOB FINISHED] Sync Campaign Core');
       },

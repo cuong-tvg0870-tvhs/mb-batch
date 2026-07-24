@@ -263,6 +263,23 @@ export class MetaSyncService {
     );
   }
 
+  // effective_status phủ CẢ ARCHIVED để fetch được camp đã lưu trữ: edge
+  // /campaigns của Meta MẶC ĐỊNH loại trừ ARCHIVED/DELETED khỏi kết quả, nên sync
+  // gia tăng thường không bao giờ thấy camp bị archive → status kẹt ACTIVE cũ.
+  private static readonly RECONCILE_EFFECTIVE_STATUSES = [
+    'ACTIVE',
+    'PAUSED',
+    'CAMPAIGN_PAUSED',
+    'ADSET_PAUSED',
+    'IN_PROCESS',
+    'WITH_ISSUES',
+    'PENDING_REVIEW',
+    'DISAPPROVED',
+    'PREAPPROVED',
+    'PENDING_BILLING_INFO',
+    'ARCHIVED',
+  ];
+
   async syncCampaignData() {
     this.logger.log('⏰ Starting Batch Sync Campaign Data...');
 
@@ -281,6 +298,9 @@ export class MetaSyncService {
       creativesUpdated: 0,
       images: 0,
       videos: 0,
+      statusReconciled: 0,
+      statusArchived: 0,
+      statusDeleted: 0,
       errors: [] as string[],
     };
 
@@ -387,12 +407,139 @@ export class MetaSyncService {
       );
 
       await Promise.all(syncTasks);
+
+      // Reconcile trạng thái camp bị archive/xoá THẲNG trên Ads Manager (không lọt
+      // qua sync gia tăng). Nuốt lỗi bên trong → không làm hỏng job sync chính.
+      try {
+        const reconcile = await this.reconcilePublishedCampaignStatuses();
+        stats.statusReconciled = reconcile.updated;
+        stats.statusArchived = reconcile.archived;
+        stats.statusDeleted = reconcile.deleted;
+      } catch (error) {
+        this.logger.error(
+          `❌ Reconcile campaign statuses: ${parseMetaError(error).message}`,
+        );
+      }
+
       this.logger.log('✅ Batch Sync Campaign Data Completed.');
       return stats;
     } catch (err) {
       this.logger.error('🔥 Critical Sync Failure', err);
       throw new InternalServerErrorException(parseMetaError(err));
     }
+  }
+
+  /**
+   * Reconcile trạng thái các campaign do HỆ THỐNG publish nhưng bị archive/tắt/xoá
+   * THẲNG trên Ads Manager. Sync gia tăng lọc `updated_time` và edge /campaigns của
+   * Meta MẶC ĐỊNH loại trừ ARCHIVED/DELETED → những camp này không bao giờ được
+   * fetch lại nên `Campaign.effectiveStatus` kẹt ở ACTIVE/PAUSED cũ (list "đã lên
+   * bằng hệ thống" hiển thị sai).
+   *
+   * Pass này fetch-lại-theo-ID (kèm effective_status phủ ARCHIVED) các camp gắn với
+   * SystemCampaign mà local CHƯA đánh archived/deleted, rồi cập nhật status columns.
+   * Camp hỏi mà Meta KHÔNG trả (dù đã phủ ARCHIVED) coi như đã xoá → đánh DELETED.
+   * KHÔNG đụng `deletedAt` để tránh ẩn nhầm bản ghi khi Meta lỗi tạm thời; camp
+   * bật lại/thay đổi sau này sẽ được sync gia tăng tự chữa (additive/non-breaking).
+   *
+   * Working-set thu hẹp dần: camp đã đánh ARCHIVED/DELETED bị loại khỏi lần sau, nên
+   * chi phí steady-state chỉ là số camp ACTIVE/PAUSED do hệ thống publish.
+   */
+  async reconcilePublishedCampaignStatuses() {
+    let checked = 0;
+    let updated = 0;
+    let archived = 0;
+    let deleted = 0;
+
+    const rows = await this.prisma.campaign.findMany({
+      where: {
+        systemCampaignId: { not: null },
+        deletedAt: null,
+        NOT: { effectiveStatus: { in: ['ARCHIVED', 'DELETED'] } },
+        account: { needsReauth: false, accountType: 'AD_ACCOUNT' as any },
+      },
+      select: { id: true, accountId: true },
+    });
+    if (!rows.length) return { checked, updated, archived, deleted };
+
+    const byAccount = new Map<string, string[]>();
+    for (const r of rows) {
+      const arr = byAccount.get(r.accountId) ?? [];
+      arr.push(r.id);
+      byAccount.set(r.accountId, arr);
+    }
+
+    const limit = pLimit(META_SYNC_CONFIG.accountConcurrency);
+    await Promise.all(
+      [...byAccount.entries()].map(([accountId, ids]) =>
+        limit(async () => {
+          try {
+            const adAccount = new AdAccount(accountId);
+            const requested = new Set(ids);
+            const returned = new Set<string>();
+
+            for (const chunkIds of chunk(ids, META_SYNC_CONFIG.idChunkSize)) {
+              const params = {
+                limit: META_SYNC_CONFIG.pageLimit,
+                effective_status: MetaSyncService.RECONCILE_EFFECTIVE_STATUSES,
+                filtering: [
+                  { field: 'id', operator: 'IN', value: chunkIds },
+                ],
+              };
+
+              const cursor = await executeMetaApiWithRetry(
+                () => adAccount.getCampaigns(CAMPAIGN_FIELDS, params, true),
+                { logger: this.logger },
+              );
+              const campaigns = await fetchAll(cursor);
+
+              for (const c of campaigns) {
+                returned.add(c.id);
+                checked += 1;
+                const data = MetaTransformHelper.campaign(c, accountId);
+                await this.prisma.campaign.update({
+                  where: { id: c.id },
+                  data: {
+                    status: data.status,
+                    effectiveStatus: data.effectiveStatus,
+                    configuredStatus: data.configuredStatus,
+                    remoteUpdatedAt: data.remoteUpdatedAt,
+                    lastFetchedAt: new Date(),
+                  },
+                });
+                updated += 1;
+                if (data.effectiveStatus === 'ARCHIVED') archived += 1;
+              }
+            }
+
+            // Hỏi mà Meta không trả (đã phủ cả ARCHIVED) → đã bị xoá trên Meta.
+            const missing = [...requested].filter((id) => !returned.has(id));
+            if (missing.length) {
+              await this.prisma.campaign.updateMany({
+                where: { id: { in: missing } },
+                data: {
+                  status: 'DELETED',
+                  effectiveStatus: 'DELETED',
+                  lastFetchedAt: new Date(),
+                },
+              });
+              deleted += missing.length;
+            }
+          } catch (error) {
+            // Lỗi 1 account không làm hỏng cả reconcile — account đó thử lại lần sau.
+            this.logger.error(
+              `❌ [reconcile ${accountId}] ${parseMetaError(error).message}`,
+            );
+          }
+        }),
+      ),
+    );
+
+    this.logger.log(
+      `♻️  Reconcile status: checked ${checked}, updated ${updated} ` +
+        `(archived ${archived}), deleted ${deleted}`,
+    );
+    return { checked, updated, archived, deleted };
   }
 
   async upsertFlatStructure(
