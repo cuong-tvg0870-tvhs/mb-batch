@@ -1926,7 +1926,6 @@ export class DraftAutomationMetaPublisherService {
     // chỉ được dùng làm GỢI Ý. Nếu gửi age_max < 65 Meta sẽ trả lỗi:
     // "you cannot set the audience control for maximum age lower than 65".
     // → ép age_max về 65 (giữ nguyên giá trị người dùng chọn ở cấp gợi ý/UI).
-    // age_min control vẫn hợp lệ nên giữ nguyên.
     const advantageAudienceOn =
       (rest as any)?.targeting_automation?.advantage_audience === 1 ||
       (rest as any)?.targeting_automation?.advantage_audience === true;
@@ -1936,6 +1935,19 @@ export class DraftAutomationMetaPublisherService {
       (rest as any).age_max < 65
     ) {
       (rest as any).age_max = 65;
+    }
+    // Đối xứng với age_max: với Advantage+ Audience, age_min chỉ là GỢI Ý và Meta
+    // CHẶN TRẦN ở 25. Gửi age_min > 25 → Meta từ chối cả ad set: "Thay vào đó, bạn
+    // có thể thêm độ tuổi tối thiểu cao hơn làm gợi ý khi tạo/chỉnh sửa nhóm quảng
+    // cáo." Bằng chứng: TẤT CẢ 9.625 ad set Advantage+ chạy thật có age_min ≤ 25
+    // (18–25), age_max=65; không cái nào >25. Kẹp về 25 (giữ nguyên UI/gợi ý). Muốn
+    // nhắm cứng tuổi >25 phải TẮT Advantage+ Audience. Giữ đồng bộ với mb-ads.
+    if (
+      advantageAudienceOn &&
+      typeof (rest as any).age_min === 'number' &&
+      (rest as any).age_min > 25
+    ) {
+      (rest as any).age_min = 25;
     }
 
     if (!targeting || !geo_locations) return CleanObjectOrArray(rest) || rest;
