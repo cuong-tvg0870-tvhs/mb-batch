@@ -8,6 +8,12 @@ import {
 } from '../../common/utils/cid.util';
 import { matchesAnyNameTerm } from './name-term-match';
 import { normalizePendingAutomation } from './pending-automation.util';
+import {
+  forEachMediaSlot,
+  computeTemplateSlots,
+  coerceCardToType,
+  planContent,
+} from './draft-slot-count.util';
 
 const DEFAULT_AUTOMATION_CRON = '*/30 * * * *';
 const DEFAULT_AUTOMATION_TIMEZONE = 'Asia/Ho_Chi_Minh';
@@ -396,11 +402,12 @@ function replacePlaceholders(obj: any, videos: any[], images: any[]): any {
 
 // ============================================================================
 // Ô TRUNG TÍNH LOẠI MEDIA (media-neutral slots) — Finding Q1 "template cố định
-// ảnh không nhét được video → không bao giờ đủ". Cho phép một ô (vốn là ảnh hoặc
-// video trong mẫu) nhận content KHÁC loại: nếu content thực là video mà ô là ảnh
-// → morph creative sang video_data (và ngược lại), giữ lại text/CTA/link/page.
-// CHỈ áp dụng cho mẫu ĐƠN-MEDIA (không carousel / không DOF-media) để không hồi
-// quy các mẫu phức tạp. PARITY: bản sao byte-identical ở mb-ads draft-campaign.service.ts.
+// ảnh không nhét được video → không bao giờ đủ". Cho phép một ô (single/card/
+// attachment) nhận content KHÁC loại: content thực là video mà ô là ảnh → morph ô
+// sang video (và ngược lại), giữ text/CTA/link/page. Ô dynamic (DOF) KHÔNG morph.
+// Việc DUYỆT & ĐẾM ô nay dùng CHUNG forEachMediaSlot/computeTemplateSlots trong
+// draft-slot-count.util.ts (mọi loại mẫu, phủ carousel/child_attachments/dynamic —
+// KHÔNG còn chia nhánh "mẫu phức tạp"). PARITY: file util giữ giống nhau 2 repo.
 // ----------------------------------------------------------------------------
 
 // Loại media của một creativeAsset row (từ folder): 'VIDEO' | 'IMAGE'.
@@ -409,49 +416,6 @@ function assetMediaType(asset: any): 'VIDEO' | 'IMAGE' {
   if (t === 'VIDEO') return 'VIDEO';
   if (t === 'IMAGE') return 'IMAGE';
   return asset?.video_id || asset?.videoId ? 'VIDEO' : 'IMAGE';
-}
-
-// Mẫu có creative "phức tạp" (carousel / dynamicAssets / asset_feed_spec chứa
-// mảng media) → GIỮ đường xử lý cũ, không dùng ô trung tính loại (tránh rủi ro).
-function templateHasComplexMedia(templateData: any): boolean {
-  const adSets = Array.isArray(templateData?.ad_sets) ? templateData.ad_sets : [];
-  for (const adset of adSets) {
-    const ads = Array.isArray(adset?.ads) ? adset.ads : [];
-    for (const ad of ads) {
-      const c = ad?.creative;
-      if (!c) continue;
-      if (inferMediaType(c) === 'CAROUSEL') return true;
-      if (Array.isArray(c.carouselCards) && c.carouselCards.length > 0) return true;
-      if (Array.isArray(c.dynamicAssets) && c.dynamicAssets.length > 0) return true;
-      const afs = c.asset_feed_spec || {};
-      if (
-        (Array.isArray(afs.videos) && afs.videos.length > 0) ||
-        (Array.isArray(afs.images) && afs.images.length > 0)
-      ) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-// Duyệt các creative ĐƠN-MEDIA (không ghim, loại VIDEO/IMAGE) theo đúng thứ tự
-// ad_sets[].ads[]. Dùng CHUNG cho cả bước lập kế hoạch (processAutomation) và bước
-// dựng (buildSubstitutedValues) để thứ tự ô luôn khớp nhau.
-function forEachSingleMediaCreative(
-  templateData: any,
-  fn: (creative: any) => void,
-) {
-  const adSets = Array.isArray(templateData?.ad_sets) ? templateData.ad_sets : [];
-  for (const adset of adSets) {
-    const ads = Array.isArray(adset?.ads) ? adset.ads : [];
-    for (const ad of ads) {
-      const c = ad?.creative;
-      if (!c || c.pinnedPost === true) continue;
-      const mt = inferMediaType(c);
-      if (mt === 'VIDEO' || mt === 'IMAGE') fn(c);
-    }
-  }
 }
 
 // Chuyển đổi (morph) một creative đơn-media sang loại đích. Giữ message/CTA/link/
@@ -734,9 +698,12 @@ export class DraftAutomationScheduler {
     requiredImages: number;
     isComplete: boolean;
     automation: any;
-    // Ô trung tính loại: danh sách content gán cho từng ô ĐƠN-MEDIA theo thứ tự
-    // (forEachSingleMediaCreative). Nếu có → morph creative sang đúng loại content.
+    // Ô trung tính loại: danh sách content gán cho TỪNG Ô (mọi loại: single/card/
+    // attachment/dynamic) theo thứ tự forEachMediaSlot. Nếu có → morph ô sang đúng
+    // loại content trước khi gán token.
     contentPlan?: any[];
+    // Tổng số ô media của mẫu (computeTemplateSlots.totalSlots) — cho automation_progress.
+    totalSlots?: number;
   }) {
     const {
       template,
@@ -749,23 +716,32 @@ export class DraftAutomationScheduler {
       isComplete,
       automation,
       contentPlan,
+      totalSlots,
     } = input;
     const templateData = template.data as any;
 
     // Deep clone the template campaign data to avoid mutating database/in-memory template object
     const clonedTemplateData = JSON.parse(JSON.stringify(templateData));
 
-    // Ô TRUNG TÍNH LOẠI: gán content theo kế hoạch, morph creative sang đúng loại
-    // (ảnh↔video) TRƯỚC khi dò/gán slot — để autoAssign gán token đúng loại content.
+    // Ô TRUNG TÍNH LOẠI: gán content theo kế hoạch, morph Ô sang đúng loại (ảnh↔video)
+    // TRƯỚC khi dò/gán slot — để autoAssign gán token đúng loại content. Duyệt CHUNG
+    // forEachMediaSlot (khớp ô 1-1 với planner). Ô thiếu asset (null) → KHÔNG morph,
+    // giữ nguyên loại + token gốc (giữ hợp đồng token leakage / placeholder).
     const usePlan = Array.isArray(contentPlan);
     if (usePlan) {
       let k = 0;
-      forEachSingleMediaCreative(clonedTemplateData, (creative) => {
+      for (const slot of forEachMediaSlot(clonedTemplateData)) {
         const asset = contentPlan![k++];
-        if (!asset) return;
-        coerceCreativeToType(creative, assetMediaType(asset));
-        creative.__assignedAsset = asset;
-      });
+        if (!asset) continue;
+        const targetType = assetMediaType(asset);
+        if (slot.kind === 'single') {
+          coerceCreativeToType(slot.ref, targetType);
+        } else if (slot.kind === 'card' || slot.kind === 'attachment') {
+          coerceCardToType(slot.ref, targetType, asset, slot.kind);
+        }
+        // Ô dynamic (DOF): crossTypeAllowed=false → planner chỉ gán đúng loại → không morph.
+        slot.ref.__assignedAsset = asset;
+      }
     }
 
     // Find all explicitly pre-selected slots in the template
@@ -988,7 +964,10 @@ export class DraftAutomationScheduler {
     }
 
     // Ô TRUNG TÍNH LOẠI: sau khi autoAssign gán token đúng loại cho các ô đã morph,
-    // dựng lại mảng fill video[]/image[] theo CHỈ SỐ token (VIDEO_n→videos[n-1]).
+    // dựng lại mảng fill video[]/image[] theo CHỈ SỐ token (VIDEO_n→videos[n-1]). Đọc
+    // token THẬT trên từng ô (single/card/attachment/dynamic) qua forEachMediaSlot —
+    // nhờ đọc token thật (không giả định thứ tự) nên bền với việc đánh số lại lúc morph.
+    // automation_used_assets chỉ gồm asset THỰC SỰ đặt vào ô (idx>0) → không đốt content.
     let fillVideos = videos;
     let fillImages = images;
     if (usePlan) {
@@ -996,27 +975,37 @@ export class DraftAutomationScheduler {
         const m = /^(?:VIDEO|IMAGE)_(\d+)$/.exec(String(v || ''));
         return m ? parseInt(m[1], 10) : 0;
       };
+      const tokenOfSlot = (slot: any, ref: any, mt: 'VIDEO' | 'IMAGE'): any => {
+        const spec = ref.object_story_spec || {};
+        if (slot.kind === 'single') {
+          return mt === 'VIDEO'
+            ? ref.videoId || ref.video_id || spec.video_data?.video_id
+            : ref.imageHash || ref.image_hash || spec.link_data?.image_hash;
+        }
+        if (slot.kind === 'attachment') {
+          return mt === 'VIDEO'
+            ? ref.video_id || ref.videoId
+            : ref.image_hash || ref.imageHash;
+        }
+        // card / dynamic (định dạng clean: videoId/imageHash).
+        return mt === 'VIDEO'
+          ? ref.videoId || ref.video_id
+          : ref.imageHash || ref.image_hash;
+      };
       const vArr: any[] = [];
       const iArr: any[] = [];
-      forEachSingleMediaCreative(clonedTemplateData, (creative) => {
-        const asset = creative.__assignedAsset;
-        delete creative.__assignedAsset;
-        if (!asset) return;
-        const spec = creative.object_story_spec || {};
-        if (assetMediaType(asset) === 'VIDEO') {
-          const idx = slotIndexOf(
-            creative.videoId || creative.video_id || spec.video_data?.video_id,
-          );
-          if (idx > 0) vArr[idx - 1] = asset;
-        } else {
-          const idx = slotIndexOf(
-            creative.imageHash ||
-              creative.image_hash ||
-              spec.link_data?.image_hash,
-          );
-          if (idx > 0) iArr[idx - 1] = asset;
+      for (const slot of forEachMediaSlot(clonedTemplateData)) {
+        const ref = slot.ref;
+        const asset = ref.__assignedAsset;
+        delete ref.__assignedAsset;
+        if (!asset) continue;
+        const mt = assetMediaType(asset);
+        const idx = slotIndexOf(tokenOfSlot(slot, ref, mt));
+        if (idx > 0) {
+          if (mt === 'VIDEO') vArr[idx - 1] = asset;
+          else iArr[idx - 1] = asset;
         }
-      });
+      }
       fillVideos = vArr;
       fillImages = iArr;
     }
@@ -1110,8 +1099,12 @@ export class DraftAutomationScheduler {
       templateName: template.name,
       requiredVideos,
       requiredImages,
+      // requiredTotal = tổng số ô media của mẫu (nhất quán mọi loại ô); currentTotal =
+      // số ô đã lấp content ở lần dựng này.
+      requiredTotal: totalSlots ?? requiredVideos + requiredImages,
       currentVideos: filledVideos.length,
       currentImages: filledImages.length,
+      currentTotal: filledVideos.length + filledImages.length,
       isComplete,
       runMode: automation.runMode,
       publishMode,
@@ -1614,88 +1607,34 @@ export class DraftAutomationScheduler {
           (a) => a.type === AssetType.IMAGE,
         );
 
+        // Đếm ô mẫu qua computeTemplateSlots (nguồn DUY NHẤT — phủ single/carousel/
+        // child_attachments/dynamic). requiredVideos/Images GIỮ semantic cũ =
+        // max(số cấu hình legacy, số ô theo loại) để bảo tồn shouldCreateEmptyDraft +
+        // hiển thị. totalSlots = tổng ô (dùng cho isComplete/requiredTotal).
+        const {
+          slots: templateSlots,
+          totalSlots,
+          videoSlots,
+          imageSlots,
+        } = computeTemplateSlots(template.data as any);
         let requiredVideos = Number(automation.videoCount) || 0;
         let requiredImages = Number(automation.imageCount) || 0;
-
-        // Count actual video and image slots or hardcoded media in the template
-        let templateVideoCount = 0;
-        let templateImageCount = 0;
-
-        const countCreativeAssets = (creative: any) => {
-          if (!creative) return;
-          // Ad "ghim bài" (pinnedPost) giữ media gốc, không lấp slot → không tính vào
-          // số slot cần (parity mb-ads + slotify/autoAssign). Finding Q1.
-          if (creative.pinnedPost === true) return;
-          const mediaType = inferMediaType(creative);
-          const spec = creative.object_story_spec || {};
-
-          if (mediaType === 'VIDEO') {
-            templateVideoCount++;
-          } else if (mediaType === 'IMAGE') {
-            templateImageCount++;
-          } else if (mediaType === 'CAROUSEL') {
-            if (Array.isArray(creative.carouselCards)) {
-              for (const card of creative.carouselCards) {
-                const cardType = String(card.mediaType || '').toUpperCase();
-                if (cardType === 'VIDEO') {
-                  templateVideoCount++;
-                } else {
-                  templateImageCount++;
-                }
-              }
-            }
-            if (Array.isArray(spec.link_data?.child_attachments)) {
-              for (const attachment of spec.link_data.child_attachments) {
-                if (attachment.video_id || attachment.videoId) {
-                  templateVideoCount++;
-                } else {
-                  templateImageCount++;
-                }
-              }
-            }
-          }
-          if (Array.isArray(creative.dynamicAssets)) {
-            for (const asset of creative.dynamicAssets) {
-              const assetType = String(
-                asset.type || asset.mediaType || '',
-              ).toUpperCase();
-              if (assetType === 'VIDEO') {
-                templateVideoCount++;
-              } else if (assetType === 'IMAGE') {
-                templateImageCount++;
-              }
-            }
-          }
-        };
-
-        const templateData = template.data as any;
-        if (templateData && Array.isArray(templateData.ad_sets)) {
-          for (const adset of templateData.ad_sets) {
-            if (Array.isArray(adset.ads)) {
-              for (const ad of adset.ads) {
-                if (ad.creative) {
-                  countCreativeAssets(ad.creative);
-                }
-              }
-            }
-          }
-        }
-
-        if (requiredVideos < templateVideoCount) {
-          requiredVideos = templateVideoCount;
-        }
-        if (requiredImages < templateImageCount) {
-          requiredImages = templateImageCount;
-        }
+        if (requiredVideos < videoSlots) requiredVideos = videoSlots;
+        if (requiredImages < imageSlots) requiredImages = imageSlots;
 
         // Tự TẠM DỪNG khi tự-đăng KHÔNG THỂ đạt chuẩn ≥5 nội dung: mẫu chỉ tạo
-        // requiredVideos+requiredImages < ngưỡng creative/chiến dịch → gom bao nhiêu
-        // content cũng vô ích, chỉ tốn tài nguyên mỗi 30'. PAUSE row DraftAutomation +
-        // ghi lý do (parity với gate lúc lưu ở mb-ads). Chỉ PUBLISH_IMMEDIATELY; miễn
-        // purpose của mẫu là TESTING_CONTENT. Chỉ áp dụng cho nhánh mới
-        // (có draftAutomationId) — nhánh legacy không có row để tạm dừng.
+        // projectedContents < ngưỡng creative/chiến dịch → gom bao nhiêu content cũng
+        // vô ích, chỉ tốn tài nguyên mỗi 30'. PAUSE row DraftAutomation + ghi lý do
+        // (parity với gate lúc lưu ở mb-ads). Chỉ PUBLISH_IMMEDIATELY; miễn purpose
+        // của mẫu là TESTING_CONTENT. Chỉ áp dụng cho nhánh mới (có draftAutomationId)
+        // — nhánh legacy không có row để tạm dừng.
+        // projectedContents = max(totalSlots, videoCount+imageCount legacy): automation
+        // MỚI (không có 2 field legacy) = totalSlots; automation CŨ giữ số cấu hình cũ.
         const MIN_AUTO_PUBLISH_CONTENTS = await this.getMinPublishContents();
-        const projectedContents = requiredVideos + requiredImages;
+        const legacyContentCount =
+          (Number(automation.videoCount) || 0) +
+          (Number(automation.imageCount) || 0);
+        const projectedContents = Math.max(totalSlots, legacyContentCount);
         const templateCampaignName = String(
           (template.data as any)?.campaign?.name || '',
         );
@@ -1765,67 +1704,25 @@ export class DraftAutomationScheduler {
           automation.slotRules && typeof automation.slotRules === 'object'
             ? (automation.slotRules as Record<string, string>)
             : {};
-        const matchesSlotRule = (asset: any, rule?: string) => {
-          const needle = (rule || '').trim().toLowerCase();
-          if (!needle) return true;
-          return (asset?.name || '').toLowerCase().includes(needle);
-        };
-        // Asset đang nằm trong nháp dở vẫn eligible (nháp dở bị loại khỏi danh
-        // sách "đã dùng ở nháp khác") nên tự được chọn lại đúng slot ở lượt sau.
-        const pickSlotAssets = (
-          eligible: any[],
-          required: number,
-          kind: 'VIDEO' | 'IMAGE',
-        ): any[] => {
-          const used = new Set<string>();
-          const slots: any[] = [];
-          for (let n = 1; n <= required; n++) {
-            const rule = slotRules[`${kind}_${n}`];
-            const pick = eligible.find(
-              (asset) => !used.has(asset.id) && matchesSlotRule(asset, rule),
-            );
-            if (pick) {
-              used.add(pick.id);
-              slots[n - 1] = pick;
-            } else {
-              slots[n - 1] = null;
-            }
-          }
-          return slots;
-        };
-        // Mẫu PHỨC TẠP (carousel / DOF-media) → giữ đường cũ khớp loại cứng. Mẫu
-        // ĐƠN-MEDIA → Ô TRUNG TÍNH LOẠI: mỗi ô nhận content bất kỳ loại (ô ảnh có thể
-        // nhận video và ngược lại) — giải "template cố định ảnh không nhét được video".
-        // Ưu tiên đúng loại trước (không hồi quy mẫu đang chạy tốt), thiếu mới lấy chéo.
-        const complexMedia = templateHasComplexMedia(template.data as any);
-        let contentPlan: any[] | undefined;
-        let slotVideos: any[];
-        let slotImages: any[];
-        if (complexMedia) {
-          slotVideos = pickSlotAssets(eligibleVideos, requiredVideos, 'VIDEO');
-          slotImages = pickSlotAssets(eligibleImages, requiredImages, 'IMAGE');
-        } else {
-          const slotTypes: ('VIDEO' | 'IMAGE')[] = [];
-          forEachSingleMediaCreative(template.data as any, (c) => {
-            slotTypes.push(inferMediaType(c) === 'VIDEO' ? 'VIDEO' : 'IMAGE');
-          });
-          const usedPlan = new Set<string>();
-          const perTypeOrd: Record<string, number> = { VIDEO: 0, IMAGE: 0 };
-          const pickFrom = (pool: any[], rule?: string) =>
-            pool.find((a) => !usedPlan.has(a.id) && matchesSlotRule(a, rule));
-          contentPlan = slotTypes.map((stype) => {
-            perTypeOrd[stype] += 1;
-            const rule = slotRules[`${stype}_${perTypeOrd[stype]}`];
-            const sameType = stype === 'VIDEO' ? eligibleVideos : eligibleImages;
-            const crossType = stype === 'VIDEO' ? eligibleImages : eligibleVideos;
-            const pick = pickFrom(sameType, rule) || pickFrom(crossType, rule);
-            if (pick) usedPlan.add(pick.id);
-            return pick || null;
-          });
-          const filledPlan = contentPlan.filter(Boolean);
-          slotVideos = filledPlan.filter((a) => assetMediaType(a) === 'VIDEO');
-          slotImages = filledPlan.filter((a) => assetMediaType(a) === 'IMAGE');
-        }
+        // PLANNER THỐNG NHẤT (planContent thuần, mọi loại mẫu): mỗi Ô lấy content
+        // ĐÚNG loại trước, thiếu VÀ ô cho phép cross-type (single/card/attachment) thì
+        // lấy chéo. Ô dynamic (DOF) chỉ nhận đúng loại. pool đã orderBy createdAtLocal
+        // ASC → FIFO. contentPlan.length = totalSlots (KHÔNG bơm theo videoCount/
+        // imageCount legacy → hết đốt content). Asset đang nằm trong nháp dở vẫn
+        // eligible nên tự được chọn lại đúng ô ở lượt sau.
+        const contentPlan: any[] = planContent(
+          templateSlots,
+          eligibleVideos,
+          eligibleImages,
+          slotRules,
+        );
+        const filledPlan = contentPlan.filter(Boolean);
+        const slotVideos: any[] = filledPlan.filter(
+          (a) => assetMediaType(a) === 'VIDEO',
+        );
+        const slotImages: any[] = filledPlan.filter(
+          (a) => assetMediaType(a) === 'IMAGE',
+        );
 
         const existingAssetIdSet = new Set(existingAssetIds);
         const selectedVideos = slotVideos.filter(Boolean);
@@ -1857,12 +1754,11 @@ export class DraftAutomationScheduler {
         const selectedNewImagesForHistory = selectedNewImages.map(withLark);
         const selectedVideosForHistory = selectedVideos.map(withLark);
         const selectedImagesForHistory = selectedImages.map(withLark);
-        // Đường ô-trung-tính: "đủ" = mọi ô đã có content (bất kể loại). Đường cũ:
-        // đủ số video VÀ số ảnh theo loại.
-        const isComplete = contentPlan
-          ? contentPlan.length > 0 && contentPlan.every(Boolean)
-          : selectedVideos.length >= requiredVideos &&
-            selectedImages.length >= requiredImages;
+        // "Đủ" = MỌI ô đã có content (bất kể loại). Mẫu 0 ô media (toàn pinnedPost) →
+        // totalSlots===0 → coi là đủ (đường shouldCreateEmptyDraft xử lý tạo nháp rỗng).
+        const isComplete =
+          contentPlan.every(Boolean) &&
+          (contentPlan.length > 0 || totalSlots === 0);
         const hasNewAssets =
           selectedNewVideos.length > 0 || selectedNewImages.length > 0;
         const shouldCreateEmptyDraft =
@@ -1874,6 +1770,8 @@ export class DraftAutomationScheduler {
             nameRule: automation.nameRule || null,
             requiredVideos,
             requiredImages,
+            // requiredTotal = tổng số ô media của mẫu (nhất quán mọi loại ô).
+            requiredTotal: totalSlots,
             publishToMeta: publishRequested,
             publishMode,
             scheduleCheckIntervalMinutes: 30,
@@ -1893,12 +1791,16 @@ export class DraftAutomationScheduler {
             existingAssetIds,
             currentVideos: existingAssetsByType.videos.length,
             currentImages: existingAssetsByType.images.length,
+            currentTotal:
+              existingAssetsByType.videos.length +
+              existingAssetsByType.images.length,
             remainingVideos,
             remainingImages,
             selectedNewVideos: selectedNewVideos.length,
             selectedNewImages: selectedNewImages.length,
             totalSelectedVideos: selectedVideos.length,
             totalSelectedImages: selectedImages.length,
+            selectedTotal: selectedVideos.length + selectedImages.length,
             isComplete,
           },
           counts: {
@@ -1915,6 +1817,7 @@ export class DraftAutomationScheduler {
             eligibleAssets: eligibleAssets.length,
             eligibleVideos: eligibleVideos.length,
             eligibleImages: eligibleImages.length,
+            eligibleTotal: eligibleAssets.length,
           },
           exclusions: exclusionCounts,
           checks: [
@@ -2040,13 +1943,14 @@ export class DraftAutomationScheduler {
           videos: slotVideos,
           images: slotImages,
           publishMode,
-          // Đường ô-trung-tính: số ô cần gán token = số content THỰC mỗi loại sau khi
-          // phân bổ (có thể lệch template gốc do morph), đủ chỉ số cho getNext*Slot.
-          requiredVideos: contentPlan ? slotVideos.length : requiredVideos,
-          requiredImages: contentPlan ? slotImages.length : requiredImages,
+          // Số ô cần gán token = số content THỰC mỗi loại sau khi phân bổ (có thể lệch
+          // template gốc do morph), đủ chỉ số cho getNext*Slot.
+          requiredVideos: slotVideos.length,
+          requiredImages: slotImages.length,
           isComplete,
           automation,
           contentPlan,
+          totalSlots,
         });
 
         generatedCampaignId = await this.saveAutomationDraft({
