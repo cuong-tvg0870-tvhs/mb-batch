@@ -912,8 +912,21 @@ model Creative {
   lastFetchedAt   DateTime?
   rawPayload      Json?
   urlExpiredAt    DateTime?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @default(now())
+
+  // ===== ẢNH OWNED (re-host lên MinIO tự host trên VPS) — CHỈ CHO CREATIVE VIDEO =====
+  // Ảnh (AdImage.url = facebook.com/ads/image/?d=... ) là URL BỀN, không hết hạn → KHÔNG
+  // re-host. Chỉ thumbnail VIDEO (fbcdn có oe= hết hạn) mới vỡ ảnh ở list/detail mẫu QC.
+  // Job creative-media (mb-batch) tải BẢN NÉT nhất (uri có width lớn nhất trong
+  // AdVideo.rawPayload.thumbnails.data[]) → PUT lên bucket `media` (Content-Type đúng) →
+  // ghi URL bền vào đây; còn AdVideo.source được meta-media-sync refresh ~3h/lần khỏi hết hạn.
+  // Read-path hiển thị ƯU TIÊN ownedImageUrl trước chuỗi fallback cũ. Cột additive nullable
+  // → meta-sync KHÔNG đụng (vẫn ghi field Meta như thường) → parity 2-writer an toàn.
+  ownedImageUrl String? // https://ads.3fastvn.com/media/<key> (bền, cùng origin FE, khỏi CORS)
+  ownedImageKey String? // key trong bucket MinIO (để xoá/thay khi asset gốc đổi)
+  ownedImageAt  DateTime? // mốc re-host gần nhất
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now())
 
   videoId          String?
   adVideo          AdVideo?          @relation(fields: [videoId], references: [id])
@@ -1006,6 +1019,8 @@ model Creative {
   // Creative theo pageId/systemPageId — index để subquery không quét toàn bảng.
   @@index([pageId])
   @@index([systemPageId])
+  // Job re-host quét WHERE ownedImageUrl IS NULL ORDER BY updatedAt DESC mỗi giờ.
+  @@index([ownedImageUrl, updatedAt(sort: Desc)])
 }
 
 model CreativeInsight {
@@ -2072,7 +2087,7 @@ model SystemAdSet {
   // sau chạy reconcile (đối chiếu tên với live, loại trừ appendPreexisting) trước khi
   // tạo lại: khớp→adopt meta_id; không khớp→tạo mới; mơ hồ→'UNCERTAIN' + BỎ QUA (không
   // tạo trùng). null = luồng thường / chưa từng thử tạo.
-  metaCreateState String?
+  metaCreateState     String?
   // Mốc (UTC) BẮT ĐẦU gọi Meta create entity này. Reconcile chỉ adopt ứng viên live có
   // created_time >= mốc NÀY (cửa sổ CHẶT theo từng entity, hẹp hơn snapshot toàn vỏ) →
   // thu nhỏ tối đa khả năng nhận nhầm entity người khác tạo trùng tên sau đó.
@@ -2125,7 +2140,7 @@ model SystemAd {
   // Ledger idempotency append — xem SystemAdSet.metaCreateState. 'CREATING' trước Meta
   // createAd, clear sau khi ghi meta_id; kẹt 'CREATING' → reconcile ở lần sau; 'UNCERTAIN'
   // = mơ hồ, bỏ qua không tạo trùng.
-  metaCreateState String?
+  metaCreateState     String?
   // Mốc (UTC) BẮT ĐẦU gọi Meta create entity này. Reconcile chỉ adopt ứng viên live có
   // created_time >= mốc NÀY (cửa sổ CHẶT theo từng entity, hẹp hơn snapshot toàn vỏ) →
   // thu nhỏ tối đa khả năng nhận nhầm entity người khác tạo trùng tên sau đó.
@@ -3106,23 +3121,23 @@ enum CustomMetricContext {
 /// AD_ACCOUNT → accountId bắt buộc; CATEGORY → categoryId bắt buộc (toàn rule trong category đó thấy).
 /// `accountId`/`createdById` là scalar FK (không @relation back-ref, theo pattern AutomationCustomTimeframe).
 model CustomMetric {
-  id          String              @id @default(uuid())
+  id          String               @id @default(uuid())
   name        String // min(1) max(50)
   description String? // max(200)
-  format      CustomMetricFormat  @default(numeric)
+  format      CustomMetricFormat   @default(numeric)
   scope       CustomMetricScope
   formula     Json // FormulaToken[]
   accountId   String? // bắt buộc khi scope=AD_ACCOUNT, null khi khác
   categoryId  String? // bắt buộc khi scope=CATEGORY, null khi khác
-  category    AutomationCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  category    AutomationCategory?  @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   createdById String?
   // Ngữ cảnh dùng (xem enum). NULLABLE + không default: mọi row cũ (care-ads
   // GLOBAL/AD_ACCOUNT/CATEGORY, dashboard USER) giữ NULL, không backfill. Consumer
   // mỗi ngữ cảnh lọc theo context để KHÔNG lẫn/sai số (budget-schedule chỉ nạp
   // context=BUDGET_SCHEDULE; dashboard/care-ads lọc context IS NULL).
   context     CustomMetricContext?
-  createdAt   DateTime            @default(now())
-  updatedAt   DateTime            @updatedAt
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
 
   @@index([accountId])
   @@index([categoryId])

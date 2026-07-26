@@ -37,7 +37,8 @@ export class MetaMediaSyncProcessor {
       META_MEDIA_SYNC_QUEUE,
       async () => {
         this.logger.log('🚀 [JOB START] Sync Ad Video Data');
-        await this.service.syncAdVideo();
+        // limit chỉnh qua env để đuổi backlog video hết hạn (mặc định 200/run)
+        await this.service.syncAdVideo(Number(process.env.META_MEDIA_SYNC_VIDEO_LIMIT || 200));
         this.logger.log('✨ [JOB FINISHED] Sync Ad Video Data');
       },
     );
@@ -50,7 +51,8 @@ export class MetaMediaSyncProcessor {
       META_MEDIA_SYNC_QUEUE,
       async () => {
         this.logger.log('🚀 [JOB START] Sync Ad Video Error Data');
-        await this.service.syncAdVideoError();
+        // limit chỉnh qua env để đuổi backlog video hết hạn (mặc định 200/run)
+        await this.service.syncAdVideoError(Number(process.env.META_MEDIA_SYNC_VIDEO_LIMIT || 200));
         this.logger.log('✨ [JOB FINISHED] Sync Ad Video Error Data');
       },
     );
