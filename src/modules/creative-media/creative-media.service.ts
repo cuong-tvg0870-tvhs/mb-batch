@@ -180,6 +180,9 @@ export class CreativeMediaService {
             api.call('GET', [], {
               ids: idsChunk.join(','),
               fields: 'thumbnail_url,image_url',
+              // BẮT BUỘC: thumbnail_url mặc định của Meta chỉ 64×64 (mờ). Xin bản 1080 để nét.
+              thumbnail_width: 1080,
+              thumbnail_height: 1080,
             }),
           { logger: this.logger, context: { ids: idsChunk } },
         );
