@@ -2078,6 +2078,15 @@ model SystemAdSet {
   // thu nhỏ tối đa khả năng nhận nhầm entity người khác tạo trùng tên sau đó.
   metaCreateStartedAt DateTime?
 
+  // BƠM QUẢNG CÁO VÀO NHÓM ĐANG CHẠY: id ad set LIVE trên Meta mà các quảng cáo con của
+  // node này được tạo VÀO. Khi set (chỉ trong vỏ appendOnly):
+  //  - publisher BỎ upsertAdSetToMeta (TUYỆT ĐỐI không tạo/sửa nhóm đang chạy), dùng id
+  //    này làm cha để CREATE ad con meta_id=null.
+  //  - meta_id của node ĐÍCH LUÔN NULL (né nhầm lẫn với ad set hệ-thống-sở-hữu đã có meta_id
+  //    = chính id này), và bị LOẠI khỏi empty-guard "nhóm mới" (node đích không phải nhóm mới).
+  // Additive/nullable → an toàn, adset cũ mặc định NULL = luồng thường / nhóm mới.
+  appendTargetAdSetId String?
+
   status Status @default(DRAFT)
 
   createdById String?
