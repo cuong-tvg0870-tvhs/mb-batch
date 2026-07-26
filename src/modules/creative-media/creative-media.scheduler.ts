@@ -19,9 +19,10 @@ export class CreativeMediaScheduler implements OnModuleInit {
   async onModuleInit() {
     this.logger.log('CreativeMediaScheduler initialized');
     await this.scheduleRehost();
+    await this.scheduleOrphanRehost();
   }
 
-  // Lệch phút so với creative-refresh (:20) để không đụng tải nặng cùng lúc.
+  // Re-host thumbnail VIDEO — lệch phút để không đụng tải nặng cùng lúc.
   @Cron('45 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async scheduleRehost() {
     this.logger.log('Scheduling Creative media re-host...');
@@ -32,6 +33,24 @@ export class CreativeMediaScheduler implements OnModuleInit {
       {},
       {
         jobId: `${CREATIVE_MEDIA_JOBS.REHOST_CREATIVE_IMAGES}:${bucket}`,
+        removeOnComplete: true,
+        attempts: 3,
+        backoff: { type: 'exponential' },
+      },
+    );
+  }
+
+  // Re-host creative ORPHAN (gọi Meta) — lệch :15 khỏi job video (:45).
+  @Cron('15 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  async scheduleOrphanRehost() {
+    this.logger.log('Scheduling Creative orphan re-host...');
+    const bucket = new Date().toISOString().slice(0, 13); // theo giờ
+
+    await this.queue.add(
+      CREATIVE_MEDIA_JOBS.REHOST_ORPHAN_IMAGES,
+      {},
+      {
+        jobId: `${CREATIVE_MEDIA_JOBS.REHOST_ORPHAN_IMAGES}:${bucket}`,
         removeOnComplete: true,
         attempts: 3,
         backoff: { type: 'exponential' },

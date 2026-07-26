@@ -1,7 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
 import axios from 'axios';
+import { FacebookAdsApi } from 'facebook-nodejs-business-sdk';
+import { chunk, executeMetaApiWithRetry } from '../../common/utils';
 import { ObjectStorageService } from '../object-storage/object-storage.service';
 import { PrismaService } from '../prisma/prisma.service';
+
+// Post đã chết → Meta không trả thumbnail, bỏ qua khỏi vòng re-host orphan cho đỡ tốn call.
+const ORPHAN_SKIP_TYPES = ['POST_DELETED', 'PRIVACY_CHECK_FAIL'];
 
 /**
  * Re-host THUMBNAIL VIDEO của Creative LIVE lên MinIO để hết vỡ ảnh ở list/detail mẫu QC.
@@ -115,6 +120,145 @@ export class CreativeMediaService {
     return { candidates: candidates.length, uploaded, linked, skipped, failed };
   }
 
+  /**
+   * Re-host CREATIVE ORPHAN (SHARE/STATUS/PHOTO… không có videoId/imageId). URL trong DB của
+   * nhóm này là fbcdn có oe= và ĐÃ chết (403) + không job nào refresh → phải gọi Meta lấy
+   * `thumbnail_url` TƯƠI 1 lần rồi tải + đẩy MinIO. Sau khi ownedImageUrl set, filter
+   * `ownedImageUrl IS NULL` đảm bảo KHÔNG bao giờ lấy lại (dù URL Meta có hết hạn tiếp).
+   */
+  async rehostPendingOrphans(options?: { limit?: number }) {
+    const limit = options?.limit ?? this.getOrphanLimit();
+    this.initMetaSdk();
+
+    const candidates = await this.prisma.creative.findMany({
+      where: {
+        ownedImageUrl: null,
+        videoId: null,
+        imageId: null,
+        AND: [
+          {
+            OR: [
+              { creativeType: null },
+              { creativeType: { notIn: ORPHAN_SKIP_TYPES } },
+            ],
+          },
+          {
+            OR: [
+              { thumbnailUrl: { not: null } },
+              { imageUrl: { not: null } },
+              { previewUrl: { not: null } },
+            ],
+          },
+        ],
+      },
+      select: { id: true },
+      // ít-được-thử-nhất trước; ca Meta không trả ảnh sẽ bị mark lastFetchedAt → chìm xuống cuối
+      orderBy: { lastFetchedAt: 'asc' },
+      take: limit,
+    });
+
+    if (candidates.length === 0) {
+      this.logger.log('No orphan creatives pending re-host');
+      return { candidates: 0, uploaded: 0, linked: 0, skipped: 0, failed: 0 };
+    }
+
+    let uploaded = 0;
+    let linked = 0;
+    let skipped = 0;
+    let failed = 0;
+    const noMediaIds: string[] = []; // Meta không trả ảnh → mark để khỏi quay vòng
+
+    for (const idsChunk of chunk(
+      candidates.map((c) => c.id),
+      50,
+    )) {
+      let response: any;
+      try {
+        const api = FacebookAdsApi.getDefaultApi();
+        response = await executeMetaApiWithRetry(
+          () =>
+            api.call('GET', [], {
+              ids: idsChunk.join(','),
+              fields: 'thumbnail_url,image_url',
+            }),
+          { logger: this.logger, context: { ids: idsChunk } },
+        );
+      } catch (error: any) {
+        failed += idsChunk.length;
+        this.logger.warn(
+          `orphan Meta fetch failed (${idsChunk.length} ids): ${error?.message || error}`,
+        );
+        continue;
+      }
+
+      for (const id of idsChunk) {
+        const data = (response as any)?.[id];
+        const freshUrl: string | undefined =
+          data?.thumbnail_url || data?.image_url;
+        if (!freshUrl) {
+          skipped++;
+          noMediaIds.push(id); // post chết/không media → đánh dấu đã thử
+          continue;
+        }
+
+        const key = `creative/misc/${id}`;
+        try {
+          let publicUrl: string;
+          if (await this.storage.exists(key)) {
+            publicUrl = this.storage.publicUrl(key);
+          } else {
+            const media = await this.download(freshUrl);
+            publicUrl = await this.storage.put(
+              key,
+              media.buffer,
+              media.contentType,
+            );
+            uploaded++;
+          }
+
+          await this.prisma.creative.update({
+            where: { id },
+            data: {
+              ownedImageUrl: publicUrl,
+              ownedImageKey: key,
+              ownedImageAt: new Date(),
+              lastFetchedAt: new Date(),
+            },
+          });
+          linked++;
+        } catch (error: any) {
+          failed++;
+          this.logger.warn(
+            `[${id}] orphan re-host failed: ${error?.message || error}`,
+          );
+        }
+      }
+    }
+
+    if (noMediaIds.length > 0) {
+      // updatedAt của Creative là @default(now()) (không @updatedAt) → chỉ đụng lastFetchedAt,
+      // KHÔNG ảnh hưởng thứ tự job video (orderBy updatedAt).
+      await this.prisma.creative.updateMany({
+        where: { id: { in: noMediaIds } },
+        data: { lastFetchedAt: new Date() },
+      });
+    }
+
+    this.logger.log(
+      `Orphan re-host finished: candidates=${candidates.length}, uploaded=${uploaded}, linked=${linked}, skipped=${skipped}, failed=${failed}`,
+    );
+
+    return { candidates: candidates.length, uploaded, linked, skipped, failed };
+  }
+
+  private initMetaSdk() {
+    const token = process.env.SDK_FACEBOOK_ACCESS_TOKEN;
+    if (!token) {
+      throw new Error('SDK_FACEBOOK_ACCESS_TOKEN missing');
+    }
+    FacebookAdsApi.init(token);
+  }
+
   // ===== chọn nguồn thumbnail video ĐẸP nhất + key dedup =====
 
   private resolveBestThumb(
@@ -209,6 +353,11 @@ export class CreativeMediaService {
 
   private getLimit() {
     return Number(process.env.CREATIVE_MEDIA_REHOST_LIMIT || 300);
+  }
+
+  private getOrphanLimit() {
+    // Nhỏ hơn video vì mỗi lượt gọi Meta (tốn quota) — mặc định 150/lượt.
+    return Number(process.env.CREATIVE_MEDIA_ORPHAN_LIMIT || 150);
   }
 
   private getDownloadTimeoutMs() {

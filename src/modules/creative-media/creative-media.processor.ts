@@ -32,4 +32,20 @@ export class CreativeMediaProcessor {
       },
     );
   }
+
+  @Process({
+    name: CREATIVE_MEDIA_JOBS.REHOST_ORPHAN_IMAGES,
+    concurrency: 1,
+  })
+  async handleRehostOrphanImages(_job: Job) {
+    return this.batchRunLogger.track(
+      CREATIVE_MEDIA_JOBS.REHOST_ORPHAN_IMAGES,
+      CREATIVE_MEDIA_QUEUE,
+      async () => {
+        this.logger.log('[JOB START] Re-host Orphan Images');
+        await this.service.rehostPendingOrphans();
+        this.logger.log('[JOB FINISHED] Re-host Orphan Images');
+      },
+    );
+  }
 }
