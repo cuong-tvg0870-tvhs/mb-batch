@@ -15,6 +15,7 @@ import {
   explainGroup,
   summarizeEvaluation,
 } from './campaign-rule-evaluator';
+import type { CustomMetricEvalDef } from './campaign-rule-custom-metric';
 import {
   buildRollingSpec,
   buildSpecs,
@@ -193,6 +194,53 @@ export class CampaignRuleRunnerService {
     );
   }
 
+  /**
+   * Nạp TRƯỚC (1 lần/run) định nghĩa custom metric mà rule tham chiếu, ĐÃ LỌC
+   * context='BUDGET_SCHEDULE' (không lấy metric của ngữ cảnh khác → không sai số).
+   * Trả undefined nếu rule không dùng custom metric (đường rule thường không đổi).
+   * Metric bị xoá / sai context → không có trong map → resolver trả null+warn (điều
+   * kiện KHÔNG khớp, không âm thầm pass).
+   */
+  private async loadCustomMetricRegistry(
+    rule: any,
+  ): Promise<Map<string, CustomMetricEvalDef> | undefined> {
+    const refs = new Set<string>();
+    const walk = (group: any) => {
+      if (!group) return;
+      for (const c of group.conditions || []) {
+        const p = c?.params || {};
+        for (const k of [p.metric, p.leftMetric, p.rightMetric]) {
+          if (
+            typeof k === 'string' &&
+            k.toLowerCase().startsWith('custom_metric:')
+          ) {
+            refs.add(k.toLowerCase());
+          }
+        }
+      }
+      for (const g of group.childGroups || []) walk(g);
+    };
+    for (const task of rule.tasks || []) walk(task.rootGroup);
+    if (refs.size === 0) return undefined;
+
+    const ids = Array.from(refs).map((r) =>
+      r.slice('custom_metric:'.length),
+    );
+    const rows = await this.prisma.customMetric.findMany({
+      where: { id: { in: ids }, context: 'BUDGET_SCHEDULE' },
+      select: { id: true, formula: true, format: true },
+    });
+    const map = new Map<string, CustomMetricEvalDef>();
+    for (const row of rows) {
+      map.set(`custom_metric:${row.id}`.toLowerCase(), {
+        id: row.id,
+        formula: (row.formula as any) || [],
+        format: (row.format as any) || 'numeric',
+      });
+    }
+    return map;
+  }
+
   /** Tạo run (idempotent) rồi đánh giá + thực thi từng entity. */
   private async executeRun(
     rule: any,
@@ -246,10 +294,19 @@ export class CampaignRuleRunnerService {
           `Rule ${rule.id} level ${rule.level} thiếu campaignId (phủ cả account) chưa hỗ trợ → bỏ qua.`,
         );
       } else {
+        // Nạp custom metric 1 lần/run (đã lọc context) rồi luồn xuống mọi entity/task.
+        const customMetrics = await this.loadCustomMetricRegistry(rule);
         const entities = await this.loadEntities(rule);
         for (const entity of entities) {
           entitiesScanned += 1;
-          const res = await this.processEntity(rule, run.id, entity, timezone, now);
+          const res = await this.processEntity(
+            rule,
+            run.id,
+            entity,
+            timezone,
+            now,
+            customMetrics,
+          );
           matchedCount += res.matched;
           errorsCount += res.errors;
         }
@@ -321,6 +378,7 @@ export class CampaignRuleRunnerService {
     entity: RunnerEntity,
     timezone: string,
     now: Date,
+    customMetrics?: Map<string, CustomMetricEvalDef>,
   ): Promise<{ matched: number; errors: number }> {
     const level: 'CAMPAIGN' | 'ADSET' = rule.level;
 
@@ -400,7 +458,7 @@ export class CampaignRuleRunnerService {
       return { matched: 0, errors };
     }
 
-    const ctx: EvalContext = { insight, entity, now, timezone };
+    const ctx: EvalContext = { insight, entity, now, timezone, customMetrics };
     let matched = 0;
     let errors = 0;
 
@@ -435,6 +493,7 @@ export class CampaignRuleRunnerService {
           insight,
           timezone,
           now,
+          customMetrics,
         });
         matched += res.matched;
         errors += res.errors;
@@ -564,8 +623,10 @@ export class CampaignRuleRunnerService {
     insight: any;
     timezone: string;
     now: Date;
+    customMetrics?: Map<string, CustomMetricEvalDef>;
   }): Promise<{ matched: number; errors: number }> {
-    const { runId, task, rule, level, entity, insight, timezone, now } = args;
+    const { runId, task, rule, level, entity, insight, timezone, now, customMetrics } =
+      args;
     const rolling = (task.params?.rolling ?? {}) as RollingConfig;
     const nowUnix = Math.floor(now.getTime() / 1000);
 
@@ -578,7 +639,13 @@ export class CampaignRuleRunnerService {
     };
     const targetBudget = liveEntity.dailyBudget ?? liveEntity.lifetimeBudget ?? null;
 
-    const ctx: EvalContext = { insight, entity: liveEntity, now, timezone };
+    const ctx: EvalContext = {
+      insight,
+      entity: liveEntity,
+      now,
+      timezone,
+      customMetrics,
+    };
     // Đánh giá + GIẢI THÍCH điều kiện (ghi evaluation để nhật ký hiện vì sao đạt/không).
     const evalTree = explainGroup(task.rootGroup, ctx);
     const isMatched = evalTree.matched;

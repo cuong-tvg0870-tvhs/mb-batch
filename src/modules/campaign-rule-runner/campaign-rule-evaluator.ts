@@ -1,4 +1,5 @@
 import { DEFAULT_TIMEZONE } from './campaign-rule-runner.constants';
+import type { CustomMetricEvalDef } from './campaign-rule-custom-metric';
 import { resolveMetric } from './campaign-rule-metric.resolver';
 import { zonedTimeParts } from './campaign-rule-schedule.util';
 
@@ -14,6 +15,9 @@ export interface EvalContext {
   entity: any;
   now: Date;
   timezone: string;
+  // Registry custom metric đã prefetch & lọc context='BUDGET_SCHEDULE' (theo id ref
+  // `custom_metric:<id>` lowercase). Optional: rule không dùng custom → undefined.
+  customMetrics?: Map<string, CustomMetricEvalDef>;
 }
 
 type Operator =
@@ -82,7 +86,7 @@ export function evaluateCondition(cond: any, ctx: EvalContext): boolean {
 
   switch (cond.compareType) {
     case 'VALUE': {
-      const v = resolveMetric(p.metric, ctx.insight, ctx.entity);
+      const v = resolveMetric(p.metric, ctx.insight, ctx.entity, ctx.customMetrics);
       if (v == null) return false;
       const amount = Number(p.amount);
       if (!Number.isFinite(amount)) return false;
@@ -90,8 +94,8 @@ export function evaluateCondition(cond: any, ctx: EvalContext): boolean {
     }
 
     case 'METRIC': {
-      const left = resolveMetric(p.leftMetric, ctx.insight, ctx.entity);
-      const right = resolveMetric(p.rightMetric, ctx.insight, ctx.entity);
+      const left = resolveMetric(p.leftMetric, ctx.insight, ctx.entity, ctx.customMetrics);
+      const right = resolveMetric(p.rightMetric, ctx.insight, ctx.entity, ctx.customMetrics);
       if (left == null || right == null) return false;
       const multiplier =
         p.multiplier == null || !Number.isFinite(Number(p.multiplier))
@@ -247,7 +251,7 @@ export function explainCondition(cond: any, ctx: EvalContext): ConditionExplain 
 
   switch (cond?.compareType) {
     case 'VALUE': {
-      const v = resolveMetric(p.metric, ctx.insight, ctx.entity);
+      const v = resolveMetric(p.metric, ctx.insight, ctx.entity, ctx.customMetrics);
       const amount = Number(p.amount);
       const okNums = v != null && Number.isFinite(amount);
       return base({
@@ -261,8 +265,8 @@ export function explainCondition(cond: any, ctx: EvalContext): ConditionExplain 
       });
     }
     case 'METRIC': {
-      const left = resolveMetric(p.leftMetric, ctx.insight, ctx.entity);
-      const right = resolveMetric(p.rightMetric, ctx.insight, ctx.entity);
+      const left = resolveMetric(p.leftMetric, ctx.insight, ctx.entity, ctx.customMetrics);
+      const right = resolveMetric(p.rightMetric, ctx.insight, ctx.entity, ctx.customMetrics);
       const mult =
         p.multiplier == null || !Number.isFinite(Number(p.multiplier))
           ? 1

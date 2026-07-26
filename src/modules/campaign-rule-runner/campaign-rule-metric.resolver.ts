@@ -1,5 +1,9 @@
 import { Logger } from '@nestjs/common';
 import { extractCustomEventType, resolveResultSpec } from '../../common/metrics/insight-metrics';
+import {
+  evaluateCustomMetric,
+  type CustomMetricEvalDef,
+} from './campaign-rule-custom-metric';
 
 /**
  * Phân giải một metricKey → số, từ insight LIVE (date_preset=today) + entity DB.
@@ -250,9 +254,33 @@ export function resolveMetric(
   metricKey: string | null | undefined,
   insight: any,
   entity: any,
+  // Tham số THỨ 4 OPTIONAL (back-compat: mọi call cũ không truyền → undefined → nhánh
+  // custom tự trả null). Map ref `custom_metric:<id>` (lowercase) → định nghĩa formula
+  // đã prefetch & LỌC context='BUDGET_SCHEDULE' ở runner.
+  customRegistry?: Map<string, CustomMetricEvalDef>,
 ): number | null {
   if (!metricKey) return null;
   const key = String(metricKey).toLowerCase();
+
+  // ── CUSTOM METRIC (nhánh ĐẦU, chỉ kích hoạt khi có prefix; mọi metric native đi y
+  // nguyên các nhánh cũ bên dưới, byte-for-byte không đổi) ──
+  if (key.startsWith('custom_metric:')) {
+    const def = customRegistry?.get(key);
+    if (!def) {
+      logger.warn(
+        `Custom metric "${metricKey}" chưa nạp/định nghĩa (thiếu, sai context, hoặc đã xoá) → điều kiện KHÔNG khớp (không âm thầm pass).`,
+      );
+      return null;
+    }
+    // Base resolve KHÔNG truyền registry → nếu formula lỡ chứa custom_metric: (đã bị
+    // validate chặn lúc lưu) sẽ rơi vào nhánh này với registry=undefined → null, KHÔNG
+    // đệ quy. Guard thêm: chỉ cho base ∈ allow-list (đồng đơn vị, không entity-null).
+    return evaluateCustomMetric(def, (baseKey) => {
+      const bk = String(baseKey).toLowerCase();
+      if (!BUDGET_SCHEDULE_CUSTOM_BASE_SET.has(bk)) return null;
+      return resolveMetric(bk, insight, entity);
+    });
+  }
 
   if (DIRECT_INSIGHT_KEYS.has(key)) {
     return toNumber(insight?.[key]);
@@ -336,3 +364,23 @@ export const BUDGET_SCHEDULE_SUPPORTED_METRICS: readonly string[] = [
   'results',
   ...Object.keys(SPECS),
 ];
+
+/**
+ * Base metric ĐƯỢC PHÉP làm toán hạng trong CUSTOM METRIC của budget-schedule.
+ * = BUDGET_SCHEDULE_SUPPORTED_METRICS TRỪ các key nguy hiểm cho công thức:
+ *   - daily_budget / lifetime_budget: đơn vị MINOR (cents) trong khi spend/*_value là
+ *     MAJOR → trộn 1 formula sẽ SAI 100× ở tiền tệ có subunit. Loại cứng tại GỐC.
+ * (hours_since_creation/results/cost_per_result phụ thuộc entity nhưng entity LUÔN có
+ *  ở đường eval điều kiện — evalBumpGuard entity=null KHÔNG dùng custom metric — nên
+ *  giữ được; nếu về sau cần chặt hơn thì loại thêm ở đây.)
+ * FE dùng làm allow-list picker; mb-ads dùng khi validate create; resolver dùng để
+ * gác base token. MỘT nguồn allow-list duy nhất, co-locate cạnh các nhánh resolve.
+ */
+const EXCLUDED_FROM_CUSTOM_BASE = new Set(['daily_budget', 'lifetime_budget']);
+export const BUDGET_SCHEDULE_CUSTOM_BASE: readonly string[] =
+  BUDGET_SCHEDULE_SUPPORTED_METRICS.filter(
+    (k) => !EXCLUDED_FROM_CUSTOM_BASE.has(k),
+  );
+const BUDGET_SCHEDULE_CUSTOM_BASE_SET = new Set<string>(
+  BUDGET_SCHEDULE_CUSTOM_BASE,
+);

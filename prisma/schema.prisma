@@ -3077,6 +3077,18 @@ enum CustomMetricFormat {
   percentage
 }
 
+/// Ngữ cảnh sử dụng của custom metric — QUYẾT ĐỊNH nguồn dữ liệu + vocab base metric
+/// nên KHÔNG được dùng chéo (mỗi ngữ cảnh resolve khác nhau → số khác nhau):
+///   BUDGET_SCHEDULE = rule "tăng NS theo lịch" (mb-batch, Meta LIVE today, cấp campaign/adset, key snake Meta)
+///   AUTO_LAUNCH     = "Tự lên Camp" (mb-ads, CreativeInsight đã gom, cấp creative) — Phase 2
+///   DASHBOARD       = cột custom trên list/bảng (legacy) — thực tế để NULL (không set)
+/// NULL = metric legacy (dashboard scope=USER token {t,m,n,o,p} / care-ads GLOBAL/AD_ACCOUNT/CATEGORY).
+enum CustomMetricContext {
+  BUDGET_SCHEDULE
+  AUTO_LAUNCH
+  DASHBOARD
+}
+
 /// User-defined custom metric: a formula combining native Meta metrics + numbers
 /// + arithmetic operators (vd ROAS = action_values / spend). `formula` lưu token
 /// array JSON (mirror Bir.ch): [{ type, value, key }] với type ∈ variable|number|operator.
@@ -3095,12 +3107,18 @@ model CustomMetric {
   categoryId  String? // bắt buộc khi scope=CATEGORY, null khi khác
   category    AutomationCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   createdById String?
+  // Ngữ cảnh dùng (xem enum). NULLABLE + không default: mọi row cũ (care-ads
+  // GLOBAL/AD_ACCOUNT/CATEGORY, dashboard USER) giữ NULL, không backfill. Consumer
+  // mỗi ngữ cảnh lọc theo context để KHÔNG lẫn/sai số (budget-schedule chỉ nạp
+  // context=BUDGET_SCHEDULE; dashboard/care-ads lọc context IS NULL).
+  context     CustomMetricContext?
   createdAt   DateTime            @default(now())
   updatedAt   DateTime            @updatedAt
 
   @@index([accountId])
   @@index([categoryId])
   @@index([scope])
+  @@index([context])
   @@map("custom_metrics")
 }
 
