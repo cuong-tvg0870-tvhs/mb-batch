@@ -3400,6 +3400,10 @@ model AutomationRuleRunItem {
   @@index([entityId])
   @@index([taskId])
   @@index([status, createdAt(sort: Desc)])
+  // Per-user "số lần xác nhận" cho dashboard Giám sát sử dụng (GET /dashboard/usage):
+  // groupBy confirmedById trên bảng NÓNG ~6.25M dòng — không có index sẽ seq-scan mỗi
+  // lần load. Prod: tạo TAY bằng CREATE INDEX CONCURRENTLY (xem migration).
+  @@index([confirmedById])
 }
 
 // ==========================================================================
