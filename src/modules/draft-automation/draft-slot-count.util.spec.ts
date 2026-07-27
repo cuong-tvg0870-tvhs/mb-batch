@@ -3,6 +3,8 @@ import {
   computeTemplateSlots,
   coerceCardToType,
   planContent,
+  matchesSlotRule,
+  type SlotRuleV2,
 } from './draft-slot-count.util';
 
 // ---------------------------------------------------------------------------
@@ -281,5 +283,135 @@ describe('planContent — gán content cho từng ô', () => {
     // Ô VIDEO cùng loại KHÔNG siết: video trần vẫn dùng được như trước.
     const plan3 = planContent([V('VIDEO')], [bare], []);
     expect((plan3[0] as any).id).toBe('v-bare');
+  });
+});
+
+describe('matchesSlotRule — string legacy + SlotRuleV2', () => {
+  it('string legacy: 1 substring đơn, rỗng/absent/null = pass, KHÔNG split phẩy', () => {
+    expect(matchesSlotRule({ name: 'hook-xyz' }, 'hook')).toBe(true);
+    expect(matchesSlotRule({ name: 'aaa' }, 'hook')).toBe(false);
+    expect(matchesSlotRule({ name: 'HOOK-abc' }, 'hook')).toBe(true); // case-insensitive
+    // rỗng / absent / null ⇒ khớp mọi asset (không biến ô trống thành bộ chặn).
+    expect(matchesSlotRule({ name: 'x' }, '')).toBe(true);
+    expect(matchesSlotRule({ name: 'x' }, undefined)).toBe(true);
+    expect(matchesSlotRule({ name: 'x' }, null)).toBe(true);
+    // Dấu phẩy KHÔNG được split (giữ nguyên semantics cũ: 1 substring nguyên khối).
+    expect(matchesSlotRule({ name: 'sp1 video' }, 'sp1,sp2')).toBe(false);
+  });
+
+  it('SlotRuleV2 include OR (khớp bất kỳ) + object rỗng = pass', () => {
+    const rule: SlotRuleV2 = { include: ['sp00019', 'sp00020'] };
+    expect(matchesSlotRule({ name: 'SP00019 - v' }, rule)).toBe(true);
+    expect(matchesSlotRule({ name: 'SP00020 - v' }, rule)).toBe(true);
+    expect(matchesSlotRule({ name: 'SP00021 - v' }, rule)).toBe(false);
+    // Object rỗng ⇒ không ràng buộc gì ⇒ pass.
+    expect(matchesSlotRule({ name: 'bất kỳ' }, {})).toBe(true);
+  });
+
+  it('SlotRuleV2 exclude (áp dụng độc lập) + exclude THẮNG include', () => {
+    expect(matchesSlotRule({ name: 'bài test' }, { exclude: ['test'] })).toBe(
+      false,
+    );
+    expect(matchesSlotRule({ name: 'bài chính' }, { exclude: ['test'] })).toBe(
+      true,
+    );
+    // Dính exclude thì loại dù include đạt.
+    expect(
+      matchesSlotRule(
+        { name: 'sp00019 test' },
+        { include: ['sp00019'], exclude: ['test'] },
+      ),
+    ).toBe(false);
+  });
+
+  it('SlotRuleV2 khoảng thời gian tạo (createdFrom/To, inclusive, hỗ trợ epoch-seconds)', () => {
+    const rule: SlotRuleV2 = {
+      createdFrom: '2024-01-01T00:00:00.000Z',
+      createdTo: '2024-12-31T23:59:59.000Z',
+    };
+    // creation_time ISO trong khoảng ⇒ đạt.
+    expect(
+      matchesSlotRule({ name: 'x', creation_time: '2024-06-15T00:00:00.000Z' }, rule),
+    ).toBe(true);
+    // creation_time epoch-seconds (=2024-06-15Z) ⇒ đạt.
+    expect(matchesSlotRule({ name: 'x', creation_time: '1718409600' }, rule)).toBe(
+      true,
+    );
+    // Trước khoảng ⇒ loại.
+    expect(
+      matchesSlotRule({ name: 'x', creation_time: '2023-12-31T00:00:00.000Z' }, rule),
+    ).toBe(false);
+    // Chỉ createdFrom: mở đầu "đến"; asset trước from ⇒ loại.
+    expect(
+      matchesSlotRule(
+        { name: 'x', creation_time: '2023-01-01T00:00:00.000Z' },
+        { createdFrom: '2024-01-01T00:00:00.000Z' },
+      ),
+    ).toBe(false);
+  });
+
+  it('SlotRuleV2 kết hợp tên + ngày: tên đạt nhưng ngày ngoài khoảng ⇒ loại', () => {
+    expect(
+      matchesSlotRule(
+        { name: 'sp00019 - v', creation_time: '2023-01-01T00:00:00.000Z' },
+        { include: ['sp00019'], createdFrom: '2024-01-01T00:00:00.000Z' },
+      ),
+    ).toBe(false);
+  });
+});
+
+describe('planContent — slotRules trộn string | SlotRuleV2', () => {
+  const V = (currentType: 'VIDEO' | 'IMAGE', crossTypeAllowed = true) => ({
+    currentType,
+    crossTypeAllowed,
+  });
+  // Asset ảnh có creation_time (cho test lọc ngày per-ô).
+  const imgAt = (id: string, name: string, creation_time: string) => ({
+    id,
+    name,
+    type: 'IMAGE',
+    imageHash: `hash-${id}`,
+    imageUrl: `url-${id}`,
+    creation_time,
+  });
+
+  it('mỗi ô đọc đúng key theo loại: VIDEO_1 string legacy + IMAGE_1 SlotRuleV2 include', () => {
+    const plan = planContent(
+      [V('VIDEO'), V('IMAGE')],
+      [vid('v1', 'aaa'), vid('v2', 'hook clip')],
+      [img('i1', 'banner one'), img('i2', 'plain')],
+      { VIDEO_1: 'hook', IMAGE_1: { include: ['banner'] } },
+    );
+    expect((plan[0] as any).id).toBe('v2'); // string 'hook' → v2
+    expect((plan[1] as any).id).toBe('i1'); // include 'banner' → i1
+  });
+
+  it('SlotRuleV2 exclude trong 1 ô: bỏ qua asset dính từ khoá loại trừ', () => {
+    const plan = planContent(
+      [V('IMAGE')],
+      [],
+      [img('i1', 'old-banner'), img('i2', 'new-banner')],
+      { IMAGE_1: { exclude: ['old'] } },
+    );
+    expect((plan[0] as any).id).toBe('i2');
+  });
+
+  it('SlotRuleV2 lọc theo khoảng thời gian tạo per-ô', () => {
+    const plan = planContent(
+      [V('IMAGE')],
+      [],
+      [
+        imgAt('i1', 'banner', '2024-01-01T00:00:00.000Z'),
+        imgAt('i2', 'banner', '2024-07-01T00:00:00.000Z'),
+      ],
+      { IMAGE_1: { createdFrom: '2024-06-01T00:00:00.000Z' } },
+    );
+    // i1 tạo trước 06-01 ⇒ bị bỏ; i2 sau ⇒ được chọn.
+    expect((plan[0] as any).id).toBe('i2');
+  });
+
+  it('slotRules = null ⇒ không lọc, hành vi như không có rule', () => {
+    const plan = planContent([V('VIDEO')], [vid('v1')], [], null);
+    expect((plan[0] as any).id).toBe('v1');
   });
 });

@@ -28,8 +28,25 @@
 // (bản sao thuần, không phụ thuộc service — nên copy nhỏ vài helper suy loại media).
 // =============================================================================
 
+import {
+  getAssetCreatedDate,
+  inCreatedRange,
+  matchesNameFilter,
+  normalizeCreatedRange,
+  normalizeNameFilter,
+} from './name-term-match';
+
 export type SlotKind = 'single' | 'card' | 'attachment' | 'dynamic';
 export type SlotMediaType = 'VIDEO' | 'IMAGE';
+
+// Rule per-ô dạng NÂNG CAO: Bao gồm (OR) + Loại trừ theo tên + khoảng thời gian
+// tạo (createdFrom/To ISO, inclusive). Song song với string legacy (1 substring).
+export type SlotRuleV2 = {
+  include?: string[] | null;
+  exclude?: string[] | null;
+  createdFrom?: string | null;
+  createdTo?: string | null;
+};
 
 export interface MediaSlot {
   kind: SlotKind;
@@ -225,12 +242,33 @@ export function computeTemplateSlots(templateData: any): {
   return { slots, totalSlots: slots.length, videoSlots, imageSlots };
 }
 
-// Ô lấy content khớp slotRule: tên asset chứa "dấu hiệu" của ô (không dấu hiệu →
-// khớp mọi asset). Dùng chung planContent.
-function matchesSlotRule(asset: any, rule?: string): boolean {
-  const needle = (rule || '').trim().toLowerCase();
-  if (!needle) return true;
-  return (asset?.name || '').toLowerCase().includes(needle);
+// Ô lấy content khớp slotRule. HAI dạng rule:
+//   - string (legacy): 1 "dấu hiệu" substring DUY NHẤT, không split phẩy; rỗng →
+//     khớp mọi asset. GIỮ NGUYÊN semantics cũ.
+//   - SlotRuleV2: Bao gồm (OR) + Loại trừ theo tên + khoảng thời gian tạo, dùng
+//     chung helper parity trong ./name-term-match. Field nào trống → không ràng
+//     buộc phần đó (include rỗng ⇒ pass, range không bound ⇒ không lọc).
+// Dùng chung planContent.
+export function matchesSlotRule(
+  asset: any,
+  rule?: string | SlotRuleV2 | null,
+): boolean {
+  if (rule == null) return true;
+  if (typeof rule === 'string') {
+    const needle = rule.trim().toLowerCase();
+    if (!needle) return true;
+    return (asset?.name || '').toLowerCase().includes(needle);
+  }
+  const f = normalizeNameFilter(
+    { include: rule.include, exclude: rule.exclude },
+    null,
+  );
+  if (!matchesNameFilter(asset?.name, f)) return false;
+  const range = normalizeCreatedRange({
+    from: rule.createdFrom,
+    to: rule.createdTo,
+  });
+  return inCreatedRange(getAssetCreatedDate(asset), range);
 }
 
 // PLANNER THỐNG NHẤT (thuần, test được) — gán content cho TỪNG Ô theo thứ tự
@@ -245,13 +283,14 @@ export function planContent(
   slots: Array<{ currentType: SlotMediaType; crossTypeAllowed: boolean }>,
   eligibleVideos: any[],
   eligibleImages: any[],
-  slotRules: Record<string, string> = {},
+  slotRules: Record<string, string | SlotRuleV2> | null = {},
 ): any[] {
+  const rules = slotRules ?? {};
   const usedPlan = new Set<string>();
   const perTypeOrd: Record<string, number> = { VIDEO: 0, IMAGE: 0 };
   const pickFrom = (
     pool: any[],
-    rule?: string,
+    rule?: string | SlotRuleV2,
     extra?: (a: any) => boolean,
   ) =>
     pool.find(
@@ -268,7 +307,7 @@ export function planContent(
     Boolean(getVideoThumbnailId(a) || getVideoThumbnailUrl(a));
   return slots.map((slot) => {
     perTypeOrd[slot.currentType] += 1;
-    const rule = slotRules[`${slot.currentType}_${perTypeOrd[slot.currentType]}`];
+    const rule = rules[`${slot.currentType}_${perTypeOrd[slot.currentType]}`];
     const sameType =
       slot.currentType === 'VIDEO' ? eligibleVideos : eligibleImages;
     const crossType =

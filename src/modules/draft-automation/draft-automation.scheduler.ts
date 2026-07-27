@@ -6,7 +6,14 @@ import {
   applyCidToAdName,
   extractCidFromName,
 } from '../../common/utils/cid.util';
-import { matchesAnyNameTerm } from './name-term-match';
+import {
+  normalizeNameFilter,
+  failsNameInclude,
+  hitsNameExclude,
+  normalizeCreatedRange,
+  inCreatedRange,
+  getAssetCreatedDate,
+} from './name-term-match';
 import { normalizePendingAutomation } from './pending-automation.util';
 import {
   forEachMediaSlot,
@@ -14,6 +21,7 @@ import {
   coerceCardToType,
   planContent,
   stampSlotToken,
+  SlotRuleV2,
 } from './draft-slot-count.util';
 
 const DEFAULT_AUTOMATION_CRON = '*/30 * * * *';
@@ -1145,19 +1153,23 @@ export class DraftAutomationScheduler {
             createdAtLocal: 'asc', // Oldest first
           },
         });
-        const assetCreatedAfter = parseValidDate(
-          automation.assetCreatedAfter ||
-            automation.assetCreationTimeFrom ||
-            automation.creationTimeFrom,
+        // Lọc theo KHOẢNG thời gian tạo content (mở 2 đầu tuỳ ý). Ưu tiên
+        // assetCreatedRange mới; absent ⇒ fold legacy 1 mốc "sau ngày"
+        // (assetCreatedAfter || assetCreationTimeFrom || creationTimeFrom) → from.
+        // Dùng helper parity với mb-ads (từ ./name-term-match) để "Chạy thử" và lịch
+        // chạy thật lọc GIỐNG HỆT nhau.
+        const createdRange = normalizeCreatedRange(
+          automation.assetCreatedRange,
+          automation.assetCreatedAfter,
+          automation.assetCreationTimeFrom,
+          automation.creationTimeFrom,
         );
-        const folderAssets = assetCreatedAfter
-          ? allFolderAssets.filter((asset) => {
-              const assetCreationDate = getAssetCreationDate(asset);
-              return (
-                assetCreationDate &&
-                assetCreationDate.getTime() >= assetCreatedAfter.getTime()
-              );
-            })
+        const hasCreatedRange =
+          createdRange.from != null || createdRange.to != null;
+        const folderAssets = hasCreatedRange
+          ? allFolderAssets.filter((asset) =>
+              inCreatedRange(getAssetCreatedDate(asset), createdRange),
+            )
           : allFolderAssets;
         const folderAssetIds = folderAssets.map((asset) => asset.id);
 
@@ -1320,8 +1332,17 @@ export class DraftAutomationScheduler {
           alreadyUsedBySystemOrPublished: 0,
           usedInDraft: 0,
           nameRuleMismatch: 0,
+          nameRuleExcluded: 0,
           noCid: 0,
         };
+
+        // Chuẩn hoá bộ lọc TÊN đúng 1 LẦN cho cả pool: ưu tiên nameFilter mới
+        // (Bao gồm OR + Loại trừ); absent/null ⇒ fold nameRule CSV legacy → include,
+        // exclude = []. Cùng helper parity với mb-ads.
+        const nameFilter = normalizeNameFilter(
+          automation.nameFilter,
+          automation.nameRule,
+        );
 
         // Nguồn nội dung: NEW_ONLY (mặc định, chỉ content chưa từng lên camp),
         // USED_ONLY (chỉ content đã từng lên camp), BOTH (cả hai). Chỉ đổi hành vi
@@ -1353,10 +1374,11 @@ export class DraftAutomationScheduler {
               : assetReuseMode === 'USED_ONLY'
                 ? !!isUsedBySystemOrPublished
                 : !isUsedBySystemOrPublished; // NEW_ONLY (mặc định)
-          const matchesNameRule = matchesAnyNameTerm(
-            asset.name,
-            automation.nameRule,
-          );
+          // Bộ lọc tên: fail Bao gồm (không dính từ khoá include) và dính Loại trừ
+          // đếm ĐỘC LẬP thành 2 bucket. Đạt = qua Bao gồm VÀ không dính Loại trừ
+          // (= matchesNameFilter). Include rỗng ⇒ luôn qua; Exclude thắng include.
+          const failsInclude = failsNameInclude(asset.name, nameFilter);
+          const hitsExclude = hitsNameExclude(asset.name, nameFilter);
           // Yêu cầu: chỉ lấy content có chứa mã CID trong tên (vd CID00046478).
           const hasCid = !!extractCidFromName(asset.name);
 
@@ -1364,10 +1386,17 @@ export class DraftAutomationScheduler {
             exclusionCounts.alreadyUsedBySystemOrPublished += 1;
           }
           if (isUsedInDraft) exclusionCounts.usedInDraft += 1;
-          if (!matchesNameRule) exclusionCounts.nameRuleMismatch += 1;
+          if (failsInclude) exclusionCounts.nameRuleMismatch += 1;
+          if (hitsExclude) exclusionCounts.nameRuleExcluded += 1;
           if (!hasCid) exclusionCounts.noCid += 1;
 
-          return passesReuse && !isUsedInDraft && matchesNameRule && hasCid;
+          return (
+            passesReuse &&
+            !isUsedInDraft &&
+            !failsInclude &&
+            !hitsExclude &&
+            hasCid
+          );
         });
 
         const eligibleVideos = eligibleAssets.filter(
@@ -1470,10 +1499,24 @@ export class DraftAutomationScheduler {
         // Rule theo TỪNG slot: { VIDEO_1: 'hook', IMAGE_2: 'demo' }. Mỗi slot lấy
         // content có TÊN chứa dấu hiệu của slot; không có dấu hiệu thì lấy content
         // đủ điều kiện cũ nhất bất kỳ; không có content khớp thì để trống slot.
-        const slotRules =
+        // Rule hiệu lực của ô K = slotRulesV2[K] (Nâng cao: Bao gồm/Loại trừ/khoảng
+        // thời gian) nếu có, ngược lại slotRules[K] (string legacy 1 substring). Gộp
+        // mọi K xuất hiện ở 1 trong 2 nguồn — planContent hiểu cả 2 dạng. Parity mb-ads.
+        const slotRulesLegacy =
           automation.slotRules && typeof automation.slotRules === 'object'
             ? (automation.slotRules as Record<string, string>)
             : {};
+        const slotRulesV2 =
+          automation.slotRulesV2 && typeof automation.slotRulesV2 === 'object'
+            ? (automation.slotRulesV2 as Record<string, SlotRuleV2>)
+            : {};
+        const slotRules: Record<string, string | SlotRuleV2> = {};
+        for (const k of new Set([
+          ...Object.keys(slotRulesLegacy),
+          ...Object.keys(slotRulesV2),
+        ])) {
+          slotRules[k] = slotRulesV2[k] ?? slotRulesLegacy[k];
+        }
         // PLANNER THỐNG NHẤT (planContent thuần, mọi loại mẫu): mỗi Ô lấy content
         // ĐÚNG loại trước, thiếu VÀ ô cho phép cross-type (single/card/attachment) thì
         // lấy chéo. Ô dynamic (DOF) chỉ nhận đúng loại. pool đã orderBy createdAtLocal
@@ -1549,7 +1592,7 @@ export class DraftAutomationScheduler {
             cronExpression: automation.cronExpression,
             timezone: automation.timezone,
             runMode: automation.runMode,
-            assetCreatedAfter: assetCreatedAfter?.toISOString() || null,
+            assetCreatedAfter: createdRange.from?.toISOString() || null,
           },
           creator: {
             id: creator.id,
@@ -1604,10 +1647,9 @@ export class DraftAutomationScheduler {
             },
             {
               key: 'asset_creation_time',
-              label:
-                'Asset có creation_time nằm trong khoảng thời gian automation',
-              status: assetCreatedAfter ? 'passed' : 'not_configured',
-              from: assetCreatedAfter?.toISOString() || null,
+              label: 'Thời gian tạo content nằm trong khoảng cấu hình',
+              status: hasCreatedRange ? 'passed' : 'not_configured',
+              from: createdRange.from?.toISOString() || null,
               excluded: allFolderAssets.length - folderAssets.length,
             },
             {
@@ -1628,6 +1670,12 @@ export class DraftAutomationScheduler {
               status: automation.nameRule ? 'passed' : 'not_configured',
               rule: automation.nameRule || null,
               excluded: exclusionCounts.nameRuleMismatch,
+            },
+            {
+              key: 'name_rule_exclude',
+              label: 'Tên không dính từ khoá loại trừ',
+              status: nameFilter.exclude.length ? 'passed' : 'not_configured',
+              excluded: exclusionCounts.nameRuleExcluded,
             },
             {
               key: 'has_cid',
@@ -2007,11 +2055,20 @@ export class DraftAutomationScheduler {
       includeSubfolders:
         conditions.includeSubfolders === true ? true : undefined,
       nameRule: conditions.nameRule ?? undefined,
+      // Bộ lọc tên nâng cao (Bao gồm OR + Loại trừ). Non-null ⇒ engine BỎ QUA
+      // nameRule legacy; absent ⇒ fold nameRule CSV. Xem normalizeNameFilter.
+      nameFilter: conditions.nameFilter ?? undefined,
       videoCount: conditions.videoCount ?? undefined,
       imageCount: conditions.imageCount ?? undefined,
       assetCreatedAfter: conditions.assetCreatedAfter ?? undefined,
+      // Khoảng thời gian tạo content (mở 2 đầu). Non-null ⇒ engine BỎ QUA legacy
+      // assetCreatedAfter/assetCreationTimeFrom/creationTimeFrom. Xem normalizeCreatedRange.
+      assetCreatedRange: conditions.assetCreatedRange ?? undefined,
       // slotRules (nếu có) giữ nguyên khoá VIDEO_n / IMAGE_n mà engine đã hiểu.
       slotRules: conditions.slotRules ?? undefined,
+      // Rule per-ô NÂNG CAO (Bao gồm/Loại trừ/khoảng thời gian). Ưu tiên hơn
+      // slotRules legacy theo từng khoá khi merge trước planContent.
+      slotRulesV2: conditions.slotRulesV2 ?? undefined,
       cidRequired: conditions.cidRequired ?? undefined,
       assetReuseMode: conditions.assetReuseMode ?? undefined,
       publishMode: row.publishMode,
