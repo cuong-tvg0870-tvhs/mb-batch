@@ -2266,23 +2266,90 @@ export class DraftAutomationMetaPublisherService {
     }
 
     if (videoData) {
-      delete videoData.list_thumbnails;
-      delete videoData.selected_thumbnail_id;
-      delete videoData.preview_url;
-      delete videoData.source;
+      // Draft cũ nhét cả camelCase lẫn snake_case vào cùng object video_data.
+      // Coalesce về snake_case canonical trước khi xoá để không mất media.
+      // Đồng bộ mb-ads (meta.service.ts normalizeCreativeMediaForMeta).
+      if (!videoData.video_id && videoData.videoId)
+        videoData.video_id = videoData.videoId;
+      if (!videoData.image_hash && videoData.imageHash)
+        videoData.image_hash = videoData.imageHash;
+
+      // Xoá field UI-only / camelCase / non-Meta lọt vào video_data.
+      // LƯU Ý: image_url HỢP LỆ trong video_data (custom thumbnail URL) → GIỮ.
+      for (const key of [
+        'videoId',
+        'imageHash',
+        'thumbnail',
+        'previewUrl',
+        'preview_url',
+        'source',
+        'video_source',
+        'video_thumbnails',
+        'list_thumbnails',
+        'selected_thumbnail_id',
+      ]) {
+        delete videoData[key];
+      }
+
       if (videoData.image_id) {
         delete videoData.image_hash;
         delete videoData.image_id;
       }
     }
 
+    if (linkData) {
+      // Coalesce camelCase → snake_case canonical.
+      if (!linkData.image_hash && linkData.imageHash)
+        linkData.image_hash = linkData.imageHash;
+
+      // Xoá field UI-only / camelCase / non-Meta lọt vào link_data.
+      // LƯU Ý: image_url KHÔNG hợp lệ trong link_data (khác video_data) → XOÁ.
+      // GIỮ: child_attachments, image_hash, link, name, description, caption,
+      //      message, call_to_action, picture, page_welcome_message.
+      for (const key of [
+        'imageHash',
+        'thumbnail',
+        'thumbnail_url',
+        'previewUrl',
+        'preview_url',
+        'image_url',
+        'videoId',
+        'mediaType',
+        'source',
+        'video_source',
+        'video_thumbnails',
+        'list_thumbnails',
+        'selected_thumbnail_id',
+      ]) {
+        delete linkData[key];
+      }
+    }
+
     const childAttachments = linkData?.child_attachments;
     if (Array.isArray(childAttachments)) {
       for (const attachment of childAttachments) {
-        delete attachment.list_thumbnails;
-        delete attachment.selected_thumbnail_id;
-        delete attachment.preview_url;
-        delete attachment.source;
+        // Coalesce camelCase → snake_case canonical trước khi xoá.
+        if (!attachment.video_id && attachment.videoId)
+          attachment.video_id = attachment.videoId;
+        if (!attachment.image_hash && attachment.imageHash)
+          attachment.image_hash = attachment.imageHash;
+
+        // Xoá field UI-only / camelCase / non-Meta lọt vào child_attachments.
+        for (const key of [
+          'imageHash',
+          'videoId',
+          'thumbnail',
+          'previewUrl',
+          'preview_url',
+          'mediaType',
+          'source',
+          'video_source',
+          'video_thumbnails',
+          'list_thumbnails',
+          'selected_thumbnail_id',
+        ]) {
+          delete attachment[key];
+        }
 
         if (attachment.video_id) {
           attachment.image_url =
