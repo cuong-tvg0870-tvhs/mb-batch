@@ -13,6 +13,7 @@ import {
   computeTemplateSlots,
   coerceCardToType,
   planContent,
+  stampSlotToken,
 } from './draft-slot-count.util';
 
 const DEFAULT_AUTOMATION_CRON = '*/30 * * * *';
@@ -371,11 +372,13 @@ function replacePlaceholders(obj: any, videos: any[], images: any[]): any {
     if (matchedVideo || (obj.placeholder && finalMediaType === 'VIDEO')) {
       const video =
         matchedVideo ||
+        // Mảng fill có thể THƯA (ô trống giữ marker không có entry) → bỏ qua lỗ.
         videos.find(
           (item) =>
-            item.video_id === newObj.videoId ||
-            item.video_id === newObj.video_id ||
-            item.id === newObj.id,
+            item &&
+            (item.video_id === newObj.videoId ||
+              item.video_id === newObj.video_id ||
+              item.id === newObj.id),
         );
       if (video) {
         return enrichVideoPlaceholderObject(newObj, video);
@@ -384,11 +387,13 @@ function replacePlaceholders(obj: any, videos: any[], images: any[]): any {
     if (matchedImage || (obj.placeholder && finalMediaType === 'IMAGE')) {
       const img =
         matchedImage ||
+        // Mảng fill có thể THƯA (ô trống giữ marker không có entry) → bỏ qua lỗ.
         images.find(
           (item) =>
-            item.imageHash === newObj.imageHash ||
-            item.image_hash === newObj.image_hash ||
-            item.id === newObj.id,
+            item &&
+            (item.imageHash === newObj.imageHash ||
+              item.image_hash === newObj.image_hash ||
+              item.id === newObj.id),
         );
       if (img) {
         return enrichImagePlaceholderObject(newObj, img);
@@ -420,7 +425,7 @@ function assetMediaType(asset: any): 'VIDEO' | 'IMAGE' {
 
 // Chuyển đổi (morph) một creative đơn-media sang loại đích. Giữ message/CTA/link/
 // title/description + page-level fields (page_id, page_welcome_message, asset_feed_spec).
-// Xoá token/ID media cũ để autoAssignCreativeSlots gán lại token ĐÚNG loại. Trả về
+// Xoá token/ID media cũ để builder (stampSlotToken) đóng lại token ĐÚNG loại. Trả về
 // true nếu có đổi loại.
 function coerceCreativeToType(
   creative: any,
@@ -708,8 +713,6 @@ export class DraftAutomationScheduler {
     const {
       template,
       creator,
-      videos,
-      images,
       publishMode,
       requiredVideos,
       requiredImages,
@@ -723,16 +726,29 @@ export class DraftAutomationScheduler {
     // Deep clone the template campaign data to avoid mutating database/in-memory template object
     const clonedTemplateData = JSON.parse(JSON.stringify(templateData));
 
-    // Ô TRUNG TÍNH LOẠI: gán content theo kế hoạch, morph Ô sang đúng loại (ảnh↔video)
-    // TRƯỚC khi dò/gán slot — để autoAssign gán token đúng loại content. Duyệt CHUNG
-    // forEachMediaSlot (khớp ô 1-1 với planner). Ô thiếu asset (null) → KHÔNG morph,
-    // giữ nguyên loại + token gốc (giữ hợp đồng token leakage / placeholder).
-    const usePlan = Array.isArray(contentPlan);
-    if (usePlan) {
-      let k = 0;
-      for (const slot of forEachMediaSlot(clonedTemplateData)) {
-        const asset = contentPlan![k++];
-        if (!asset) continue;
+    // TOKEN MẪU HẾT VAI TRÒ GÁN CONTENT: định danh ô = VỊ TRÍ trong thứ tự duyệt cố
+    // định forEachMediaSlot; ô nào nhận content nào do contentPlan (planContent — đọc
+    // conditions.slotRules của bộ rule) quyết. Engine TỰ đánh token MỚI tuần tự theo
+    // loại cho từng ô rồi để replacePlaceholders thay như cũ — token sẵn có trong mẫu
+    // (kể cả trùng/rác do nhân bản ad đã slotify) bị GHI ĐÈ, không bao giờ được đọc
+    // lại → hết lớp bug "token trùng dồn CÙNG 1 asset vào nhiều ad". Ô thiếu content
+    // (null trong plan) nhận token + placeholder làm DẤU Ô TRỐNG — không có entry
+    // trong fill nên replacePlaceholders giữ nguyên → publish gate EMPTY_SLOT và lượt
+    // gom sau vẫn hoạt động; SỐ trên dấu này không consumer nào đọc (chỉ regex
+    // VIDEO_\d+/placeholder=true).
+    if (!Array.isArray(contentPlan)) {
+      throw new Error(
+        'buildSubstitutedValues cần contentPlan (kế hoạch content theo từng ô) — nhánh gán theo token của mẫu đã bị loại bỏ.',
+      );
+    }
+    const fillVideos: any[] = [];
+    const fillImages: any[] = [];
+    let videoOrdinal = 0;
+    let imageOrdinal = 0;
+    let planCursor = 0;
+    for (const slot of forEachMediaSlot(clonedTemplateData)) {
+      const asset = contentPlan[planCursor++];
+      if (asset) {
         const targetType = assetMediaType(asset);
         if (slot.kind === 'single') {
           coerceCreativeToType(slot.ref, targetType);
@@ -740,274 +756,22 @@ export class DraftAutomationScheduler {
           coerceCardToType(slot.ref, targetType, asset, slot.kind);
         }
         // Ô dynamic (DOF): crossTypeAllowed=false → planner chỉ gán đúng loại → không morph.
-        slot.ref.__assignedAsset = asset;
-      }
-    }
-
-    // Find all explicitly pre-selected slots in the template
-    const usedVideos = new Set<number>();
-    const usedImages = new Set<number>();
-    findExistingSlots(clonedTemplateData, usedVideos, usedImages);
-
-    // Build lists of available slot indexes within the required range
-    const availableVideoIndexes: number[] = [];
-    for (let i = 1; i <= requiredVideos; i++) {
-      if (!usedVideos.has(i)) {
-        availableVideoIndexes.push(i);
-      }
-    }
-
-    const availableImageIndexes: number[] = [];
-    for (let i = 1; i <= requiredImages; i++) {
-      if (!usedImages.has(i)) {
-        availableImageIndexes.push(i);
-      }
-    }
-
-    let nextVideoPtr = 0;
-    const getNextVideoSlot = (): string => {
-      if (requiredVideos <= 0) return '';
-      if (availableVideoIndexes.length > 0) {
-        const idx =
-          availableVideoIndexes[nextVideoPtr % availableVideoIndexes.length];
-        nextVideoPtr++;
-        return `VIDEO_${idx}`;
+        if (targetType === 'VIDEO') {
+          videoOrdinal += 1;
+          stampSlotToken(slot.ref, slot.kind, 'VIDEO', `VIDEO_${videoOrdinal}`);
+          fillVideos[videoOrdinal - 1] = asset;
+        } else {
+          imageOrdinal += 1;
+          stampSlotToken(slot.ref, slot.kind, 'IMAGE', `IMAGE_${imageOrdinal}`);
+          fillImages[imageOrdinal - 1] = asset;
+        }
+      } else if (slot.currentType === 'VIDEO') {
+        videoOrdinal += 1;
+        stampSlotToken(slot.ref, slot.kind, 'VIDEO', `VIDEO_${videoOrdinal}`);
       } else {
-        const idx = (nextVideoPtr % requiredVideos) + 1;
-        nextVideoPtr++;
-        return `VIDEO_${idx}`;
+        imageOrdinal += 1;
+        stampSlotToken(slot.ref, slot.kind, 'IMAGE', `IMAGE_${imageOrdinal}`);
       }
-    };
-
-    let nextImagePtr = 0;
-    const getNextImageSlot = (): string => {
-      if (requiredImages <= 0) return '';
-      if (availableImageIndexes.length > 0) {
-        const idx =
-          availableImageIndexes[nextImagePtr % availableImageIndexes.length];
-        nextImagePtr++;
-        return `IMAGE_${idx}`;
-      } else {
-        const idx = (nextImagePtr % requiredImages) + 1;
-        nextImagePtr++;
-        return `IMAGE_${idx}`;
-      }
-    };
-
-    const isSlotPlaceholder = (val: any): boolean => {
-      if (typeof val !== 'string') return false;
-      return /^VIDEO_\d+$/.test(val) || /^IMAGE_\d+$/.test(val);
-    };
-
-    const autoAssignCreativeSlots = (creative: any) => {
-      if (!creative) return;
-      // Ad "Ghim nội dung" (PINNED_POST): giữ NGUYÊN media/bài viết gốc — không biến thành
-      // ô slot rồi bị thay bằng content khác. Parity với mb-ads autoAssignCreativeSlots +
-      // buildCreativeData (nhánh POST_ID) để pin có hiệu lực ở cron automation.
-      if (creative.pinnedPost === true) return;
-
-      const mediaType = inferMediaType(creative);
-      const spec = creative.object_story_spec || {};
-
-      if (mediaType === 'VIDEO') {
-        const hasVideoSlot = isSlotPlaceholder(
-          creative.videoId || creative.video_id || spec.video_data?.video_id,
-        );
-        if (!hasVideoSlot) {
-          const slot = getNextVideoSlot();
-          if (slot) {
-            // Clean format
-            creative.videoId = slot;
-            creative.video_id = slot;
-            creative.imageHash = slot;
-            creative.image_hash = slot;
-            creative.selected_thumbnail_id = slot;
-
-            // Raw Meta spec format support
-            if (spec.video_data) {
-              spec.video_data.video_id = slot;
-              spec.video_data.image_id = slot;
-              spec.video_data.image_hash = slot;
-            }
-
-            creative.placeholder = true;
-          }
-        }
-      } else if (mediaType === 'IMAGE') {
-        const hasImageSlot = isSlotPlaceholder(
-          creative.imageHash ||
-            creative.image_hash ||
-            spec.link_data?.image_hash,
-        );
-        if (!hasImageSlot) {
-          const slot = getNextImageSlot();
-          if (slot) {
-            // Clean format
-            creative.imageHash = slot;
-            creative.image_hash = slot;
-
-            // Raw Meta spec format support
-            if (spec.link_data) {
-              spec.link_data.image_hash = slot;
-            }
-
-            creative.placeholder = true;
-          }
-        }
-      } else if (mediaType === 'CAROUSEL') {
-        // Clean format cards
-        if (Array.isArray(creative.carouselCards)) {
-          for (const card of creative.carouselCards) {
-            const cardType = String(card.mediaType).toUpperCase();
-            if (cardType === 'VIDEO') {
-              const hasVideoSlot = isSlotPlaceholder(card.videoId);
-              if (!hasVideoSlot) {
-                const slot = getNextVideoSlot();
-                if (slot) {
-                  card.videoId = slot;
-                  card.imageHash = slot;
-                  card.selected_thumbnail_id = slot;
-                  card.placeholder = true;
-                }
-              }
-            } else {
-              const hasImageSlot = isSlotPlaceholder(card.imageHash);
-              if (!hasImageSlot) {
-                const slot = getNextImageSlot();
-                if (slot) {
-                  card.imageHash = slot;
-                  card.placeholder = true;
-                }
-              }
-            }
-          }
-        }
-
-        // Raw Meta format attachments
-        if (Array.isArray(spec.link_data?.child_attachments)) {
-          for (const attachment of spec.link_data.child_attachments) {
-            if (attachment.video_id || attachment.videoId) {
-              const hasVideoSlot = isSlotPlaceholder(
-                attachment.video_id || attachment.videoId,
-              );
-              if (!hasVideoSlot) {
-                const slot = getNextVideoSlot();
-                if (slot) {
-                  attachment.video_id = slot;
-                  attachment.videoId = slot;
-                  attachment.image_hash = slot;
-                  attachment.imageHash = slot;
-                  attachment.placeholder = true;
-                }
-              }
-            } else {
-              const hasImageSlot = isSlotPlaceholder(
-                attachment.image_hash || attachment.imageHash,
-              );
-              if (!hasImageSlot) {
-                const slot = getNextImageSlot();
-                if (slot) {
-                  attachment.image_hash = slot;
-                  attachment.imageHash = slot;
-                  attachment.placeholder = true;
-                }
-              }
-            }
-          }
-        }
-      }
-
-      if (Array.isArray(creative.dynamicAssets)) {
-        for (const asset of creative.dynamicAssets) {
-          const assetType = String(asset.type).toUpperCase();
-          if (assetType === 'VIDEO') {
-            const hasVideoSlot = isSlotPlaceholder(
-              asset.videoId || asset.video_id,
-            );
-            if (!hasVideoSlot) {
-              const slot = getNextVideoSlot();
-              if (slot) {
-                asset.videoId = slot;
-                asset.video_id = slot;
-                asset.imageHash = slot;
-                asset.image_hash = slot;
-                asset.placeholder = true;
-              }
-            }
-          } else if (assetType === 'IMAGE') {
-            const hasImageSlot = isSlotPlaceholder(
-              asset.imageHash || asset.image_hash,
-            );
-            if (!hasImageSlot) {
-              const slot = getNextImageSlot();
-              if (slot) {
-                asset.imageHash = slot;
-                asset.image_hash = slot;
-                asset.placeholder = true;
-              }
-            }
-          }
-        }
-      }
-    };
-
-    if (Array.isArray(clonedTemplateData.ad_sets)) {
-      for (const adset of clonedTemplateData.ad_sets) {
-        if (Array.isArray(adset.ads)) {
-          for (const ad of adset.ads) {
-            if (ad.creative) {
-              autoAssignCreativeSlots(ad.creative);
-            }
-          }
-        }
-      }
-    }
-
-    // Ô TRUNG TÍNH LOẠI: sau khi autoAssign gán token đúng loại cho các ô đã morph,
-    // dựng lại mảng fill video[]/image[] theo CHỈ SỐ token (VIDEO_n→videos[n-1]). Đọc
-    // token THẬT trên từng ô (single/card/attachment/dynamic) qua forEachMediaSlot —
-    // nhờ đọc token thật (không giả định thứ tự) nên bền với việc đánh số lại lúc morph.
-    // automation_used_assets chỉ gồm asset THỰC SỰ đặt vào ô (idx>0) → không đốt content.
-    let fillVideos = videos;
-    let fillImages = images;
-    if (usePlan) {
-      const slotIndexOf = (v: any): number => {
-        const m = /^(?:VIDEO|IMAGE)_(\d+)$/.exec(String(v || ''));
-        return m ? parseInt(m[1], 10) : 0;
-      };
-      const tokenOfSlot = (slot: any, ref: any, mt: 'VIDEO' | 'IMAGE'): any => {
-        const spec = ref.object_story_spec || {};
-        if (slot.kind === 'single') {
-          return mt === 'VIDEO'
-            ? ref.videoId || ref.video_id || spec.video_data?.video_id
-            : ref.imageHash || ref.image_hash || spec.link_data?.image_hash;
-        }
-        if (slot.kind === 'attachment') {
-          return mt === 'VIDEO'
-            ? ref.video_id || ref.videoId
-            : ref.image_hash || ref.imageHash;
-        }
-        // card / dynamic (định dạng clean: videoId/imageHash).
-        return mt === 'VIDEO'
-          ? ref.videoId || ref.video_id
-          : ref.imageHash || ref.image_hash;
-      };
-      const vArr: any[] = [];
-      const iArr: any[] = [];
-      for (const slot of forEachMediaSlot(clonedTemplateData)) {
-        const ref = slot.ref;
-        const asset = ref.__assignedAsset;
-        delete ref.__assignedAsset;
-        if (!asset) continue;
-        const mt = assetMediaType(asset);
-        const idx = slotIndexOf(tokenOfSlot(slot, ref, mt));
-        if (idx > 0) {
-          if (mt === 'VIDEO') vArr[idx - 1] = asset;
-          else iArr[idx - 1] = asset;
-        }
-      }
-      fillVideos = vArr;
-      fillImages = iArr;
     }
 
     const substitutedValues = replacePlaceholders(
@@ -1412,11 +1176,17 @@ export class DraftAutomationScheduler {
             createdById: true,
             automationTemplateId: true,
             data: true,
+            // id của ad_sets/ads BẮT BUỘC phải select (mirror mb-ads): inProgressDraft
+            // lấy từ list này được truyền làm existingDraft cho saveAutomationDraft —
+            // thiếu id thì adSetIds=[undefined].filter(Boolean)=[] → deleteMany con cũ
+            // thành no-op → nháp gom dở bị NHÂN ĐÔI ad set mỗi lượt chạy.
             ad_sets: {
               select: {
+                id: true,
                 data: true,
                 ads: {
                   select: {
+                    id: true,
                     data: true,
                   },
                 },

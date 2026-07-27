@@ -14,7 +14,7 @@
 //   - card        : carouselCards[i] (định dạng clean).
 //   - attachment  : object_story_spec.link_data.child_attachments[i] (raw Meta).
 //   - dynamic     : dynamicAssets[i] (DOF).
-// Thứ tự duyệt CỐ ĐỊNH (khớp autoAssignCreativeSlots): ad_sets[].ads[].creative →
+// Thứ tự duyệt CỐ ĐỊNH (builder đóng token theo đúng thứ tự này): ad_sets[].ads[].creative →
 // single → carouselCards theo index → child_attachments → dynamicAssets. Nhờ thứ tự
 // bất biến này mà planner và builder luôn khớp ô 1-1.
 //
@@ -134,7 +134,7 @@ export function forEachMediaSlot(templateData: any): MediaSlot[] {
     for (const ad of ads) {
       const c = ad?.creative;
       // Ad "ghim bài" (pinnedPost) giữ media gốc, KHÔNG lấp bằng slot → bỏ qua cả
-      // creative (parity autoAssignCreativeSlots / slotifyTemplateCreatives).
+      // creative (parity slotifyTemplateCreatives; builder không đóng token ô pinned).
       if (!c || c.pinnedPost === true) continue;
       const mt = inferCreativeMediaType(c);
       const spec = c.object_story_spec || {};
@@ -289,7 +289,7 @@ export function planContent(
 // được gán KHÁC loại với ô. Chỉ morph khi currentType !== loại asset. Giữ text/CTA/
 // link/title/description của ô. Trả về true nếu có đổi loại.
 //
-// LƯU Ý: autoAssignCreativeSlots (bên builder) chạy SAU và sẽ GHI ĐÈ videoId/imageHash
+// LƯU Ý: stampSlotToken (bên builder) chạy SAU và sẽ GHI ĐÈ videoId/imageHash
 // của ô đã morph bằng token VIDEO_n/IMAGE_n (vì giá trị thật không phải placeholder),
 // rồi replacePlaceholders lấp lại giá trị thật. Việc set giá trị asset ở đây là để ô
 // tự nhất quán (test được đứng một mình) + phòng khi cơ chế token không áp dụng.
@@ -359,4 +359,69 @@ export function coerceCardToType(
     delete card.selected_thumbnail_id;
   }
   return true;
+}
+
+// Đóng token placeholder lên MỘT Ô theo (kind, loại) — ghi đúng bộ field mà engine
+// dựng-nháp trước đây ghi trong autoAssignCreativeSlots, kèm placeholder=true. Là
+// bước "hệ thống TỰ đánh số vị trí": engine gọi với token tuần tự theo loại và GHI ĐÈ
+// mọi token/ID sẵn có trên ô (token lưu trong mẫu không còn là đầu vào gán content).
+// Ô chưa có content cũng được đóng token+placeholder làm DẤU Ô TRỐNG — kể cả khi mẫu
+// chưa slotify (trước đây ô như vậy giữ media cũ của mẫu và publish nhầm media rác).
+export function stampSlotToken(
+  ref: any,
+  kind: SlotKind,
+  mediaType: SlotMediaType,
+  token: string,
+): void {
+  if (!ref || !token) return;
+  if (kind === 'single') {
+    if (mediaType === 'VIDEO') {
+      ref.videoId = token;
+      ref.video_id = token;
+      ref.imageHash = token;
+      ref.image_hash = token;
+      ref.selected_thumbnail_id = token;
+      if (ref.object_story_spec?.video_data) {
+        ref.object_story_spec.video_data.video_id = token;
+        ref.object_story_spec.video_data.image_id = token;
+        ref.object_story_spec.video_data.image_hash = token;
+      }
+    } else {
+      ref.imageHash = token;
+      ref.image_hash = token;
+      if (ref.object_story_spec?.link_data) {
+        ref.object_story_spec.link_data.image_hash = token;
+      }
+    }
+  } else if (kind === 'card') {
+    if (mediaType === 'VIDEO') {
+      ref.videoId = token;
+      ref.imageHash = token;
+      ref.selected_thumbnail_id = token;
+    } else {
+      ref.imageHash = token;
+    }
+  } else if (kind === 'attachment') {
+    if (mediaType === 'VIDEO') {
+      ref.video_id = token;
+      ref.videoId = token;
+      ref.image_hash = token;
+      ref.imageHash = token;
+    } else {
+      ref.image_hash = token;
+      ref.imageHash = token;
+    }
+  } else {
+    // dynamic
+    if (mediaType === 'VIDEO') {
+      ref.videoId = token;
+      ref.video_id = token;
+      ref.imageHash = token;
+      ref.image_hash = token;
+    } else {
+      ref.imageHash = token;
+      ref.image_hash = token;
+    }
+  }
+  ref.placeholder = true;
 }
