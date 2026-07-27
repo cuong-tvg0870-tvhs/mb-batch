@@ -71,6 +71,17 @@ const AT = {
     'offsite_conversion.fb_pixel_initiate_checkout',
     'onsite_web_initiate_checkout',
   ],
+  view_content: [
+    'view_content',
+    'omni_view_content',
+    'offsite_conversion.fb_pixel_view_content',
+    'onsite_web_view_content',
+  ],
+  add_payment_info: [
+    'add_payment_info',
+    'omni_add_payment_info',
+    'offsite_conversion.fb_pixel_add_payment_info',
+  ],
   complete_registration: [
     'complete_registration',
     'omni_complete_registration',
@@ -104,12 +115,20 @@ const SPECS: Record<string, Spec> = {
   leads: { t: 'count', at: AT.lead },
   website_leads: { t: 'count', at: AT.lead },
   website_leads_value: { t: 'value', at: AT.lead },
+  // --- Xem nội dung ---
+  website_content_views: { t: 'count', at: AT.view_content },
   // --- Bắt đầu thanh toán ---
   checkouts_initiated: { t: 'count', at: AT.initiate_checkout },
+  // website_checkouts_initiated dùng CHUNG chuỗi AT.initiate_checkout (giống cách
+  // website_adds_to_cart dùng chung AT.add_to_cart): phần tử ĐẦU khớp quyết định số.
+  website_checkouts_initiated: { t: 'count', at: AT.initiate_checkout },
   checkouts_initiated_value: { t: 'value', at: AT.initiate_checkout },
   cost_per_checkout_initiated: { t: 'cost', at: AT.initiate_checkout },
+  // --- Thêm thông tin thanh toán ---
+  website_adds_of_payment_info: { t: 'count', at: AT.add_payment_info },
   // --- Đăng ký ---
   registrations_completed: { t: 'count', at: AT.complete_registration },
+  registrations_completed_value: { t: 'value', at: AT.complete_registration },
   website_registrations_completed: { t: 'count', at: AT.complete_registration },
   cost_per_registration_completed: { t: 'cost', at: AT.complete_registration },
   cost_per_website_registration_completed: { t: 'cost', at: AT.complete_registration },
@@ -305,6 +324,13 @@ export function resolveMetric(
   if (key === 'cost_per_website_purchase' || key === 'cost_per_unique_website_purchase') {
     return pickCost(insight, WEB_PURCHASE_AT);
   }
+  if (key === 'average_website_purchase_value') {
+    // Giá trị mua TB trên website = Website purchase value / Website purchases.
+    // count<=0 → null (KHÔNG coi chia-0 là hợp lệ — giống pickCost).
+    const value = pickAction(insight?.action_values, WEB_PURCHASE_AT);
+    const count = pickAction(insight?.actions, WEB_PURCHASE_AT);
+    return value != null && count != null && count > 0 ? value / count : null;
+  }
   if (key === 'cost_per_result') {
     // spend / results (goal-aware) — kết quả có thể là đơn/lead/tin nhắn tuỳ mục tiêu.
     const spend = toNumber(insight?.spend);
@@ -357,6 +383,10 @@ export const BUDGET_SCHEDULE_SUPPORTED_METRICS: readonly string[] = [
   'cost_per_purchase',
   'cost_per_website_purchase',
   'cost_per_unique_website_purchase',
+  'average_website_purchase_value',
+  // cost_per_result: resolver ĐÃ có nhánh riêng từ trước nhưng bị SÓT khỏi danh sách
+  // này → trước đây không dùng được làm base custom metric dù vẫn chấm được. Vá parity.
+  'cost_per_result',
   'daily_budget',
   'lifetime_budget',
   'hours_since_creation',
