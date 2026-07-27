@@ -3259,10 +3259,18 @@ enum AutomationRuleRunStatus {
   // HEALTHY skip, not a failure: the next tick retries. Running fewer times but
   // succeeding beats running every tick and failing on #4.
   SKIPPED_RATE_LIMIT
-  // The job sat in the queue past its usefulness (backlog) and only reached a
-  // worker long after `scheduledFor`. Evaluating it would spend Meta calls to
-  // act on stale intent, so it is dropped instead — visibly, not silently.
+  // LEGACY — no longer written. Used to mean "the job reached a worker too long
+  // after `scheduledFor`". That measured the wrong axis: a late run still reads
+  // insights at its OWN run instant, so lateness never made a decision stale.
+  // Retained so historical rows keep rendering correctly.
   SKIPPED_STALE
+  // A NEWER tick of the same (rule, account) already owns this pair, so this
+  // slot's work is redundant and is coalesced into the newer one. Also covers
+  // "the previous run still holds the run lock" — same meaning: someone else is
+  // already doing exactly this work. NOT a failure and NOT stale data; the newer
+  // run fetches fresh insights. Hidden from the user's rule log (they only care
+  // about runs that HAPPENED, as in Bir.ch); visible in Meta Debug.
+  SKIPPED_SUPERSEDED
   // Meta could not serve this run's data right now (a transient #1/#2/5xx, a
   // throttle, or our own pacing) and the run is WAITING to be retried inside the
   // same schedule slot. NOT terminal and NOT a failure: the same run row is put
