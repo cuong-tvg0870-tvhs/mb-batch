@@ -4014,6 +4014,16 @@ model AutoLaunchRule {
   // Chỉ khi tự đăng: trần ngân sách mỗi chiến dịch (VND, major units).
   budgetCapPerCampaign Int?
 
+  // CHỐNG SPAM PER-CREATIVE: mỗi bài sau khi được scale phải "nghỉ" đủ số phút này
+  // (tính từ lần dùng gần nhất còn hiệu lực — camp còn sống) mới được chọn lại.
+  // 1440 = 1 ngày (mặc định: mỗi bài tối đa 1 lần/ngày). NULL = KHÔNG BAO GIỜ dùng
+  // lại (hành vi cũ trước 2026-07-28). Migration backfill 1440 cho rule hiện có —
+  // chủ đích đổi hành vi: bài từng dùng được scale lại sau 1 ngày thay vì bị loại vĩnh viễn.
+  reuseCooldownMinutes Int? @default(1440)
+  // Trần TỔNG số lần 1 bài được quy tắc này scale (đếm theo camp còn sống — xoá camp
+  // thì hoàn lượt, khớp semantics ledger usedCreatives). NULL = không giới hạn.
+  maxUsePerCreative    Int?
+
   // Email best-effort về cho CHỦ quy tắc (resolve User.email từ createdById).
   // Tách 2 cờ để user chọn đúng tín hiệu cần theo dõi; mặc định tắt để
   // rule cũ không tự phát sinh mail sau deploy.
