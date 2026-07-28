@@ -2965,6 +2965,10 @@ model AutomationCategory {
   createdById String?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
+  // Ai sửa gần nhất. Scalar-only (không @relation sang User) — giữ đúng quy ước
+  // của createdById ở 3 model automation; tên người được resolve bằng truy vấn phụ.
+  // Backfill = createdById nên row cũ không null nếu createdById khác null.
+  updatedById String?
   deletedAt   DateTime?
 
   @@index([createdById, position])
@@ -2995,6 +2999,7 @@ model AutomationFolder {
   createdById String?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
+  updatedById String?
   deletedAt   DateTime?
 
   @@index([categoryId, parentId, position])
@@ -3042,6 +3047,7 @@ model AutomationRule {
   createdById String?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
+  updatedById String?
   deletedAt   DateTime?
 
   @@index([categoryId, folderId, position])
