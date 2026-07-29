@@ -30,6 +30,11 @@ import {
   dedupeKey,
   isRuleDue,
 } from './campaign-rule-schedule.util';
+import {
+  normalizeTimeframe,
+  timeframeToMetaParams,
+  type MetaInsightTimeParams,
+} from './campaign-rule-timeframe';
 
 /** Include đệ quy cây group điều kiện tới độ sâu cố định (Prisma cần depth hữu hạn). */
 function groupInclude(depth: number): any {
@@ -59,7 +64,8 @@ interface RunnerEntity {
  * - Chỉ đọc/ghi bảng campaign_rule* + đọc Campaign/AdSet/Account. KHÔNG đụng Automation*.
  * - Chỉ action BUDGET_SCHEDULE_BUMP; chỉ level CAMPAIGN + ADSET. Các trường hợp khác → SKIPPED/log.
  * - Idempotent qua dedupeKey (unique trên CampaignRuleRun).
- * - Metric LIVE fetch trực tiếp từ Meta (date_preset=today), KHÔNG đọc insight cache DB.
+ * - Metric LIVE fetch trực tiếp từ Meta THEO timeframe của điều kiện (mặc định today;
+ *   xem campaign-rule-timeframe.ts), KHÔNG đọc insight cache DB.
  */
 @Injectable()
 export class CampaignRuleRunnerService {
@@ -432,6 +438,8 @@ export class CampaignRuleRunnerService {
       }
     }
 
+    // Khung HÔM NAY là "chủ đạo": guard (sàn ROAS), snapshot và path ROLLING đều đọc
+    // trên khung này. Fetch today TRƯỚC — lỗi today → GIỮ hành vi cũ: mọi task FAILED.
     let insight: any;
     try {
       insight = await this.fetchLiveInsight(level, entity.id);
@@ -458,7 +466,30 @@ export class CampaignRuleRunnerService {
       return { matched: 0, errors };
     }
 
-    const ctx: EvalContext = { insight, entity, now, timezone, customMetrics };
+    // Fetch MỖI timeframe DISTINCT còn lại (ngoài today) 1 lần → map để điều kiện đọc
+    // đúng khung của nó. QUYẾT ĐỊNH (mục 6 của spec): CÔ LẬP LỖI theo khung — khung nào
+    // fetch lỗi thì CHỈ các điều kiện dùng khung đó coi như KHÔNG khớp (ghi lý do vào
+    // explain), KHÔNG đánh FAILED toàn entity (chọn phương án cô lập vì rẻ & chính xác
+    // hơn: today vẫn chạy bình thường). Riêng lỗi today ở trên vẫn FAILED toàn entity.
+    const { byTimeframe, errorsByTimeframe } =
+      await this.fetchInsightsByTimeframe(
+        rule,
+        level,
+        entity.id,
+        insight,
+        now,
+        timezone,
+      );
+
+    const ctx: EvalContext = {
+      insight,
+      insightByTimeframe: byTimeframe,
+      insightErrors: errorsByTimeframe,
+      entity,
+      now,
+      timezone,
+      customMetrics,
+    };
     let matched = 0;
     let errors = 0;
 
@@ -491,6 +522,8 @@ export class CampaignRuleRunnerService {
           level,
           entity,
           insight,
+          insightByTimeframe: byTimeframe,
+          insightErrors: errorsByTimeframe,
           timezone,
           now,
           customMetrics,
@@ -621,12 +654,26 @@ export class CampaignRuleRunnerService {
     level: 'CAMPAIGN' | 'ADSET';
     entity: RunnerEntity;
     insight: any;
+    // Map insight theo timeframe (đọc điều kiện theo đúng khung); insight = today.
+    insightByTimeframe?: Map<string, any>;
+    insightErrors?: Map<string, string>;
     timezone: string;
     now: Date;
     customMetrics?: Map<string, CustomMetricEvalDef>;
   }): Promise<{ matched: number; errors: number }> {
-    const { runId, task, rule, level, entity, insight, timezone, now, customMetrics } =
-      args;
+    const {
+      runId,
+      task,
+      rule,
+      level,
+      entity,
+      insight,
+      insightByTimeframe,
+      insightErrors,
+      timezone,
+      now,
+      customMetrics,
+    } = args;
     const rolling = (task.params?.rolling ?? {}) as RollingConfig;
     const nowUnix = Math.floor(now.getTime() / 1000);
 
@@ -641,6 +688,8 @@ export class CampaignRuleRunnerService {
 
     const ctx: EvalContext = {
       insight,
+      insightByTimeframe,
+      insightErrors,
       entity: liveEntity,
       now,
       timezone,
@@ -817,26 +866,106 @@ export class CampaignRuleRunnerService {
     return new Set(items.flatMap((i) => i.metaBudgetScheduleIds).map(String));
   }
 
-  /** Fetch insight LIVE (date_preset=today) cho campaign/adset. Trả object phẳng (rỗng nếu không có). */
+  /** Fetch insight LIVE khung HÔM NAY cho campaign/adset. Trả object phẳng (rỗng nếu không có). */
   private async fetchLiveInsight(
     level: 'CAMPAIGN' | 'ADSET',
     entityId: string,
   ): Promise<any> {
-    const params = { date_preset: 'today' };
+    return this.fetchInsightWithParams(
+      level,
+      entityId,
+      { date_preset: 'today' },
+      'today',
+    );
+  }
+
+  /**
+   * Gom mọi timeframe DISTINCT xuất hiện trong điều kiện của mọi task (đã normalize):
+   *   - VALUE : params.timeframe
+   *   - METRIC: params.leftTimeframe + params.rightTimeframe
+   * LUÔN gồm 'today' (guard/snapshot/rolling đọc trên khung hôm nay). TIME/RANKING không
+   * có metric-timeframe → bỏ qua.
+   */
+  private collectTimeframes(rule: any): Set<string> {
+    const set = new Set<string>(['today']);
+    const walk = (group: any) => {
+      if (!group) return;
+      for (const c of group.conditions || []) {
+        const p = c?.params || {};
+        if (c?.compareType === 'METRIC') {
+          set.add(normalizeTimeframe(p.leftTimeframe));
+          set.add(normalizeTimeframe(p.rightTimeframe));
+        } else if (c?.compareType === 'VALUE') {
+          set.add(normalizeTimeframe(p.timeframe));
+        }
+      }
+      for (const g of group.childGroups || []) walk(g);
+    };
+    for (const task of rule.tasks || []) walk(task.rootGroup);
+    return set;
+  }
+
+  /**
+   * Fetch insight cho mỗi timeframe distinct (ngoài today — đã fetch sẵn ở caller). Trả
+   * map { timeframe → insight | null } (+ map lỗi cho EXPLAIN). CÔ LẬP LỖI theo khung:
+   * khung nào lỗi → value=null (điều kiện dùng khung đó tự KHÔNG khớp), KHÔNG ném lên
+   * để giữ các khung/điều kiện khác chạy bình thường.
+   */
+  private async fetchInsightsByTimeframe(
+    rule: any,
+    level: 'CAMPAIGN' | 'ADSET',
+    entityId: string,
+    todayInsight: any,
+    now: Date,
+    timezone: string,
+  ): Promise<{
+    byTimeframe: Map<string, any>;
+    errorsByTimeframe: Map<string, string>;
+  }> {
+    const byTimeframe = new Map<string, any>([['today', todayInsight]]);
+    const errorsByTimeframe = new Map<string, string>();
+
+    for (const tf of this.collectTimeframes(rule)) {
+      if (tf === 'today') continue; // đã có sẵn
+      try {
+        const params = timeframeToMetaParams(tf, now, timezone);
+        byTimeframe.set(
+          tf,
+          await this.fetchInsightWithParams(level, entityId, params, tf),
+        );
+      } catch (error) {
+        const msg = parseMetaError(error).message;
+        this.logger.warn(
+          `Lấy insight ${level} ${entityId} khung ${tf} lỗi: ${msg} → điều kiện dùng khung này KHÔNG khớp (cô lập, các khung khác vẫn chạy).`,
+        );
+        byTimeframe.set(tf, null);
+        errorsByTimeframe.set(tf, msg);
+      }
+    }
+    return { byTimeframe, errorsByTimeframe };
+  }
+
+  /** Lõi fetch insight LIVE với tham số thời gian bất kỳ. Trả object phẳng (rỗng nếu không có). */
+  private async fetchInsightWithParams(
+    level: 'CAMPAIGN' | 'ADSET',
+    entityId: string,
+    timeParams: MetaInsightTimeParams,
+    tfLabel: string,
+  ): Promise<any> {
     // Meta hay chập chờn "no response was received" (timeout mạng) → retry NGẮN 2 lần
     // (3s, 6s) cho lỗi transient. getInsights là đọc-only nên retry an toàn; backoff
-    // ngắn để không kéo dài tick runner (mỗi entity 1 lần/tick).
+    // ngắn để không kéo dài tick runner (mỗi entity 1 lần/khung/tick).
     const rows = await executeMetaApiWithRetry(
       () =>
         level === 'CAMPAIGN'
-          ? new Campaign(entityId).getInsights(INSIGHT_FIELDS, params)
-          : new AdSet(entityId).getInsights(INSIGHT_FIELDS, params),
+          ? new Campaign(entityId).getInsights(INSIGHT_FIELDS, timeParams)
+          : new AdSet(entityId).getInsights(INSIGHT_FIELDS, timeParams),
       {
         maxRetries: 2,
         networkSleepMs: 3000,
         initialSleepMs: 3000,
         logger: this.logger,
-        context: { scope: 'campaign-rule insight', level, entityId },
+        context: { scope: 'campaign-rule insight', level, entityId, timeframe: tfLabel },
       },
     );
     const first = Array.isArray(rows) ? rows[0] : rows?.[0];

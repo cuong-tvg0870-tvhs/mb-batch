@@ -2,22 +2,62 @@ import { DEFAULT_TIMEZONE } from './campaign-rule-runner.constants';
 import type { CustomMetricEvalDef } from './campaign-rule-custom-metric';
 import { resolveMetric } from './campaign-rule-metric.resolver';
 import { zonedTimeParts } from './campaign-rule-schedule.util';
+import { normalizeTimeframe, timeframeLabelVi } from './campaign-rule-timeframe';
 
 /**
  * Bộ đánh giá cây điều kiện của một task.
  *
- * ctx.insight = insight LIVE today của entity đang xét; ctx.entity = bản ghi DB
- * (Campaign/AdSet) để lấy ngân sách. ctx.now/ctx.timezone dùng cho điều kiện TIME.
+ * ctx.insight = insight LIVE khung HÔM NAY (giữ cho guard/snapshot/rolling); mỗi
+ * điều kiện tự đọc số trên insight của ĐÚNG khung nó khai (ctx.insightByTimeframe).
+ * ctx.entity = bản ghi DB (Campaign/AdSet) để lấy ngân sách. ctx.now/ctx.timezone
+ * dùng cho điều kiện TIME.
  */
 
 export interface EvalContext {
+  // Insight khung HÔM NAY (back-compat: guard/snapshot/rolling luôn đọc trên khung này).
   insight: any;
+  // Map khung-thời-gian(đã normalize) → insight row của khung đó. Điều kiện VALUE đọc
+  // trên timeframe của nó; METRIC đọc left/right theo leftTimeframe/rightTimeframe.
+  // Thiếu map/thiếu key → fallback ctx.insight (today) → back-compat khi caller cũ chỉ
+  // truyền `insight`. Value = null nghĩa là fetch khung đó LỖI (điều kiện coi như không
+  // khớp — resolveMetric trên null trả null nhờ optional-chaining).
+  insightByTimeframe?: Map<string, any>;
+  // Khung fetch LỖI → msg (chỉ để EXPLAIN ghi lý do; không ảnh hưởng logic matched).
+  insightErrors?: Map<string, string>;
   entity: any;
   now: Date;
   timezone: string;
   // Registry custom metric đã prefetch & lọc context='BUDGET_SCHEDULE' (theo id ref
   // `custom_metric:<id>` lowercase). Optional: rule không dùng custom → undefined.
   customMetrics?: Map<string, CustomMetricEvalDef>;
+}
+
+/**
+ * Chọn insight row theo timeframe của điều kiện. Có map + có key → dùng row đó (kể cả
+ * null khi khung lỗi); còn lại fallback ctx.insight (today) để giữ hành vi cũ với caller
+ * chỉ truyền `insight`. Metric của custom formula cũng resolve trên CHÍNH row này (vì
+ * resolveMetric luồn cùng insight xuống base) → mọi vế của 1 điều kiện đồng khung.
+ */
+function insightForTimeframe(ctx: EvalContext, rawTf: unknown): any {
+  const tf = normalizeTimeframe(rawTf);
+  if (ctx.insightByTimeframe && ctx.insightByTimeframe.has(tf)) {
+    return ctx.insightByTimeframe.get(tf);
+  }
+  return ctx.insight;
+}
+
+/** Lý do EXPLAIN khi khung nào đó fetch lỗi (dò theo thứ tự các timeframe truyền vào). */
+function timeframeErrorNote(
+  ctx: EvalContext,
+  ...rawTfs: unknown[]
+): string | undefined {
+  if (!ctx.insightErrors) return undefined;
+  for (const raw of rawTfs) {
+    const tf = normalizeTimeframe(raw);
+    const msg = ctx.insightErrors.get(tf);
+    if (msg) return `Lỗi lấy số liệu khung ${timeframeLabelVi(tf)}: ${msg}`;
+  }
+  return undefined;
 }
 
 type Operator =
@@ -75,8 +115,9 @@ export function evaluateGroup(group: any, ctx: EvalContext): boolean {
 
 /**
  * Đánh giá một điều kiện lá theo compareType.
- * - VALUE: so metric với hằng số amount.
- * - METRIC: so leftMetric với (multiplier ?? 1) * rightMetric. (BỎ QUA timeframe cho v1.)
+ * - VALUE: so metric (đọc trên khung params.timeframe) với hằng số amount.
+ * - METRIC: so leftMetric[leftTimeframe] với (multiplier ?? 1) * rightMetric[rightTimeframe]
+ *   — mỗi vế đọc trên insight của ĐÚNG khung nó khai (mở khoá so sánh trend, vd today vs last_3d).
  * - TIME: giờ hiện tại theo timezone của điều kiện (fallback ctx.timezone → default).
  * - RANKING: chưa hỗ trợ → false (không âm thầm pass).
  */
@@ -86,7 +127,8 @@ export function evaluateCondition(cond: any, ctx: EvalContext): boolean {
 
   switch (cond.compareType) {
     case 'VALUE': {
-      const v = resolveMetric(p.metric, ctx.insight, ctx.entity, ctx.customMetrics);
+      const insight = insightForTimeframe(ctx, p.timeframe);
+      const v = resolveMetric(p.metric, insight, ctx.entity, ctx.customMetrics);
       if (v == null) return false;
       const amount = Number(p.amount);
       if (!Number.isFinite(amount)) return false;
@@ -94,8 +136,10 @@ export function evaluateCondition(cond: any, ctx: EvalContext): boolean {
     }
 
     case 'METRIC': {
-      const left = resolveMetric(p.leftMetric, ctx.insight, ctx.entity, ctx.customMetrics);
-      const right = resolveMetric(p.rightMetric, ctx.insight, ctx.entity, ctx.customMetrics);
+      const leftInsight = insightForTimeframe(ctx, p.leftTimeframe);
+      const rightInsight = insightForTimeframe(ctx, p.rightTimeframe);
+      const left = resolveMetric(p.leftMetric, leftInsight, ctx.entity, ctx.customMetrics);
+      const right = resolveMetric(p.rightMetric, rightInsight, ctx.entity, ctx.customMetrics);
       if (left == null || right == null) return false;
       const multiplier =
         p.multiplier == null || !Number.isFinite(Number(p.multiplier))
@@ -199,6 +243,22 @@ const METRIC_LABEL: Record<string, string> = {
 const metricLabel = (key?: string | null): string =>
   (key && METRIC_LABEL[String(key).toLowerCase()]) || String(key ?? '—');
 
+/**
+ * Nhãn metric KÈM khung thời gian khi khung ≠ today. Ví dụ 'Chi tiêu hôm nay' + khung
+ * last_7d → 'Chi tiêu (7 ngày qua)'. Bỏ hậu tố " hôm nay" của nhãn gốc để không lặp
+ * ("hôm nay (7 ngày qua)"). Khung today → giữ NGUYÊN nhãn gốc (back-compat format log).
+ */
+const metricLabelWithTimeframe = (
+  key: string | null | undefined,
+  rawTf: unknown,
+): string => {
+  const base = metricLabel(key);
+  const tf = normalizeTimeframe(rawTf);
+  if (tf === 'today') return base;
+  const stripped = base.replace(/\s*hôm nay$/i, '');
+  return `${stripped} (${timeframeLabelVi(tf)})`;
+};
+
 const OP_SYMBOL: Record<string, string> = {
   GREATER_THAN: '>',
   LESS_THAN: '<',
@@ -251,39 +311,47 @@ export function explainCondition(cond: any, ctx: EvalContext): ConditionExplain 
 
   switch (cond?.compareType) {
     case 'VALUE': {
-      const v = resolveMetric(p.metric, ctx.insight, ctx.entity, ctx.customMetrics);
+      const insight = insightForTimeframe(ctx, p.timeframe);
+      const v = resolveMetric(p.metric, insight, ctx.entity, ctx.customMetrics);
       const amount = Number(p.amount);
       const okNums = v != null && Number.isFinite(amount);
+      const errNote = timeframeErrorNote(ctx, p.timeframe);
       return base({
-        label: metricLabel(p.metric),
+        label: metricLabelWithTimeframe(p.metric, p.timeframe),
         actual: v,
         actualText: v == null ? 'không đo được' : fmtNum(v),
         operator: opSymbol(p.operator),
         threshold: Number.isFinite(amount) ? fmtNum(amount) : '—',
         matched: okNums ? compare(v as number, p.operator, amount) : false,
-        note: v == null ? 'Chưa có/không đọc được số liệu hôm nay' : undefined,
+        note:
+          errNote ??
+          (v == null ? 'Chưa có/không đọc được số liệu hôm nay' : undefined),
       });
     }
     case 'METRIC': {
-      const left = resolveMetric(p.leftMetric, ctx.insight, ctx.entity, ctx.customMetrics);
-      const right = resolveMetric(p.rightMetric, ctx.insight, ctx.entity, ctx.customMetrics);
+      const leftInsight = insightForTimeframe(ctx, p.leftTimeframe);
+      const rightInsight = insightForTimeframe(ctx, p.rightTimeframe);
+      const left = resolveMetric(p.leftMetric, leftInsight, ctx.entity, ctx.customMetrics);
+      const right = resolveMetric(p.rightMetric, rightInsight, ctx.entity, ctx.customMetrics);
       const mult =
         p.multiplier == null || !Number.isFinite(Number(p.multiplier))
           ? 1
           : Number(p.multiplier);
       const rhs = right == null ? null : mult * right;
       const ok = left != null && rhs != null;
+      const rightLabel = metricLabelWithTimeframe(p.rightMetric, p.rightTimeframe);
+      const errNote = timeframeErrorNote(ctx, p.leftTimeframe, p.rightTimeframe);
       return base({
-        label: metricLabel(p.leftMetric),
+        label: metricLabelWithTimeframe(p.leftMetric, p.leftTimeframe),
         actual: left,
         actualText: left == null ? 'không đo được' : fmtNum(left),
         operator: opSymbol(p.operator),
         threshold:
           rhs == null
-            ? `${mult !== 1 ? `${fmtNum(mult)}× ` : ''}${metricLabel(p.rightMetric)}`
-            : `${fmtNum(rhs)} (${mult !== 1 ? `${fmtNum(mult)}× ` : ''}${metricLabel(p.rightMetric)})`,
+            ? `${mult !== 1 ? `${fmtNum(mult)}× ` : ''}${rightLabel}`
+            : `${fmtNum(rhs)} (${mult !== 1 ? `${fmtNum(mult)}× ` : ''}${rightLabel})`,
         matched: ok ? compare(left as number, p.operator, rhs as number) : false,
-        note: !ok ? 'Chưa có/không đọc được số liệu để so sánh' : undefined,
+        note: errNote ?? (!ok ? 'Chưa có/không đọc được số liệu để so sánh' : undefined),
       });
     }
     case 'TIME': {

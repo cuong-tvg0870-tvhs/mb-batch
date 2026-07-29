@@ -6,7 +6,9 @@ import {
 } from './campaign-rule-custom-metric';
 
 /**
- * Phân giải một metricKey → số, từ insight LIVE (date_preset=today) + entity DB.
+ * Phân giải một metricKey → số, từ 1 insight LIVE + entity DB. Resolver TIMEFRAME-AGNOSTIC:
+ * đọc trên đúng object insight được truyền vào (caller chọn khung theo params.timeframe;
+ * xem campaign-rule-timeframe.ts). Các chú thích "today" bên dưới là ví dụ khung mặc định.
  *
  * Nguồn dữ liệu (tất cả đã có sẵn trong 1 lần getInsights, KHÔNG thêm request):
  * - Số trực tiếp (field số của insight): spend/impressions/reach/frequency/clicks/
