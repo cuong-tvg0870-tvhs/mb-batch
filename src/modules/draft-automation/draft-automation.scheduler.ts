@@ -536,6 +536,50 @@ export interface AutomationRunResult {
 export class DraftAutomationScheduler {
   private readonly logger = new Logger(DraftAutomationScheduler.name);
 
+  // Số lần SKIPPED LIÊN TIẾP với lý do "chưa có asset đủ điều kiện" trong khi bản
+  // nháp còn DỞ DANG thì tự TẠM DỪNG automation (cảnh báo kẹt). Pool asset trong
+  // thư mục cạn mà mẫu vẫn cần thêm ô → mọi lượt sau đều skip vô ích và bản nháp
+  // kẹt vĩnh viễn (publish sẽ đẩy token IMAGE_n lên Meta gây lỗi). Đếm bằng chính
+  // DraftAutomationHistory gần nhất — KHÔNG thêm cột/counter/migration.
+  private static readonly STUCK_SKIP_PAUSE_THRESHOLD = 3;
+
+  // Dấu hiệu nhận biết một lượt SKIPPED thuộc nhóm "kẹt vì thiếu asset đủ điều kiện"
+  // (khớp cả 2 câu ở nhánh có/không có nháp đang xử lý). Dùng để đếm chuỗi skip.
+  private isStuckNoAssetsReason(reason?: string | null): boolean {
+    const r = String(reason || '');
+    return (
+      r.startsWith('Chưa có asset mới đủ điều kiện') ||
+      r.startsWith('Chưa có asset đủ điều kiện')
+    );
+  }
+
+  // Đếm số lượt SKIPPED-vì-thiếu-asset LIÊN TIẾP gần nhất của một DraftAutomation
+  // (chỉ tính chuỗi ở đầu lịch sử: gặp lượt KHÔNG-phải-stuck thì dừng đếm). Trả về
+  // số lượt "kẹt" đã ghi TRƯỚC lượt hiện tại. Lỗi query → 0 (fail-open, không PAUSE oan).
+  private async countConsecutiveStuckSkips(
+    draftAutomationId: string,
+  ): Promise<number> {
+    try {
+      const recent = await this.prisma.draftAutomationHistory.findMany({
+        where: { draftAutomationId },
+        orderBy: { createdAt: 'desc' },
+        select: { status: true, reason: true },
+        take: DraftAutomationScheduler.STUCK_SKIP_PAUSE_THRESHOLD,
+      });
+      let count = 0;
+      for (const row of recent) {
+        if (row.status === 'SKIPPED' && this.isStuckNoAssetsReason(row.reason)) {
+          count += 1;
+        } else {
+          break;
+        }
+      }
+      return count;
+    } catch {
+      return 0;
+    }
+  }
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly metaPublisher: DraftAutomationMetaPublisherService,
@@ -1694,6 +1738,81 @@ export class DraftAutomationScheduler {
           this.logger.log(
             `No new eligible assets for template "${template.name}". Skipping this run.`,
           );
+          // CẢNH BÁO KẸT + AUTO-PAUSE: khi bản nháp đang DỞ DANG (inProgressDraft,
+          // isComplete=false) mà đã SKIPPED-vì-thiếu-asset liên tiếp đủ ngưỡng thì
+          // tạm dừng automation với lý do actionable — thay vì skip vô hạn mỗi 30'
+          // (pool thư mục cạn) và để nháp kẹt token IMAGE_n. Chỉ nhánh mới (có
+          // draftAutomationId) mới có row để tạm dừng. Lượt hiện tại tính là 1 →
+          // priorConsecutive + 1 >= ngưỡng ⇒ PAUSE.
+          if (override?.draftAutomationId && inProgressDraft) {
+            const priorStuckSkips = await this.countConsecutiveStuckSkips(
+              override.draftAutomationId,
+            );
+            if (
+              priorStuckSkips + 1 >=
+              DraftAutomationScheduler.STUCK_SKIP_PAUSE_THRESHOLD
+            ) {
+              const filledContents = filledPlan.length;
+              const stuckPauseReason =
+                `Tạm dừng: thư mục chỉ còn ${eligibleAssets.length}/${allFolderAssets.length} ` +
+                `content đủ điều kiện, bản nháp đang dở dang (${filledContents}/${totalSlots} nội dung). ` +
+                `Hãy bổ sung content vào thư mục hoặc nới điều kiện lọc ` +
+                `(tên/khoảng ngày tạo/nguồn nội dung) rồi bật lại.`;
+              this.logger.warn(
+                `DraftAutomation ${override.draftAutomationId} (mẫu "${template.name}") tạm dừng: SKIPPED ${priorStuckSkips + 1} lần liên tiếp vì thiếu asset, nháp dở ${filledContents}/${totalSlots}.`,
+              );
+              await this.prisma.draftAutomation
+                .update({
+                  where: { id: override.draftAutomationId },
+                  data: {
+                    status: 'PAUSED',
+                    nextRunAt: null,
+                    runLockedAt: null,
+                    lastRunAt: startedAt,
+                    lastRunStatus: 'SKIPPED',
+                    lastRunReason: stuckPauseReason.slice(0, 1000),
+                  },
+                })
+                .catch(() => undefined);
+              await this.recordAutomationHistory({
+                template,
+                startedAt,
+                status: 'SKIPPED',
+                reason: stuckPauseReason,
+                automation,
+                creator,
+                folderId: automation.folderId,
+                publishRequested,
+                publishMode,
+                draftAutomationId: override?.draftAutomationId,
+                conditionSummary,
+                steps: [
+                  {
+                    key: 'scan_assets',
+                    label: 'Quét và lọc creative asset',
+                    status: 'success',
+                  },
+                  {
+                    key: 'stuck_pause',
+                    label: 'Tạm dừng vì bản nháp kẹt (thiếu asset đủ điều kiện)',
+                    status: 'skipped',
+                    reason: stuckPauseReason,
+                    eligibleAssets: eligibleAssets.length,
+                    folderAssets: allFolderAssets.length,
+                    filledContents,
+                    totalSlots,
+                  },
+                ],
+              });
+              lastResult = {
+                status: 'SKIPPED',
+                reason: stuckPauseReason,
+                isComplete: false,
+                published: false,
+              };
+              continue;
+            }
+          }
           const noAssetsReason = inProgressDraft
             ? 'Chưa có asset mới đủ điều kiện cho bản nháp tự động hóa đang xử lý.'
             : 'Chưa có asset đủ điều kiện để bắt đầu bản nháp tự động hóa.';
@@ -1853,14 +1972,28 @@ export class DraftAutomationScheduler {
 
         // Trạng thái lượt chạy (COMPLETED / nextRunAt / lastRunStatus…) được ghi vào
         // row DraftAutomation ở DraftAutomationEntityScheduler.runOne / runNow (mb-ads).
+        // Reason cho lượt tạo/cập nhật nháp DỞ DANG (isComplete=false): nêu rõ đã
+        // lấp bao nhiêu/tổng ô, còn thiếu mấy ô, và còn bao nhiêu asset đủ điều kiện
+        // chưa dùng — để người vận hành thấy ngay từ lần đầu là pool sắp cạn (nếu
+        // "còn lại 0" thì các lượt sau sẽ skip → tiến tới auto-PAUSE).
+        const filledContents = filledPlan.length;
+        const missingSlots = Math.max(0, totalSlots - filledContents);
+        const remainingEligible = Math.max(
+          0,
+          eligibleAssets.length - filledContents,
+        );
+        const partialReason =
+          (inProgressDraft
+            ? 'Đã cập nhật bản nháp chiến dịch tự động'
+            : 'Đã tạo bản nháp chiến dịch tự động') +
+          ` (mới lấp ${filledContents}/${totalSlots} nội dung, còn thiếu ${missingSlots} ô; ` +
+          `còn ${remainingEligible} content đủ điều kiện trong thư mục).`;
         const successReason =
           publishRequested && isComplete
             ? 'Đã tạo bản nháp chiến dịch tự động và đăng lên Meta.'
             : isComplete
               ? 'Bản nháp chiến dịch tự động đã hoàn tất.'
-              : inProgressDraft
-                ? 'Đã cập nhật bản nháp chiến dịch tự động với asset mới đủ điều kiện.'
-                : 'Đã tạo bản nháp chiến dịch tự động với một phần asset đủ điều kiện.';
+              : partialReason;
 
         await this.recordAutomationHistory({
           template,
