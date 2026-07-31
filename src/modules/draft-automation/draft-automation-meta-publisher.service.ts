@@ -965,6 +965,37 @@ export class DraftAutomationMetaPublisherService {
     delete metaPayload.product_catalog_id;
     delete metaPayload.bid_amount;
 
+    // BACKSTOP lịch chạy quá khứ cấp CHIẾN DỊCH (CBO lifetime). Meta dùng start_time/
+    // stop_time ở campaign khi ngân sách trọn đời nằm ở đây; mốc bê từ mẫu có thể đã QUA →
+    // Meta từ chối. Song song với ép mốc ở saveAutomationDraft (C6). Parity với backstop ad
+    // set (fix a65bd18): parse epoch/ISO an toàn, lifetime bắt buộc có stop_time tương lai.
+    {
+      const nowUnix = Math.floor(Date.now() / 1000);
+      const toUnix = (v: any): number | null => {
+        if (v === null || v === undefined || v === '') return null;
+        if (typeof v === 'number' && Number.isFinite(v)) return Math.floor(v);
+        const s = String(v).trim();
+        if (/^\d+$/.test(s)) return parseInt(s, 10);
+        const ms = Date.parse(s);
+        return Number.isNaN(ms) ? null : Math.floor(ms / 1000);
+      };
+      const startUnix = toUnix(metaPayload.start_time);
+      if (startUnix !== null && startUnix <= nowUnix) {
+        // start_time quá khứ → bỏ trống để Meta bắt đầu ngay lúc publish.
+        delete metaPayload.start_time;
+      }
+      const stopUnix = toUnix(metaPayload.stop_time);
+      if (stopUnix !== null && stopUnix <= nowUnix) {
+        if (!metaPayload.lifetime_budget) {
+          // Không phải CBO lifetime → stop_time thừa/quá khứ, bỏ để camp chạy liên tục.
+          delete metaPayload.stop_time;
+        } else {
+          // CBO lifetime BẮT BUỘC có stop_time tương lai → dời +30 ngày kể từ bây giờ.
+          metaPayload.stop_time = String(nowUnix + 30 * 24 * 60 * 60);
+        }
+      }
+    }
+
     return (
       CleanObjectOrArray({
         ...metaPayload,
@@ -1026,6 +1057,41 @@ export class DraftAutomationMetaPublisherService {
     // Loại audience_controls.min_age khi Advantage+ bật — Meta từ chối. Độ tuổi
     // tối thiểu đi qua targeting.age_min. Giữ đồng bộ với mb-ads.
     metaPayload.audience_controls = this.sanitizeAudienceControls(metaPayload);
+
+    // PORT từ mb-ads meta.service.ts buildAdSetCreatePayload (fix a65bd18) — GIỮ PARITY.
+    // BACKSTOP lịch chạy quá khứ: nháp clone từ mẫu (Test content tự động) có thể bê
+    // start_time/end_time đã QUA từ lúc tạo mẫu → Meta từ chối cả cụm ad set ("Ngày kết
+    // thúc… phải ở trong tương lai"). end_time/start_time có thể là epoch (string/number,
+    // GIÂY) hoặc ISO string → parse an toàn cả hai.
+    {
+      const nowUnix = Math.floor(Date.now() / 1000);
+      const toUnix = (v: any): number | null => {
+        if (v === null || v === undefined || v === '') return null;
+        if (typeof v === 'number' && Number.isFinite(v)) return Math.floor(v);
+        const s = String(v).trim();
+        if (/^\d+$/.test(s)) return parseInt(s, 10);
+        const ms = Date.parse(s);
+        return Number.isNaN(ms) ? null : Math.floor(ms / 1000);
+      };
+      const startUnix = toUnix(metaPayload.start_time);
+      if (startUnix !== null && startUnix <= nowUnix) {
+        // start_time quá khứ → bỏ trống để Meta hiểu "chạy ngay".
+        delete metaPayload.start_time;
+      }
+      const endUnix = toUnix(metaPayload.end_time);
+      if (endUnix !== null && endUnix <= nowUnix) {
+        if (!metaPayload.lifetime_budget) {
+          delete metaPayload.end_time;
+          if ('has_end_date' in metaPayload) delete metaPayload.has_end_date;
+        } else {
+          // lifetime_budget BẮT BUỘC có end_time trong tương lai → không thể xoá (Meta từ
+          // chối "end_time is required for lifetime budget"). Dời +30 ngày kể từ bây giờ,
+          // khớp helper sanitizeAdSetScheduleFromTemplate.
+          metaPayload.end_time = String(nowUnix + 30 * 24 * 60 * 60);
+          metaPayload.has_end_date = true;
+        }
+      }
+    }
 
     return (
       CleanObjectOrArray({

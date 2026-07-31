@@ -16,6 +16,12 @@ import {
 } from './name-term-match';
 import { normalizePendingAutomation } from './pending-automation.util';
 import {
+  resolveAdSchedule,
+  sanitizeAdSetScheduleFromTemplate,
+  AdScheduleConfig,
+  ResolvedAdSchedule,
+} from './ad-schedule.util';
+import {
   forEachMediaSlot,
   computeTemplateSlots,
   coerceCardToType,
@@ -936,9 +942,58 @@ export class DraftAutomationScheduler {
     template: any;
     creator: any;
     publishMode: 'DRAFT_ONLY' | 'PUBLISH_IMMEDIATELY';
+    // Lịch chạy QC user chọn (conditions.adSchedule). Absent ⇒ chỉ dọn mốc quá khứ từ mẫu.
+    adSchedule?: AdScheduleConfig | null;
   }) {
-    const { existingDraft, substitutedValues, template, creator, publishMode } =
-      input;
+    const {
+      existingDraft,
+      substitutedValues,
+      template,
+      creator,
+      publishMode,
+      adSchedule,
+    } = input;
+
+    // NGOÀI transaction: resolve lịch chạy QC theo MÚI GIỜ TKQC (Meta chạy theo tz tài
+    // khoản). Chỉ lookup timezone khi user thực sự cấu hình adSchedule — automation cũ
+    // (không adSchedule) đi nhánh sanitize dọn-mốc-quá-khứ, không cần tz.
+    let adSched: ResolvedAdSchedule | null = null;
+    if (adSchedule) {
+      const account = substitutedValues.ad_account_id
+        ? await this.prisma.account.findUnique({
+            where: { id: substitutedValues.ad_account_id },
+            select: { timezone: true },
+          })
+        : null;
+      adSched = resolveAdSchedule(
+        adSchedule,
+        Math.floor(Date.now() / 1000),
+        account?.timezone,
+      );
+    }
+
+    // Dọn LỊCH CHẠY của MỌI ad set clone từ mẫu TRƯỚC khi ghi DB. Chạy cho cả automation
+    // KHÔNG có adSchedule (truyền null) để dọn mốc start_time/end_time quá khứ mẫu bê theo
+    // — port fix a65bd18 từ mb-ads. Sanitize TRƯỚC khi tạo campaign để bản ad_sets lưu trong
+    // SystemCampaign.data (substitutedValues) KHỚP với bản lưu trong từng SystemAdSet.data
+    // (cùng tham chiếu object). Xem sanitizeAdSetScheduleFromTemplate.
+    for (const adset of substitutedValues.ad_sets || []) {
+      sanitizeAdSetScheduleFromTemplate(adset, adSched);
+    }
+
+    // CBO lifetime (ngân sách trọn đời ở cấp CHIẾN DỊCH): Meta bắt buộc stop_time trong
+    // tương lai. Ép stop_time/start_time cấp camp theo lịch đã hẹn (belt-and-suspenders,
+    // song song với backstop ở publisher buildCampaignCreatePayload).
+    const campaignCfg = substitutedValues.campaign;
+    if (
+      campaignCfg &&
+      Number(campaignCfg.lifetime_budget) > 0 &&
+      adSched?.endUnix
+    ) {
+      campaignCfg.stop_time = String(adSched.endUnix);
+      if (adSched.startUnix)
+        campaignCfg.start_time = String(adSched.startUnix);
+    }
 
     return this.prisma.$transaction(async (tx) => {
       const campaignData = {
@@ -1896,6 +1951,8 @@ export class DraftAutomationScheduler {
           template,
           creator,
           publishMode,
+          // Lịch chạy QC user chọn; absent ⇒ chỉ dọn mốc quá khứ từ mẫu.
+          adSchedule: (automation?.adSchedule as AdScheduleConfig) ?? null,
         });
 
         let publishResult: any;
@@ -2202,6 +2259,9 @@ export class DraftAutomationScheduler {
       // Rule per-ô NÂNG CAO (Bao gồm/Loại trừ/khoảng thời gian). Ưu tiên hơn
       // slotRules legacy theo từng khoá khi merge trước planContent.
       slotRulesV2: conditions.slotRulesV2 ?? undefined,
+      // Lịch chạy QC của camp dựng ra (Meta start_time/end_time cấp NHÓM). Absent ⇒
+      // giữ hành vi cũ (chỉ dọn mốc quá khứ). Xem resolveAdSchedule / AdScheduleConfig.
+      adSchedule: conditions.adSchedule ?? undefined,
       cidRequired: conditions.cidRequired ?? undefined,
       assetReuseMode: conditions.assetReuseMode ?? undefined,
       publishMode: row.publishMode,
