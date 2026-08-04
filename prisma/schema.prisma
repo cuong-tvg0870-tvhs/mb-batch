@@ -2102,6 +2102,16 @@ model SystemAdSet {
   // Additive/nullable → an toàn, adset cũ mặc định NULL = luồng thường / nhóm mới.
   appendTargetAdSetId String?
 
+  // THỨ TỰ HIỂN THỊ trong bản nháp (0-based, theo đúng mảng FE gửi lúc Lưu). TRƯỚC ĐÂY
+  // draft builder đọc nhóm/quảng cáo bằng `orderBy createdAt asc`, nhưng `createdAt` mặc
+  // định = CURRENT_TIMESTAMP vốn CỐ ĐỊNH theo TRANSACTION trong Postgres → mọi nhóm/QC tạo
+  // trong CÙNG một lần Lưu có createdAt Y HỆT nhau → ORDER BY hoà hoàn toàn, không tiebreak,
+  // thứ tự trả về phụ thuộc thứ tự vật lý heap và ĐỔI sau mỗi UPDATE (MVCC ghi tuple mới ở
+  // cuối heap). FE lại gán id server vào card THEO INDEX mảng → lệch id → lỗi Meta gắn sai
+  // quảng cáo, và tệ hơn là meta_id gắn sai (publish sau sửa đè QC live khác).
+  // Additive + @default(0): hàng cũ = 0, order fallback (createdAt, id) giữ nguyên hành vi.
+  position Int @default(0)
+
   status Status @default(DRAFT)
 
   createdById String?
@@ -2126,6 +2136,7 @@ model SystemAdSet {
 
   @@index([status])
   @@index([createdById, createdAt(sort: Desc)])
+  @@index([campaignId, position])
 }
 
 model SystemAd {
@@ -2146,6 +2157,10 @@ model SystemAd {
   // thu nhỏ tối đa khả năng nhận nhầm entity người khác tạo trùng tên sau đó.
   metaCreateStartedAt DateTime?
 
+  // THỨ TỰ HIỂN THỊ quảng cáo trong nhóm (0-based, theo mảng FE gửi lúc Lưu).
+  // Xem giải thích đầy đủ ở SystemAdSet.position.
+  position Int @default(0)
+
   status Status @default(DRAFT)
 
   createdById String?
@@ -2162,6 +2177,7 @@ model SystemAd {
 
   @@index([status])
   @@index([createdById, createdAt(sort: Desc)])
+  @@index([adSetId, position])
 }
 
 model SystemCreative {

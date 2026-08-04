@@ -741,10 +741,18 @@ export class DraftAutomationScheduler {
         appendOnly: false,
       },
       include: {
+        // orderBy position trước: createdAt cố định theo transaction trong Postgres
+        // nên không dùng làm thứ tự tất định được.
         ad_sets: {
-          orderBy: { createdAt: 'asc' },
+          orderBy: [{ position: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
           include: {
-            ads: { orderBy: { createdAt: 'asc' } },
+            ads: {
+              orderBy: [
+                { position: 'asc' },
+                { createdAt: 'asc' },
+                { id: 'asc' },
+              ],
+            },
           },
         },
       },
@@ -1059,7 +1067,9 @@ export class DraftAutomationScheduler {
         }
       }
 
-      for (const adset of substitutedValues.ad_sets || []) {
+      for (const [adSetIndex, adset] of (
+        substitutedValues.ad_sets || []
+      ).entries()) {
         const createdAdSet = await tx.systemAdSet.create({
           data: {
             accountId: substitutedValues.ad_account_id,
@@ -1077,17 +1087,23 @@ export class DraftAutomationScheduler {
               'undefined',
             adset_name: adset.name,
             adset_optimization: adset.optimization_goal,
+            // position: thứ tự nhóm trong mảng ad_sets — createdAt cố định theo
+            // transaction trong Postgres nên không dùng làm thứ tự được.
+            position: adSetIndex,
           },
         });
 
         if (Array.isArray(adset.ads)) {
           await tx.systemAd.createMany({
-            data: adset.ads.map((ad: any) => ({
+            data: adset.ads.map((ad: any, adIndex: number) => ({
               accountId: substitutedValues.ad_account_id,
               createdById: creator.id,
               data: ad,
               status: Status.DRAFT,
               adSetId: createdAdSet.id,
+              // position: thứ tự QC trong nhóm — createdAt cố định theo transaction
+              // trong Postgres nên không dùng làm thứ tự được.
+              position: adIndex,
             })),
           });
         }

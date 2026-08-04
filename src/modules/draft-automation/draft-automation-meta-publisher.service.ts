@@ -79,10 +79,18 @@ export class DraftAutomationMetaPublisherService {
     const campaignSystem = await this.prisma.systemCampaign.findUnique({
       where: { id: systemCampaignId },
       include: {
+        // orderBy position trước: createdAt cố định theo transaction trong Postgres
+        // nên không dùng làm thứ tự tất định được (parity mb-ads).
         ad_sets: {
-          orderBy: { createdAt: 'asc' },
+          orderBy: [{ position: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
           include: {
-            ads: { orderBy: { createdAt: 'asc' } },
+            ads: {
+              orderBy: [
+                { position: 'asc' },
+                { createdAt: 'asc' },
+                { id: 'asc' },
+              ],
+            },
           },
         },
       },
@@ -471,12 +479,19 @@ export class DraftAutomationMetaPublisherService {
           });
           for (const adSystem of adSetSystem.ads) {
             adResults.push({
+              // adSystemId: khoá CHUẨN mb-ads/frontend đọc để thắp cảnh báo đúng ad.
+              // systemAdId: giữ lại chỉ để tương thích ngược, sẽ bỏ sau.
+              adSystemId: adSystem.id,
               systemAdId: adSystem.id,
               adName: (adSystem.data as any)?.name || adSystem.id,
               adSetName,
               status: 'failed',
               error: `Nhóm quảng cáo lỗi: ${friendlyMsg}`,
               classification,
+              // scope='adset': lỗi nằm ở NHÓM quảng cáo, không phải từng mẫu. UI gom
+              // theo adSetId để hiện 1 lần ở cấp nhóm (parity mb-ads).
+              scope: 'adset',
+              adSetId: adSetSystem.id,
             });
           }
           adSetsProcessed += 1;
@@ -560,6 +575,9 @@ export class DraftAutomationMetaPublisherService {
 
             adsProcessed += 1;
             adResults.push({
+              // adSystemId: khoá CHUẨN mb-ads/frontend đọc; systemAdId giữ lại để
+              // tương thích ngược, sẽ bỏ sau.
+              adSystemId: adSystem.id,
               systemAdId: adSystem.id,
               metaId: adMetaId,
               creativeId,
@@ -582,6 +600,9 @@ export class DraftAutomationMetaPublisherService {
             this.logger.error(`[createAd] ad ${adSystem.id} lỗi:`, metaError);
             adsProcessed += 1;
             adResults.push({
+              // adSystemId: khoá CHUẨN mb-ads/frontend đọc; systemAdId giữ lại để
+              // tương thích ngược, sẽ bỏ sau.
+              adSystemId: adSystem.id,
               systemAdId: adSystem.id,
               adName,
               adSetName,
