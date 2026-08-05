@@ -3,6 +3,7 @@ import {
   computeTemplateSlots,
   coerceCardToType,
   planContent,
+  pruneEmptySlots,
   matchesSlotRule,
   type SlotRuleV2,
 } from './draft-slot-count.util';
@@ -413,5 +414,110 @@ describe('planContent — slotRules trộn string | SlotRuleV2', () => {
   it('slotRules = null ⇒ không lọc, hành vi như không có rule', () => {
     const plan = planContent([V('VIDEO')], [vid('v1')], [], null);
     expect((plan[0] as any).id).toBe('v1');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pruneEmptySlots — "CHẠY NGAY": cắt ô không lấp được khỏi nháp.
+// ---------------------------------------------------------------------------
+describe('pruneEmptySlots — cắt ô trống cho lượt chạy ngay', () => {
+  // Mô phỏng đúng cách builder gom emptyRefs: duyệt ô theo forEachMediaSlot rồi lấy
+  // ref của những ô mà contentPlan[i] == null.
+  const emptyRefsOf = (data: any, plan: any[]) => {
+    const refs = new Set<any>();
+    forEachMediaSlot(data).forEach((slot, i) => {
+      if (!plan[i] && slot.ref) refs.add(slot.ref);
+    });
+    return refs;
+  };
+
+  it('mẫu 5 ô đơn, chỉ 2 ô có content ⇒ nháp còn đúng 2 ad', () => {
+    const data = tpl(
+      { videoId: 'a' },
+      { imageHash: 'b' },
+      { videoId: 'c' },
+      { imageHash: 'd' },
+      { videoId: 'e' },
+    );
+    const plan = [vid('v1'), img('i1'), null, null, null];
+    const stats = pruneEmptySlots(data, emptyRefsOf(data, plan));
+
+    expect(data.ad_sets[0].ads).toHaveLength(2);
+    expect(stats).toMatchObject({
+      prunedSlots: 3,
+      prunedAds: 3,
+      prunedAdSets: 0,
+      remainingSlots: 2,
+      thinCarousels: 0,
+    });
+  });
+
+  it('carousel 3 card lấp 2 ⇒ giữ ad, chỉ xoá card trống', () => {
+    const data = tpl({
+      carouselCards: [
+        { mediaType: 'image', imageHash: 'a' },
+        { mediaType: 'image', imageHash: 'b' },
+        { mediaType: 'video', videoId: 'c' },
+      ],
+    });
+    const plan = [img('i1'), img('i2'), null];
+    const stats = pruneEmptySlots(data, emptyRefsOf(data, plan));
+
+    expect(data.ad_sets[0].ads).toHaveLength(1);
+    expect(data.ad_sets[0].ads[0].creative.carouselCards).toHaveLength(2);
+    expect(stats).toMatchObject({ prunedSlots: 1, prunedAds: 0, thinCarousels: 0 });
+  });
+
+  it('carousel còn đúng 1 card ⇒ vẫn giữ nhưng báo thinCarousels (Meta cần ≥2)', () => {
+    const data = tpl({
+      carouselCards: [
+        { mediaType: 'image', imageHash: 'a' },
+        { mediaType: 'image', imageHash: 'b' },
+      ],
+    });
+    const stats = pruneEmptySlots(data, emptyRefsOf(data, [img('i1'), null]));
+
+    expect(data.ad_sets[0].ads[0].creative.carouselCards).toHaveLength(1);
+    expect(stats.thinCarousels).toBe(1);
+  });
+
+  it('child_attachments raw trống hết ⇒ xoá ad, ad set rỗng ⇒ xoá ad set', () => {
+    const data = tpl({
+      object_story_spec: {
+        link_data: { child_attachments: [{ image_hash: 'a' }, { video_id: 'b' }] },
+      },
+    });
+    const stats = pruneEmptySlots(data, emptyRefsOf(data, [null, null]));
+
+    expect(data.ad_sets).toHaveLength(0);
+    expect(stats).toMatchObject({
+      prunedSlots: 2,
+      prunedAds: 1,
+      prunedAdSets: 1,
+      remainingSlots: 0,
+    });
+  });
+
+  it('ad ghim bài (pinnedPost) không phải ô ⇒ luôn giữ nguyên', () => {
+    const data = tpl({ pinnedPost: true, videoId: 'keep' }, { videoId: 'a' });
+    // pinnedPost bị forEachMediaSlot bỏ qua ⇒ ô duy nhất là creative thứ 2.
+    const stats = pruneEmptySlots(data, emptyRefsOf(data, [null]));
+
+    expect(data.ad_sets[0].ads).toHaveLength(1);
+    expect(data.ad_sets[0].ads[0].creative.pinnedPost).toBe(true);
+    expect(stats).toMatchObject({ prunedAds: 1, prunedAdSets: 0 });
+  });
+
+  it('không có ô nào trống ⇒ giữ nguyên toàn bộ cấu trúc', () => {
+    const data = tpl({ videoId: 'a' }, { imageHash: 'b' });
+    const stats = pruneEmptySlots(data, emptyRefsOf(data, [vid('v1'), img('i1')]));
+
+    expect(data.ad_sets[0].ads).toHaveLength(2);
+    expect(stats).toMatchObject({
+      prunedSlots: 0,
+      prunedAds: 0,
+      prunedAdSets: 0,
+      remainingSlots: 2,
+    });
   });
 });

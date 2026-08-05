@@ -406,6 +406,120 @@ export function coerceCardToType(
 // mọi token/ID sẵn có trên ô (token lưu trong mẫu không còn là đầu vào gán content).
 // Ô chưa có content cũng được đóng token+placeholder làm DẤU Ô TRỐNG — kể cả khi mẫu
 // chưa slotify (trước đây ô như vậy giữ media cũ của mẫu và publish nhầm media rác).
+// XOÁ HẲN các Ô TRỐNG khỏi mẫu đã dựng — dùng cho "CHẠY NGAY" (allowPartial): người
+// dùng không chờ gom đủ ô, nháp chỉ giữ ĐÚNG số content đang có (2 content / mẫu 5 ô →
+// nháp 2 quảng cáo, 3 ô trống biến mất thay vì để token VIDEO_n + placeholder).
+//
+// `emptyRefs` = tập REF (so sánh theo object identity) của các ô KHÔNG lấp được, thu
+// thập ở builder theo đúng thứ tự forEachMediaSlot (contentPlan[i] == null).
+//
+// Quy tắc: (1) card/attachment/dynamic trống → xoá khỏi mảng; (2) ad CÓ ô nhưng sau khi
+// xoá KHÔNG còn ô nào → xoá cả ad; (3) ad set CÓ ad nhưng không còn ad nào → xoá ad set.
+// Ad "ghim bài" (pinnedPost) và ad không có ô media nào GIỮ NGUYÊN (không phải ô để lấp)
+// — chúng không tham gia forEachMediaSlot nên cũng không bao giờ nằm trong emptyRefs.
+//
+// Mutate templateData TẠI CHỖ (bản clone của builder), gọi TRƯỚC replacePlaceholders để
+// mọi chỉ số ad_sets[ai].ads[di] mà builder dùng sau đó (đặt tên/CID) khớp cấu trúc mới.
+// KHÔNG đánh số lại token: ô trống bị xoá chỉ để LẠI KHOẢNG TRỐNG trong dãy ordinal, mà
+// replacePlaceholders tra theo chỉ số nên token còn lại vẫn trỏ đúng asset.
+export function pruneEmptySlots(
+  templateData: any,
+  emptyRefs: Set<any>,
+): {
+  prunedSlots: number;
+  prunedAds: number;
+  prunedAdSets: number;
+  remainingSlots: number;
+  // Carousel còn <2 ô sau khi xoá — Meta yêu cầu ≥2 card. Nháp vẫn tạo (người dùng bổ
+  // sung tay trong màn nháp), nhưng caller nên cảnh báo.
+  thinCarousels: number;
+} {
+  let prunedSlots = 0;
+  let prunedAds = 0;
+  let prunedAdSets = 0;
+  let remainingSlots = 0;
+  let thinCarousels = 0;
+
+  const dropEmpty = (list: any[]): any[] => {
+    const next = list.filter((item) => !emptyRefs.has(item));
+    prunedSlots += list.length - next.length;
+    return next;
+  };
+
+  const adSets = Array.isArray(templateData?.ad_sets)
+    ? templateData.ad_sets
+    : [];
+  const keptAdSets: any[] = [];
+
+  for (const adset of adSets) {
+    const ads = Array.isArray(adset?.ads) ? adset.ads : [];
+    const keptAds: any[] = [];
+
+    for (const ad of ads) {
+      const c = ad?.creative;
+      if (!c || c.pinnedPost === true) {
+        keptAds.push(ad);
+        continue;
+      }
+
+      let hadSlots = 0;
+      let keptSlots = 0;
+      let carouselLike = false;
+
+      const mt = inferCreativeMediaType(c);
+      if (mt === 'VIDEO' || mt === 'IMAGE') {
+        hadSlots += 1;
+        if (emptyRefs.has(c)) prunedSlots += 1;
+        else keptSlots += 1;
+      }
+
+      if (Array.isArray(c.carouselCards)) {
+        carouselLike = true;
+        hadSlots += c.carouselCards.length;
+        c.carouselCards = dropEmpty(c.carouselCards);
+        keptSlots += c.carouselCards.length;
+      }
+
+      const linkData = c.object_story_spec?.link_data;
+      if (Array.isArray(linkData?.child_attachments)) {
+        carouselLike = true;
+        hadSlots += linkData.child_attachments.length;
+        linkData.child_attachments = dropEmpty(linkData.child_attachments);
+        keptSlots += linkData.child_attachments.length;
+      }
+
+      if (Array.isArray(c.dynamicAssets)) {
+        hadSlots += c.dynamicAssets.length;
+        c.dynamicAssets = dropEmpty(c.dynamicAssets);
+        keptSlots += c.dynamicAssets.length;
+      }
+
+      // Ad từng có ô mà giờ trắng ô → không còn media để chạy, xoá cả ad.
+      if (hadSlots > 0 && keptSlots === 0) {
+        prunedAds += 1;
+        continue;
+      }
+      if (carouselLike && keptSlots > 0 && keptSlots < 2) thinCarousels += 1;
+      remainingSlots += keptSlots;
+      keptAds.push(ad);
+    }
+
+    adset.ads = keptAds;
+    // Ad set từng có ad mà giờ rỗng → xoá; ad set vốn không có ad thì giữ nguyên.
+    if (ads.length > 0 && keptAds.length === 0) {
+      prunedAdSets += 1;
+      continue;
+    }
+    keptAdSets.push(adset);
+  }
+
+  if (Array.isArray(templateData?.ad_sets)) {
+    templateData.ad_sets = keptAdSets;
+  }
+
+  return { prunedSlots, prunedAds, prunedAdSets, remainingSlots, thinCarousels };
+}
+
 export function stampSlotToken(
   ref: any,
   kind: SlotKind,
