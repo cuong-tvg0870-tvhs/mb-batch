@@ -334,9 +334,11 @@ export class CampaignRuleRunnerService {
       key = dedupeKey(rule.id, rule.accountId, aligned);
     } else {
       if (dueness.outOfDateRange) {
-        this.logger.debug(
-          `Rule ${rule.id} ngoài khoảng ngày hiệu lực → bỏ qua.`,
-        );
+        // Ghi 1 dòng nhật ký/ngày để màn "Nhật ký & duyệt" NÓI ĐƯỢC vì sao rule im.
+        // Trước đây chỉ `logger.debug` rồi return → nhật ký trống trơn, không phân biệt
+        // được "hết khoảng ngày hiệu lực" với "engine chết" (sự cố prod 05/08/2026 mất
+        // nhiều giờ chỉ để loại trừ giả thuyết này).
+        await this.recordOutOfDateRange(rule, schedule, now);
         return; // ngoài khoảng hiệu lực thì cũng KHÔNG thử lại slot cũ
       }
       // Không đến hạn: còn 1 cửa nữa — slot trước vừa chết vì lỗi TẠM THỜI ở khâu đọc
@@ -364,6 +366,67 @@ export class CampaignRuleRunnerService {
   }
 
   /**
+   * Ghi MỘT dòng nhật ký mỗi NGÀY cho rule đang nằm ngoài khoảng ngày hiệu lực.
+   *
+   * VÌ SAO: đây là đường duy nhất khiến rule ACTIVE + có lịch ngừng chạy mà không để lại
+   * dấu vết nào trong DB (mọi nhánh khác đều đã tạo run). Không có dòng này thì màn
+   * "Nhật ký & duyệt" trống hệt như khi engine chết, và không ai biết chỉ cần gia hạn
+   * khoảng ngày. Enum SKIPPED_OUT_OF_DATE_RANGE đã có sẵn trong schema và FE đã render
+   * ("Bỏ qua (ngoài khoảng ngày)") → KHÔNG cần migration.
+   *
+   * Chống spam: `dedupeKey` gộp theo NGÀY (UTC) nên tick 5 phút chỉ ghi được 1 dòng/ngày;
+   * khóa suy ra tất định từ (rule, account, ngày) nên nhiều replica vẫn chỉ 1 dòng.
+   * Dòng này bị LOẠI khỏi `getLastRunAt` để không làm lệch dueness của lịch INTERVAL.
+   */
+  private async recordOutOfDateRange(
+    rule: any,
+    schedule: any,
+    now: Date,
+  ): Promise<void> {
+    const day = now.toISOString().slice(0, 10);
+    const key = `${rule.id}:${rule.accountId}:${day}#out_of_range`;
+    const from = schedule?.dateFrom ? new Date(schedule.dateFrom) : null;
+    const to = schedule?.dateTo ? new Date(schedule.dateTo) : null;
+    const ymd = (d: Date | null) =>
+      d && !Number.isNaN(d.getTime()) ? d.toISOString().slice(0, 10) : '—';
+    const message =
+      from && now < from
+        ? `Chưa tới ngày bắt đầu của khoảng ngày hiệu lực (${ymd(from)}) → chưa kiểm tra điều kiện.`
+        : `Đã qua ngày kết thúc của khoảng ngày hiệu lực (${ymd(to)}) → rule KHÔNG còn được kiểm tra. ` +
+          `Gia hạn hoặc bỏ chọn "khoảng ngày" trong lịch để chạy lại.`;
+
+    try {
+      await this.prisma.campaignRuleRun.create({
+        data: {
+          ruleId: rule.id,
+          accountId: rule.accountId,
+          scheduledFor: alignedNow(now),
+          startedAt: now,
+          finishedAt: now,
+          dedupeKey: key,
+          status: 'SKIPPED_OUT_OF_DATE_RANGE',
+          errorMessage: message,
+          ruleSnapshot: {
+            name: rule.name,
+            level: rule.level,
+            dateFrom: from ? from.toISOString() : null,
+            dateTo: to ? to.toISOString() : null,
+          },
+        },
+      });
+      this.logger.log(`Rule ${rule.id} ngoài khoảng ngày hiệu lực → ${message}`);
+    } catch (error) {
+      // P2002 = đã ghi dòng của ngày hôm nay (tick trước / replica khác) → im lặng.
+      if (error?.code === 'P2002') return;
+      this.logger.warn(
+        `Rule ${rule.id}: không ghi được dòng nhật ký ngoài-khoảng-ngày: ${
+          error?.message || error
+        }`,
+      );
+    }
+  }
+
+  /**
    * Slot cần THỬ LẠI (nếu có). AN TOÀN TIỀN BẠC — chỉ trả về khi lượt gần nhất:
    *  - do CHÍNH runner tạo theo lịch (`dedupeKey != null`; run "áp lịch tay" của mb-ads
    *    có dedupeKey null → loại), VÀ
@@ -380,7 +443,13 @@ export class CampaignRuleRunnerService {
     now: Date,
   ): Promise<{ aligned: Date; attempt: number } | null> {
     const last = await this.prisma.campaignRuleRun.findFirst({
-      where: { ruleId: rule.id, dedupeKey: { not: null } },
+      // Dòng SKIPPED_OUT_OF_DATE_RANGE là dấu trạng thái, không phải lượt chạy → loại,
+      // để nó không che mất lượt FAILED đang chờ thử lại.
+      where: {
+        ruleId: rule.id,
+        dedupeKey: { not: null },
+        status: { not: 'SKIPPED_OUT_OF_DATE_RANGE' },
+      },
       orderBy: [{ scheduledFor: 'desc' }, { createdAt: 'desc' }],
       select: { status: true, scheduledFor: true, ruleSnapshot: true },
     });
@@ -973,7 +1042,14 @@ export class CampaignRuleRunnerService {
       customMetrics,
     } = args;
     const rolling = (task.params?.rolling ?? {}) as RollingConfig;
-    const nowUnix = Math.floor(now.getTime() / 1000);
+    // ĐỒNG HỒ TƯƠI, không dùng `now` (mốc chụp MỘT LẦN ở đầu tick, xem runDueRules).
+    // Một tick quét ~190 rule tuần tự, mỗi rule còn đọc insight/ngân sách từ Meta (có
+    // retry + backoff) nên `now` có thể đã cũ hàng phút tới hàng chục phút khi tới đây.
+    // Mọi phép tính mốc khung ngân sách (coveredUntil, cổng "còn phủ", start của khung
+    // mới) phải theo đồng hồ thật, nếu không Meta nhận `time_start` đã QUÁ KHỨ và từ chối
+    // (lỗi prod 11:00 04/08/2026). `now` vẫn giữ nguyên cho việc ĐÁNH GIÁ điều kiện để
+    // mọi entity trong cùng lượt được chấm trên cùng một mốc thời gian.
+    const nowUnix = Math.floor(Date.now() / 1000);
 
     // Ngân sách LIVE từ Meta (fallback DB nếu đọc lỗi) — dùng cho cả % tăng lẫn điều kiện.
     const liveBudget = await fetchLiveBudget(level, entity.id);
@@ -1048,8 +1124,12 @@ export class CampaignRuleRunnerService {
       return { matched: 1, errors: 0 };
     }
 
+    // Đọc LẠI đồng hồ ngay trước khi dựng spec: từ mốc `nowUnix` ở trên tới đây còn 3 lời
+    // gọi Graph (ngân sách live + danh sách khung của mình + khung của người khác), mỗi lời
+    // gọi tối đa 30s. Đây là mốc gần nhất với thời điểm Meta thực nhận `time_start`.
+    const specNowUnix = Math.floor(Date.now() / 1000);
     const { spec, skipReason, availableSec } = buildRollingSpec(rolling, {
-      nowUnix,
+      nowUnix: specNowUnix,
       tz: timezone,
       targetBudget,
       coveredUntil,
@@ -1377,10 +1457,18 @@ export class CampaignRuleRunnerService {
     });
   }
 
-  /** lastRunAt = max(scheduledFor) của các run trước đó của rule. */
+  /**
+   * lastRunAt = max(scheduledFor) của các run trước đó của rule — mốc để tính dueness của
+   * lịch INTERVAL.
+   *
+   * LOẠI dòng SKIPPED_OUT_OF_DATE_RANGE: đó là dấu "rule đang nằm ngoài khoảng ngày", KHÔNG
+   * phải một lượt chạy. Nếu tính vào, rule INTERVAL có `dateFrom` ở tương lai sẽ bị hoãn
+   * thêm trọn một chu kỳ sau khi khoảng hiệu lực bắt đầu (dấu ghi hôm nay bị hiểu là "vừa
+   * chạy xong").
+   */
   private async getLastRunAt(ruleId: string): Promise<Date | null> {
     const last = await this.prisma.campaignRuleRun.findFirst({
-      where: { ruleId },
+      where: { ruleId, status: { not: 'SKIPPED_OUT_OF_DATE_RANGE' } },
       orderBy: { scheduledFor: 'desc' },
       select: { scheduledFor: true },
     });

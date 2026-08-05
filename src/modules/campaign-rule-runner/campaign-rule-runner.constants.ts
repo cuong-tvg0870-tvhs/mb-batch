@@ -13,15 +13,48 @@
  * media-sync (đều bắn ở :00) — tránh bão request Meta cùng lúc.
  * ĐÃ XÁC MINH an toàn với slot SPECIFIC giờ tròn (vd 05:00, 21:00): tick liền sau
  * mỗi slot luôn cách slot đó tối đa 4 phút (spacing tick vẫn đều 5 phút, chỉ dịch
- * pha), trong khi TICK_WINDOW_MS bắt slot "vừa đi qua" trong 5 phút — xem
+ * pha), trong khi TICK_WINDOW_MS bắt slot "vừa đi qua" trong 15 phút — xem
  * campaign-rule-schedule.util.ts (isRuleDue, nhánh SPECIFIC: diff = nowMinutes -
  * slotMinutes, bắt khi 0 <= diff < windowMinutes). Slot giờ tròn không bao giờ bị bỏ lỡ.
  */
 export const CAMPAIGN_RULE_TICK_CRON = '2-59/5 * * * *';
 export const CAMPAIGN_RULE_TICK_TIMEZONE = 'Asia/Ho_Chi_Minh';
 
-/** Cửa sổ tick ~5 phút — dùng để bắt slot SPECIFIC vừa đi qua trong tick hiện tại. */
-export const TICK_WINDOW_MS = 5 * 60 * 1000;
+/**
+ * Cửa sổ bắt slot SPECIFIC "vừa đi qua" (15 phút = 3 tick).
+ *
+ * VÌ SAO KHÔNG CÒN LÀ 5 PHÚT (sự cố prod 04/08–05/08/2026): cửa sổ 5' chỉ đủ khi tick
+ * NÀO CŨNG chạy đúng hạn. Thực tế một tick quét ~190 rule tuần tự (mỗi rule đọc insight
+ * + budget schedule từ Meta) có thể lâu hơn 5 phút → cờ chống chồng tick bỏ luôn lượt
+ * kế tiếp → slot giờ tròn rơi ra khỏi cửa sổ và MẤT HẲN, không để lại dòng nhật ký nào.
+ * Đo trên prod: khung 17:00 và 12:00 ngày 04/08 có 0 run, trong khi các khung lành mạnh
+ * cùng ngày có 110–132 run.
+ *
+ * AN TOÀN TIỀN BẠC: nới cửa sổ KHÔNG thể bơm ngân sách hai lần — `aligned` luôn là mốc
+ * của SLOT (không phải mốc tick) nên `dedupeKey = ruleId:accountId:<slot ISO>` giữ
+ * nguyên, unique index chặn lượt thứ hai của cùng slot (xem isRuleDue + executeRun).
+ * Hệ quả duy nhất: slot có thể nổ trễ tối đa 15' khi hệ đang tải cao — chấp nhận được
+ * vì khung tăng ngân sách tối thiểu đã là 3 giờ.
+ *
+ * LƯU Ý khi cấu hình: hai slot cách nhau < 15' trong cùng ngày thì tick chỉ bắt slot
+ * GẦN now nhất (diff nhỏ nhất). FE hiện chỉ cho chọn slot giờ tròn nên không đụng.
+ */
+export const TICK_WINDOW_MS = 15 * 60 * 1000;
+
+/**
+ * Trần thời gian một lượt tick được coi là "còn đang chạy" (15 phút = 3 tick).
+ *
+ * VÌ SAO CẦN (sự cố prod 05/08/2026, engine đứng 5h45): scheduler dùng cờ in-memory để
+ * chống chồng tick và chỉ nhả cờ trong `finally`. Nếu một lượt `runDueRules()` KHÔNG BAO
+ * GIỜ settle (socket Meta treo — code cũ chưa có `axios.defaults.timeout`) thì `finally`
+ * không chạy → cờ mắc `true` VĨNH VIỄN → mọi rule ngừng được kiểm tra cho tới khi
+ * restart process, và không có dòng nhật ký nào trong DB để nhận ra.
+ *
+ * Sau trần này, tick mới được phép chạy dù lượt cũ chưa settle. An toàn vì double-run
+ * cross-tick vẫn bị khóa phân tán `crr:<ruleId>` + unique `dedupeKey` chặn — y hệt cơ
+ * chế đã bảo vệ trường hợp nhiều replica.
+ */
+export const TICK_MAX_WALL_MS = 15 * 60 * 1000;
 
 /** Dung sai cho lịch INTERVAL: coi là "đến hạn" nếu còn thiếu <= 60s. */
 export const INTERVAL_TOLERANCE_MS = 60 * 1000;

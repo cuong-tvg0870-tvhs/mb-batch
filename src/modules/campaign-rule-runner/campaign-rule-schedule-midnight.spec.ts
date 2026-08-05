@@ -9,6 +9,7 @@
 //   2. Slot bình thường (giữa ngày) KHÔNG bị bắt 2 lần bởi cơ chế "xét thêm hôm qua".
 //   3. dedupeKey tất định — 2 tick "cùng slot" (chồng lấn giây/ms) ra CÙNG khóa; slot
 //      khác (khác ngày/khác giờ) ra khóa KHÁC (không đụng độ).
+import { TICK_WINDOW_MS } from './campaign-rule-runner.constants';
 import {
   dedupeKey,
   isRuleDue,
@@ -21,6 +22,10 @@ const ACCOUNT_ID = 'act_1';
 
 // 2026-08-02 = Chủ Nhật, 2026-08-03 = Thứ Hai (xác nhận qua Intl trước khi viết test).
 const SUNDAY_LATE_SLOT = '23:58';
+// Mốc tuyệt đối của slot 23:58 Chủ Nhật — các test biên tính mốc tick TƯƠNG ĐỐI theo
+// TICK_WINDOW_MS thay vì hardcode "5 phút", để còn đúng khi cửa sổ được nới (đã nới lên
+// 15' sau sự cố mất slot 04/08/2026 — xem comment ở campaign-rule-runner.constants.ts).
+const SUNDAY_SLOT_MS = new Date('2026-08-02T23:58:00.000Z').getTime();
 const SPECIFIC_SLOTS = {
   sun: [SUNDAY_LATE_SLOT],
   mon: ['08:00'],
@@ -45,10 +50,9 @@ describe('isRuleDue SPECIFIC — slot cuối ngày bắc qua nửa đêm', () =>
     expect(result.aligned).toEqual(new Date('2026-08-02T23:58:00.000Z'));
   });
 
-  it('tick 00:07 (tick kế tiếp theo lịch 2-59/5) đã ra khỏi cửa sổ 5 phút → không còn due', () => {
-    // 00:07 cách slot 23:58 tới 9 phút > TICK_WINDOW_MS(5') nên KHÔNG được bắt lại — xác
-    // nhận cơ chế mới không "quét mãi", chỉ mở đúng 1 cửa tick cho slot cuối ngày.
-    const now = new Date('2026-08-03T00:07:00.000Z');
+  it('tick ra ngoài cửa sổ (slot + TICK_WINDOW_MS + 1 phút) → không còn due', () => {
+    // Xác nhận cơ chế không "quét mãi": qua khỏi cửa sổ thì slot cuối ngày đóng lại.
+    const now = new Date(SUNDAY_SLOT_MS + TICK_WINDOW_MS + 60_000);
     const result = isRuleDue(
       { type: 'SPECIFIC', specificSlots: SPECIFIC_SLOTS },
       null,
@@ -56,6 +60,21 @@ describe('isRuleDue SPECIFIC — slot cuối ngày bắc qua nửa đêm', () =>
       TZ,
     );
     expect(result.due).toBe(false);
+  });
+
+  it('BẮT BÙ trong cửa sổ: tick trễ (slot + TICK_WINDOW_MS − 1 phút) vẫn due, aligned = mốc SLOT', () => {
+    // Đây là lý do nới cửa sổ: tick đúng sau slot có thể bị bỏ (tick trước chạy quá lâu),
+    // tick trễ vẫn phải bắt bù được. `aligned` vẫn là mốc SLOT nên dedupeKey không đổi →
+    // slot chỉ chạy đúng MỘT lần, không thể bơm ngân sách hai lần.
+    const now = new Date(SUNDAY_SLOT_MS + TICK_WINDOW_MS - 60_000);
+    const result = isRuleDue(
+      { type: 'SPECIFIC', specificSlots: SPECIFIC_SLOTS },
+      null,
+      now,
+      TZ,
+    );
+    expect(result.due).toBe(true);
+    expect(result.aligned).toEqual(new Date(SUNDAY_SLOT_MS));
   });
 
   it('slot giữa ngày bình thường (Thứ Hai 08:00) vẫn hoạt động như cũ, không bị ảnh hưởng', () => {
@@ -84,9 +103,9 @@ describe('isRuleDue SPECIFIC — slot cuối ngày bắc qua nửa đêm', () =>
     expect(result.aligned).not.toEqual(new Date('2026-08-02T23:58:00.000Z'));
   });
 
-  it('biên cửa sổ: diff đúng bằng TICK_WINDOW_MS (5 phút) thì KHÔNG due (chặn trên loại trừ)', () => {
-    // slot 23:58 Chủ Nhật, tick đúng 5 phút sau = 00:03 Thứ Hai → diff=5, không < 5.
-    const now = new Date('2026-08-03T00:03:00.000Z');
+  it('biên cửa sổ: diff đúng bằng TICK_WINDOW_MS thì KHÔNG due (chặn trên loại trừ)', () => {
+    // slot 23:58 Chủ Nhật, tick đúng TICK_WINDOW_MS sau → diff = window, không < window.
+    const now = new Date(SUNDAY_SLOT_MS + TICK_WINDOW_MS);
     const result = isRuleDue(
       { type: 'SPECIFIC', specificSlots: SPECIFIC_SLOTS },
       null,

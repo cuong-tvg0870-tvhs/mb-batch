@@ -57,6 +57,21 @@ export const META_MIN_HDP_SEC = 3 * 3600;
 const FIXED_MIN_LEAD_SEC = 15 * 60;
 
 /**
+ * Lead TỐI THIỂU cho khung ROLLING, kể cả khi nối tiếp khung cũ.
+ *
+ * VÌ SAO (lỗi prod 11:00 04/08/2026 — Meta: "Ngày bắt đầu của đợt cao điểm cho lịch ngân
+ * sách đã qua rồi"): nhánh nối chuỗi lấy `start = coveredUntil` thẳng, không lead. Runner
+ * chỉ nối khi `coveredUntil - now <= lead` nên `start` có thể chỉ cách hiện tại vài giây
+ * (khung cũ hết đúng 11:00, tick nổ 10:5x) — và giữa lúc dựng spec với lúc Meta thực nhận
+ * còn nhiều lời gọi Graph nối tiếp. Tới tay Meta thì `time_start` đã thành QUÁ KHỨ ⇒ bị
+ * từ chối, mất trọn lượt bơm.
+ *
+ * Đánh đổi: kẹp start có thể để HỞ tối đa `lead` phút giữa khung cũ và khung mới. Chấp
+ * nhận được — thà hở 15' còn hơn Meta từ chối cả khung 3+ giờ.
+ */
+const ROLLING_MIN_LEAD_SEC = 15 * 60;
+
+/**
  * Quy đổi giá trị nội bộ → `budget_value` + `budget_value_type` mà Meta thực nhận.
  *
  * MẤU CHỐT: Meta hiểu `budget_value` là KHOẢN TĂNG THÊM (increase, cộng lên ngân sách
@@ -201,8 +216,10 @@ export function activeChainStart(
 
 /**
  * Dựng 1 khung "cuốn chiếu" kế tiếp:
- *   start = max(now + lead, coveredUntil)  → nối liền sau khung của mình (end-to-end,
- *           không tự-overlap); end = start + X giờ HOẶC tới mốc giờ untilClock.
+ *   start = max(coveredUntil, now + ROLLING_MIN_LEAD_SEC)  → nối liền sau khung của mình
+ *           (end-to-end, không tự-overlap) nhưng LUÔN ở tương lai đủ xa để Meta không từ
+ *           chối; end = start + X giờ HOẶC tới mốc giờ untilClock.
+ *   `opts.nowUnix` PHẢI là đồng hồ TƯƠI tại thời điểm dựng spec, không phải mốc đầu tick.
  *   Chốt an toàn theo maxChainHours (từ khung ĐẦU của chuỗi) + hardEndAt.
  *   Tránh overlap khung của NGƯỜI KHÁC (foreign): CHỐT start (đẩy qua khung đang phủ)
  *   TRƯỚC rồi mới tính end, sau đó cắt end tại khung foreign kế tiếp. end ≤ start →
@@ -224,6 +241,11 @@ export function buildRollingSpec(
   // Nối LIỀN sau vùng phủ hiện có (start = coveredUntil nếu còn ở tương lai) → không
   // hở khung. Chưa có phủ → bắt đầu ở now + lead (Meta cần khung bắt đầu ở tương lai).
   let start = opts.coveredUntil > opts.nowUnix ? opts.coveredUntil : opts.nowUnix + lead;
+  // KẸP về tương lai: `coveredUntil` có thể chỉ cách now vài giây (khung cũ vừa hết) →
+  // Meta từ chối vì "time_start đã qua". Xem ROLLING_MIN_LEAD_SEC. Phải kẹp TRƯỚC vòng
+  // né khung foreign bên dưới, để mốc sau khi kẹp vẫn được kiểm tra overlap.
+  const minStart = opts.nowUnix + ROLLING_MIN_LEAD_SEC;
+  if (start < minStart) start = minStart;
   // Meta bắt mốc khung rơi đúng 00/15/30/45 → căn start LÊN NGAY để DURATION (start+X
   // giờ) cũng tính từ mốc chuẩn. (Khi nối sau coveredUntil/khung foreign — vốn đã do
   // Meta enforce đúng mốc — ceil là no-op.)
