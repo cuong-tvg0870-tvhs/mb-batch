@@ -46,6 +46,17 @@ export interface ExecResult {
 export const META_MAX_INCREASE_PCT = 700;
 
 /**
+ * Meta: "High demand periods must be at 3 hours in length or more." — khung ngắn hơn bị
+ * từ chối (code 100 / subcode 3858094: "Vui lòng nhập một khoảng thời gian ít nhất là 3
+ * giờ"). Xem developers.facebook.com/docs/marketing-api/reference/high-demand-period.
+ */
+export const META_MIN_HDP_SEC = 3 * 3600;
+
+// Khung FIXED nằm trong QUÁ KHỨ bị Meta từ chối → kẹp start về "now + lead" trước khi
+// gửi. 15' là mức tối thiểu an toàn (bằng lead mặc định của ROLLING) và cũng đúng mốc 15'.
+const FIXED_MIN_LEAD_SEC = 15 * 60;
+
+/**
  * Quy đổi giá trị nội bộ → `budget_value` + `budget_value_type` mà Meta thực nhận.
  *
  * MẤU CHỐT: Meta hiểu `budget_value` là KHOẢN TĂNG THÊM (increase, cộng lên ngân sách
@@ -91,13 +102,21 @@ export function buildSpecs(
 ): BudgetScheduleSpec[] {
   if (!Array.isArray(periods)) return [];
   const specs: BudgetScheduleSpec[] = [];
+  const nowUnix = Math.floor(Date.now() / 1000);
+  const earliestStart = ceilToQuarter(nowUnix + FIXED_MIN_LEAD_SEC);
   for (const period of periods) {
     if (!period) continue;
     // Căn mốc 15' (Meta bắt buộc): start làm tròn LÊN, end làm tròn XUỐNG.
-    const timeStart = ceilToQuarter(wallClockToUnix(String(period.timeStart), tz));
+    let timeStart = ceilToQuarter(wallClockToUnix(String(period.timeStart), tz));
     const timeEnd = floorToQuarter(wallClockToUnix(String(period.timeEnd), tz));
     if (!Number.isFinite(timeStart) || !Number.isFinite(timeEnd)) continue;
     if (timeEnd <= timeStart) continue; // khung rỗng sau khi căn mốc → bỏ
+    // Khung cấu hình sẵn có thể đã trôi vào QUÁ KHỨ khi rule nổ (hoặc lúc kích hoạt
+    // nháp) — trước đây vẫn gửi thẳng lên Meta và bị từ chối. Kẹp về mốc gần nhất ở
+    // tương lai rồi kiểm tra lại độ dài.
+    if (timeStart < earliestStart) timeStart = earliestStart;
+    // Meta yêu cầu khung ≥ 3 giờ → khung ngắn hơn (hoặc bị kẹp cụt) chắc chắn lỗi → bỏ.
+    if (timeEnd - timeStart < META_MIN_HDP_SEC) continue;
 
     const type = period.budgetValueType || 'ABSOLUTE';
     const conv = toMetaIncrease(type, Number(period.budgetValue));
@@ -138,6 +157,9 @@ export interface LiveWindow {
 export interface RollingBuildResult {
   spec?: BudgetScheduleSpec;
   skipReason?: string; // lý do không tạo khung (để log/hiển thị)
+  // Độ dài khung còn lại (giây) khi bị bỏ vì ngắn hơn mức tối thiểu của Meta — để
+  // runner ghi thông báo cụ thể "còn X phút".
+  availableSec?: number;
 }
 
 /**
@@ -182,8 +204,9 @@ export function activeChainStart(
  *   start = max(now + lead, coveredUntil)  → nối liền sau khung của mình (end-to-end,
  *           không tự-overlap); end = start + X giờ HOẶC tới mốc giờ untilClock.
  *   Chốt an toàn theo maxChainHours (từ khung ĐẦU của chuỗi) + hardEndAt.
- *   Tránh overlap khung của NGƯỜI KHÁC (foreign): đẩy start qua khung đang phủ + cắt
- *   end tại khung foreign kế tiếp. end ≤ start → không tạo (đã tới biên/bị chặn).
+ *   Tránh overlap khung của NGƯỜI KHÁC (foreign): CHỐT start (đẩy qua khung đang phủ)
+ *   TRƯỚC rồi mới tính end, sau đó cắt end tại khung foreign kế tiếp. end ≤ start →
+ *   không tạo (đã tới biên/bị chặn); khung < 3 giờ → không tạo (Meta từ chối).
  * Trả về 0 hoặc 1 spec (Meta yêu cầu budget_value là số nguyên → luôn ABSOLUTE).
  */
 export function buildRollingSpec(
@@ -206,13 +229,36 @@ export function buildRollingSpec(
   // Meta enforce đúng mốc — ceil là no-op.)
   start = ceilToQuarter(start);
 
+  // ---- CHỐT `start` TRƯỚC, tính `end` SAU ----
+  // BUG đã sửa (khung 15' → Meta lỗi 3858094 "ít nhất 3 giờ"): trước đây `end` được tính
+  // từ `start` CŨ rồi mới đẩy `start` qua khung của người khác (foreign) — start nhảy tới
+  // nhưng end giữ nguyên nên khung bị cụt (vd camp có khung tay 20:00→00:00, rule nổ 21:00
+  // → start 21:15/end 00:15, foreign đẩy start:=00:00 ⇒ khung còn 15 phút).
+  // Né khung foreign NGAY tại đây (Meta chặn overlap). Lặp cho tới khi start không còn
+  // rơi vào khung nào — vì đẩy qua khung này có thể rơi thẳng vào khung kề sát phía sau.
+  // Mỗi vòng start tăng nghiêm ngặt và vượt hẳn 1 khung ⇒ tối đa foreign.length + 1 vòng.
+  const foreign = [...opts.foreignWindows].sort((a, b) => a.time_start - b.time_start);
+  for (let guard = 0; guard <= foreign.length; guard++) {
+    const covering = foreign.find((f) => f.time_start <= start && start < f.time_end);
+    if (!covering) break;
+    start = ceilToQuarter(covering.time_end);
+  }
+
   let end: number;
   if (rolling.windowMode === 'UNTIL_CLOCK') {
     // Nối tới mốc giờ KẾ TIẾP tính theo NOW. Khi vùng phủ đã chạm mốc → DỪNG (không
     // kéo sang mốc của ngày hôm sau, tránh tạo khung ~24h ngoài ý muốn).
-    const target = nextClockUnix(String(rolling.untilClock ?? ''), opts.tz, opts.nowUnix);
+    let target = nextClockUnix(String(rolling.untilClock ?? ''), opts.tz, opts.nowUnix);
     if (!Number.isFinite(target)) return { skipReason: 'until_clock_invalid' };
     if (opts.coveredUntil >= target) return { skipReason: 'reached_clock' };
+    // `target` tính theo NOW nên KHÔNG liên quan tới `start`: tick nổ sát mốc (hoặc start
+    // bị đẩy qua khung foreign) ⇒ khung ngắn hơn 3 giờ, Meta từ chối. Xử lý: NỐI TỚI MỐC
+    // CỦA NGÀY KẾ TIẾP. Ít bất ngờ nhất vì user cấu hình "bơm cho tới HH:mm" — bỏ hẳn lượt
+    // này mới là mất tác dụng; và khung dài vẫn bị maxChainHours/hardEndAt cắt ở dưới
+    // (cắt xuống dưới 3h thì guard cuối cùng sẽ SKIP, không đẩy khung lố lên Meta).
+    for (let guard = 0; guard < 2 && target - start < META_MIN_HDP_SEC; guard++) {
+      target = nextClockUnix(String(rolling.untilClock ?? ''), opts.tz, target);
+    }
     end = target;
   } else {
     const hours = Number(rolling.durationHours);
@@ -232,12 +278,9 @@ export function buildRollingSpec(
     if (Number.isFinite(hardEnd)) end = Math.min(end, hardEnd);
   }
 
-  // Né khung của người khác (Meta chặn overlap): đẩy start qua khung foreign đang phủ,
-  // rồi cắt end tại mốc bắt đầu của khung foreign gần nhất phía sau.
-  const foreign = [...opts.foreignWindows].sort((a, b) => a.time_start - b.time_start);
-  for (const f of foreign) {
-    if (f.time_start <= start && start < f.time_end) start = f.time_end;
-  }
+  // Né khung của người khác (Meta chặn overlap): start đã được đẩy qua khung foreign
+  // đang phủ ở TRÊN (trước khi tính end) — ở đây chỉ còn cắt end tại mốc bắt đầu của
+  // khung foreign gần nhất phía sau.
   for (const f of foreign) {
     if (start < f.time_start && f.time_start < end) {
       end = f.time_start;
@@ -251,6 +294,13 @@ export function buildRollingSpec(
   end = floorToQuarter(end);
 
   if (end <= start) return { skipReason: 'boundary_reached' };
+
+  // Ngưỡng 3 giờ của Meta — kiểm tra SAU CÙNG, vì cả 4 nguồn phía trên (maxChainHours,
+  // hardEndAt, cắt tại khung foreign kế tiếp, floorToQuarter) đều có thể làm khung cụt.
+  // Bỏ lượt này (SKIPPED, không phải lỗi): lượt sau vùng phủ/biên đổi thì nối được.
+  if (end - start < META_MIN_HDP_SEC) {
+    return { skipReason: 'below_min_duration_3h', availableSec: end - start };
+  }
 
   // Mức tăng: MULTIPLIER (%) gửi thẳng dạng % nguyên; ABSOLUTE là số tiền cộng thêm.
   // Meta tự áp % lên ngân sách LIVE và tự revert → KHÔNG cần targetBudget cho MULTIPLIER.

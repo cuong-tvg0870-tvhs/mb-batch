@@ -7,8 +7,17 @@
  * user confirm. Action duy nhất hỗ trợ v1 = BUDGET_SCHEDULE_BUMP.
  */
 
-/** Cron tick: mỗi 5 phút, theo giờ VN. */
-export const CAMPAIGN_RULE_TICK_CRON = '*/5 * * * *';
+/**
+ * Cron tick: mỗi 5 phút, theo giờ VN.
+ * Lệch khỏi phút :00 (2,7,12,...,57) để không dồn cục vào cron insight-sync/
+ * media-sync (đều bắn ở :00) — tránh bão request Meta cùng lúc.
+ * ĐÃ XÁC MINH an toàn với slot SPECIFIC giờ tròn (vd 05:00, 21:00): tick liền sau
+ * mỗi slot luôn cách slot đó tối đa 4 phút (spacing tick vẫn đều 5 phút, chỉ dịch
+ * pha), trong khi TICK_WINDOW_MS bắt slot "vừa đi qua" trong 5 phút — xem
+ * campaign-rule-schedule.util.ts (isRuleDue, nhánh SPECIFIC: diff = nowMinutes -
+ * slotMinutes, bắt khi 0 <= diff < windowMinutes). Slot giờ tròn không bao giờ bị bỏ lỡ.
+ */
+export const CAMPAIGN_RULE_TICK_CRON = '2-59/5 * * * *';
 export const CAMPAIGN_RULE_TICK_TIMEZONE = 'Asia/Ho_Chi_Minh';
 
 /** Cửa sổ tick ~5 phút — dùng để bắt slot SPECIFIC vừa đi qua trong tick hiện tại. */
@@ -22,6 +31,37 @@ export const DEFAULT_TIMEZONE = 'Asia/Ho_Chi_Minh';
 
 /** TTL khóa phân tán (giây) — lớn hơn thời lượng chạy tối đa của một rule. */
 export const RULE_LOCK_TTL_SECONDS = 300;
+
+/**
+ * Biên an toàn trừ khỏi TTL khóa để tính hạn chót của một lượt chạy.
+ *
+ * VÌ SAO CẦN: khóa `crr:<ruleId>` chỉ là `SET NX EX 300` một lần, KHÔNG tự gia hạn.
+ * Nếu một lượt chạy lâu hơn TTL thì khóa hết hạn GIỮA CHỪNG → replica khác chiếm được
+ * và chạy CÙNG rule CÙNG entity đồng thời → cả hai gọi executeBudgetSchedule → tạo 2
+ * khung chồng nhau → BƠM NGÂN SÁCH HAI LẦN. Vì vậy mọi thứ có thể ngủ/chờ trong một
+ * lượt chạy đều phải nằm gọn trong RULE_RUN_MAX_WALL_MS.
+ */
+export const RULE_RUN_SAFETY_MARGIN_MS = 30 * 1000;
+
+/** Hạn chót (mili giây) cho một lượt chạy rule, luôn nhỏ hơn TTL khóa. */
+export const RULE_RUN_MAX_WALL_MS =
+  RULE_LOCK_TTL_SECONDS * 1000 - RULE_RUN_SAFETY_MARGIN_MS;
+
+/**
+ * Trần thời gian (mili giây) của MỘT lần gọi Graph API — khớp `axios.defaults.timeout`
+ * đặt ở `main.ts`. Dùng để ước lượng worst-case khi tính số lần retry còn cho phép.
+ */
+export const META_CALL_TIMEOUT_MS = 30 * 1000;
+
+/**
+ * Backoff cho lỗi RATE-LIMIT khi đọc insight (mặc định của executeMetaApiWithRetry là
+ * 60s, quá dài: 60+120+180 = 360s > TTL khóa 300s → khóa chết giữa chừng).
+ * 15s cho retry 1, 30s cho retry 2, 45s cho retry 3 (công thức sleep × retry).
+ */
+export const INSIGHT_RATELIMIT_SLEEP_MS = 15 * 1000;
+
+/** Backoff cho lỗi MẠNG khi đọc insight: 5s/10s/15s. */
+export const INSIGHT_NETWORK_SLEEP_MS = 5 * 1000;
 
 /** Độ sâu tối đa của cây group điều kiện được Prisma include. */
 export const MAX_GROUP_DEPTH = 6;

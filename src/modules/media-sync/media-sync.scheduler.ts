@@ -68,9 +68,11 @@ export class MediaSyncScheduler implements OnModuleInit {
   }
 
   /**
-   * ⏰ SYNC FOLDERS (Every hour at minute 0)
+   * ⏰ SYNC FOLDERS (Every hour at minute 25)
+   * Lệch khỏi :00 để tránh dồn cục với insight-sync (:10) và tick rule-runner
+   * (2-59/5) — cùng gọi Meta Graph trong 1 process.
    */
-  @Cron('0 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  @Cron('25 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async scheduleSyncFolders() {
     this.logger.log('📅 Scheduling Folders Sync...');
     await this.enqueueSingletonJob(MEDIA_SYNC_JOBS.SYNC_FOLDERS);

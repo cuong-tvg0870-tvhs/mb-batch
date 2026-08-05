@@ -75,7 +75,10 @@ export class InsightSyncScheduler implements OnModuleInit {
    * extra Meta calls — so every short range stays fresh hourly and they never
    * drift apart. (Replaces the former separate 6h/8h crons.)
    */
-  @Cron('0 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
+  // Lệch phút :10 (thay vì :00) để tránh bão request Meta cùng lúc với
+  // media-sync (:25) và tick rule-runner (2-59/5). Bucket dedupe bên dưới chỉ
+  // lấy tới giờ (không lấy phút) nên vẫn đúng 1 lần/giờ như cũ.
+  @Cron('10 * * * *', { timeZone: 'Asia/Ho_Chi_Minh' })
   async scheduleTodaySync() {
     this.logger.log('📅 Scheduling Near-Real-Time Insights Sync (Today/3D/7D, 1h)...');
     await this.queueSyncForAllAccounts(

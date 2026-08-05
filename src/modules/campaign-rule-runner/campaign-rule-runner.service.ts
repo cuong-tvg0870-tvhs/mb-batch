@@ -1,14 +1,23 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { AdSet, Campaign, FacebookAdsApi } from 'facebook-nodejs-business-sdk';
-import { executeMetaApiWithRetry, parseMetaError } from '../../common/utils';
+import {
+  classifyMetaError,
+  executeMetaApiWithRetry,
+  isRetryableError,
+  parseMetaError,
+} from '../../common/utils';
 import { AppConfigReader } from '../app-config/app-config.reader';
 import { DistributedLockService } from '../distributed-lock/distributed-lock.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   DEFAULT_TIMEZONE,
   INSIGHT_FIELDS,
+  INSIGHT_NETWORK_SLEEP_MS,
+  INSIGHT_RATELIMIT_SLEEP_MS,
   MAX_GROUP_DEPTH,
+  META_CALL_TIMEOUT_MS,
   RULE_LOCK_TTL_SECONDS,
+  RULE_RUN_MAX_WALL_MS,
 } from './campaign-rule-runner.constants';
 import {
   EvalContext,
@@ -29,6 +38,9 @@ import {
   alignedNow,
   dedupeKey,
   isRuleDue,
+  retryDedupeKey,
+  SLOT_RETRY_MAX_ATTEMPTS,
+  SLOT_RETRY_WINDOW_MS,
 } from './campaign-rule-schedule.util';
 import {
   normalizeTimeframe,
@@ -43,6 +55,132 @@ function groupInclude(depth: number): any {
     conditions: true,
     childGroups: { include: groupInclude(depth - 1) },
   };
+}
+
+/**
+ * Lý do KHÔNG nối được khung cuốn chiếu → câu tiếng Việt cho nhân viên marketing đọc
+ * trong nhật ký (item vẫn là SKIPPED, không phải lỗi). Lý do lạ giữ nguyên mã để debug.
+ */
+function describeRollingSkip(skipReason?: string, availableSec?: number): string {
+  if (skipReason === 'below_min_duration_3h') {
+    const minutes = Math.max(0, Math.round((availableSec ?? 0) / 60));
+    return `khoảng trống còn lại chỉ ${minutes} phút (Meta yêu cầu khung tăng ngân sách tối thiểu 3 giờ) → chưa nối khung, sẽ thử lại lượt sau.`;
+  }
+  return `chưa tạo khung (${skipReason ?? 'không rõ'}).`;
+}
+
+/**
+ * Khóa trong `CampaignRuleRun.ruleSnapshot` (Json sẵn có — KHÔNG thêm cột) đánh dấu
+ * lượt chạy CHẾT VÌ LỖI TẠM THỜI Ở KHÂU ĐỌC INSIGHT, tức chưa hề gọi Meta ghi gì →
+ * slot này còn được phép thử lại. Chỉ runner ghi khóa này (mb-ads khi "áp lịch tay"
+ * cũng tạo run nhưng KHÔNG bao giờ có khóa này → không bị hiểu nhầm là cần thử lại).
+ */
+const RETRY_META_KEY = 'insightRetry';
+
+/** Chi tiết kỹ thuật của một lỗi gọi Meta — LƯU để debug, KHÔNG hiện lên message chính. */
+interface MetaFailureDetail {
+  /** Message thô của Meta/axios (thường tiếng Anh). */
+  message: string;
+  kind: 'TRANSIENT' | 'PERMANENT';
+  code?: number | string;
+  subcode?: number;
+  /** Mã lỗi mạng gốc: ECONNRESET/ETIMEDOUT/EAI_AGAIN... (xem ghi chú ở describeMetaFailure). */
+  causeCode?: string;
+  status?: number;
+  /** URL đã CẮT query-string (tránh lọt access_token vào DB). */
+  url?: string;
+  fbtraceId?: string;
+}
+
+/** Mã lỗi mạng gốc (nếu còn móc lại được) — xem ghi chú ở describeMetaFailure. */
+function rawErrorCode(error: any): string | undefined {
+  const code =
+    error?.cause?.code ??
+    error?.code ??
+    error?.cause?.errno ??
+    error?.errno ??
+    error?.cause?.syscall;
+  if (code == null || code === '') return undefined;
+  return String(code);
+}
+
+/** Bỏ query-string khỏi url Meta (chứa access_token) trước khi lưu vào DB. */
+function sanitizeUrl(url: any): string | undefined {
+  if (typeof url !== 'string' || !url) return undefined;
+  const i = url.indexOf('?');
+  return i >= 0 ? url.slice(0, i) : url;
+}
+
+/**
+ * Phân loại + bóc nguyên nhân gốc của một lỗi gọi Meta.
+ *
+ * VÌ SAO PHẢI TỰ MÓC `cause`/`code`: SDK Meta (facebook-nodejs-business-sdk/src/
+ * exceptions.js — `constructErrorResponse`) khi axios KHÔNG nhận được response chỉ
+ * giữ đúng câu "The request was made but no response was received" rồi VỨT SẠCH
+ * `err.code` của axios (ECONNRESET/ETIMEDOUT/EAI_AGAIN) → nhìn log xong không biết
+ * mạng hỏng ở đâu. Ta cố móc lại từ `error.cause`/`error` (còn khi lỗi ném ra TRƯỚC
+ * lúc SDK bọc lại), và luôn giữ `url`/`status`/`fbtrace_id` mà SDK có gắn.
+ */
+function describeMetaFailure(error: any): {
+  transient: boolean;
+  detail: MetaFailureDetail;
+  /** Nội dung Meta/ta diễn giải được (ưu tiên error_user_msg → friendly tiếng Việt). */
+  metaMessage: string;
+} {
+  const parsed = parseMetaError(error);
+  const transient = isRetryableError(error);
+  const cls = classifyMetaError(parsed);
+  const detail: MetaFailureDetail = {
+    message: parsed.message,
+    kind: transient ? 'TRANSIENT' : 'PERMANENT',
+  };
+  if (parsed.code != null) detail.code = parsed.code;
+  if (parsed.subcode != null) detail.subcode = parsed.subcode;
+  const causeCode = rawErrorCode(error);
+  if (causeCode) detail.causeCode = causeCode;
+  const status = Number((error as any)?.status);
+  if (Number.isFinite(status)) detail.status = status;
+  const url = sanitizeUrl((error as any)?.url);
+  if (url) detail.url = url;
+  if (parsed.fbtrace_id) detail.fbtraceId = parsed.fbtrace_id;
+  return { transient, detail, metaMessage: cls.userMessage || parsed.message };
+}
+
+/**
+ * Lỗi khi ĐẨY khung ngân sách lên Meta → message tiếng Việt + phân loại tạm thời/vĩnh viễn.
+ *
+ * 🔴 Dù phân loại là TRANSIENT, runner TUYỆT ĐỐI KHÔNG tự chạy lại lượt này: lỗi xảy ra
+ * SAU khi đã gọi Meta nên không biết Meta đã nhận khung hay chưa — tự thử lại có thể bơm
+ * ngân sách HAI LẦN. Phân loại chỉ để hiển thị/điều tra; việc chạy lại do người dùng quyết.
+ */
+function describeExecFailure(err: any): {
+  message: string;
+  kind: 'TRANSIENT' | 'PERMANENT';
+} {
+  const transient = isRetryableError(err);
+  if (transient) {
+    return {
+      kind: 'TRANSIENT',
+      message:
+        'Meta không phản hồi khi đẩy khung tăng ngân sách (lỗi mạng tạm thời). Hệ thống KHÔNG tự thử lại vì chưa rõ Meta đã nhận khung hay chưa — hãy kiểm tra lịch tăng ngân sách trên Meta, cần thì chạy lại thủ công.',
+    };
+  }
+  const cls = classifyMetaError(err ?? {});
+  return {
+    kind: 'PERMANENT',
+    message: cls.userMessage || err?.message || 'Đẩy budget schedule thất bại.',
+  };
+}
+
+/** Gộp chi tiết kỹ thuật thành 1 dòng cho log (message + mã lỗi mạng + trace). */
+function failureLogText(detail: MetaFailureDetail): string {
+  const bits = [detail.message];
+  if (detail.causeCode) bits.push(`code=${detail.causeCode}`);
+  if (detail.code != null) bits.push(`metaCode=${detail.code}`);
+  if (detail.status != null) bits.push(`status=${detail.status}`);
+  if (detail.url) bits.push(`url=${detail.url}`);
+  if (detail.fbtraceId) bits.push(`trace=${detail.fbtraceId}`);
+  return bits.join(' · ');
 }
 
 /** Entity tối giản mà runner cần để đánh giá + thực thi. */
@@ -63,7 +201,8 @@ interface RunnerEntity {
  * Ràng buộc:
  * - Chỉ đọc/ghi bảng campaign_rule* + đọc Campaign/AdSet/Account. KHÔNG đụng Automation*.
  * - Chỉ action BUDGET_SCHEDULE_BUMP; chỉ level CAMPAIGN + ADSET. Các trường hợp khác → SKIPPED/log.
- * - Idempotent qua dedupeKey (unique trên CampaignRuleRun).
+ * - Idempotent qua dedupeKey (unique trên CampaignRuleRun). Lượt THỬ LẠI slot dùng khóa
+ *   `<dedupeKey>#retryN` (N suy ra tất định từ DB) nên vẫn chống chồng cross-replica.
  * - Metric LIVE fetch trực tiếp từ Meta THEO timeframe của điều kiện (mặc định today;
  *   xem campaign-rule-timeframe.ts), KHÔNG đọc insight cache DB.
  */
@@ -71,6 +210,13 @@ interface RunnerEntity {
 export class CampaignRuleRunnerService {
   private readonly logger = new Logger(CampaignRuleRunnerService.name);
   private metaInitialized = false;
+  /**
+   * Mốc thời gian (epoch ms) mà lượt chạy rule hiện tại phải kết thúc trước, để không
+   * vượt TTL của khóa `crr:<ruleId>`. An toàn khi để ở cấp instance vì `runDueRules`
+   * xử lý các rule TUẦN TỰ (vòng `for` có await) — không có 2 lượt chạy chồng nhau
+   * trong cùng một process.
+   */
+  private runDeadlineAt = Number.POSITIVE_INFINITY;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -179,25 +325,78 @@ export class CampaignRuleRunnerService {
     const lastRunAt = await this.getLastRunAt(rule.id);
     const dueness = isRuleDue(schedule, lastRunAt, now, timezone);
 
-    if (!dueness.due) {
+    let aligned: Date;
+    let key: string;
+    let attempt = 0; // 0 = lượt đầu của slot; >0 = lần thử lại thứ N
+
+    if (dueness.due) {
+      aligned = dueness.aligned || alignedNow(now);
+      key = dedupeKey(rule.id, rule.accountId, aligned);
+    } else {
       if (dueness.outOfDateRange) {
         this.logger.debug(
           `Rule ${rule.id} ngoài khoảng ngày hiệu lực → bỏ qua.`,
         );
+        return; // ngoài khoảng hiệu lực thì cũng KHÔNG thử lại slot cũ
       }
-      return;
+      // Không đến hạn: còn 1 cửa nữa — slot trước vừa chết vì lỗi TẠM THỜI ở khâu đọc
+      // insight (chưa gọi Meta ghi gì) thì thử lại chính slot đó.
+      const retry = await this.findRetryableRun(rule, now);
+      if (!retry) return;
+      aligned = retry.aligned;
+      attempt = retry.attempt;
+      key = retryDedupeKey(
+        dedupeKey(rule.id, rule.accountId, aligned),
+        attempt,
+      );
+      this.logger.log(
+        `↻ Rule ${rule.id} thử lại slot ${aligned.toISOString()} (lần ${attempt}/${SLOT_RETRY_MAX_ATTEMPTS}) sau lỗi tạm thời khi đọc insight.`,
+      );
     }
-
-    const aligned = dueness.aligned || alignedNow(now);
-    const key = dedupeKey(rule.id, rule.accountId, aligned);
 
     await this.lock.runExclusive(
       `crr:${rule.id}`,
       RULE_LOCK_TTL_SECONDS,
       async () => {
-        await this.executeRun(rule, timezone, aligned, key, now);
+        await this.executeRun(rule, timezone, aligned, key, now, attempt);
       },
     );
+  }
+
+  /**
+   * Slot cần THỬ LẠI (nếu có). AN TOÀN TIỀN BẠC — chỉ trả về khi lượt gần nhất:
+   *  - do CHÍNH runner tạo theo lịch (`dedupeKey != null`; run "áp lịch tay" của mb-ads
+   *    có dedupeKey null → loại), VÀ
+   *  - status FAILED kèm dấu `ruleSnapshot.insightRetry.retryable` — dấu này CHỈ được
+   *    đặt khi TOÀN BỘ entity chết ngay ở khâu ĐỌC insight, tức lượt đó chưa gọi Meta
+   *    tạo/sửa khung ngân sách lần nào ⇒ chạy lại không thể bơm ngân sách hai lần, VÀ
+   *  - chưa vượt trần số lần thử lại, VÀ còn trong cửa sổ SLOT_RETRY_WINDOW_MS.
+   *
+   * Lỗi XẢY RA SAU KHI ĐÃ GỌI META (executionError của item) KHÔNG bao giờ đặt dấu này
+   * → không tự thử lại, vì không biết Meta đã nhận khung hay chưa.
+   */
+  private async findRetryableRun(
+    rule: any,
+    now: Date,
+  ): Promise<{ aligned: Date; attempt: number } | null> {
+    const last = await this.prisma.campaignRuleRun.findFirst({
+      where: { ruleId: rule.id, dedupeKey: { not: null } },
+      orderBy: [{ scheduledFor: 'desc' }, { createdAt: 'desc' }],
+      select: { status: true, scheduledFor: true, ruleSnapshot: true },
+    });
+    if (!last || last.status !== 'FAILED') return null;
+
+    const meta = (last.ruleSnapshot as any)?.[RETRY_META_KEY];
+    if (!meta?.retryable) return null;
+
+    // `attempt` của run gần nhất = số lần ĐÃ thử lại slot này (0 = lượt đầu).
+    const attempted = Number(meta.attempt) || 0;
+    if (attempted >= SLOT_RETRY_MAX_ATTEMPTS) return null;
+
+    const scheduledFor = new Date(last.scheduledFor);
+    if (now.getTime() - scheduledFor.getTime() > SLOT_RETRY_WINDOW_MS) return null;
+
+    return { aligned: scheduledFor, attempt: attempted + 1 };
   }
 
   /**
@@ -247,14 +446,25 @@ export class CampaignRuleRunnerService {
     return map;
   }
 
-  /** Tạo run (idempotent) rồi đánh giá + thực thi từng entity. */
+  /**
+   * Tạo run (idempotent) rồi đánh giá + thực thi từng entity.
+   * `attempt` = 0 cho lượt đầu của slot, >0 khi đang THỬ LẠI slot đó (xem findRetryableRun).
+   */
   private async executeRun(
     rule: any,
     timezone: string,
     aligned: Date,
     key: string,
     now: Date,
+    attempt = 0,
   ): Promise<void> {
+    const ruleSnapshot: Record<string, any> = {
+      name: rule.name,
+      level: rule.level,
+      autoExecute: rule.autoExecute,
+      timezone,
+      ...(attempt > 0 ? { retryAttempt: attempt } : {}),
+    };
     let run;
     try {
       run = await this.prisma.campaignRuleRun.create({
@@ -265,12 +475,7 @@ export class CampaignRuleRunnerService {
           startedAt: new Date(),
           dedupeKey: key,
           status: 'RUNNING',
-          ruleSnapshot: {
-            name: rule.name,
-            level: rule.level,
-            autoExecute: rule.autoExecute,
-            timezone,
-          },
+          ruleSnapshot,
         },
       });
     } catch (error) {
@@ -288,6 +493,17 @@ export class CampaignRuleRunnerService {
     let matchedCount = 0;
     let errorsCount = 0;
     let fatalError: string | null = null;
+    // Đếm entity chết NGAY ở khâu đọc insight (trước MỌI lời gọi ghi lên Meta) — cơ sở
+    // để quyết định có được thử lại slot hay không.
+    let insightFailures = 0;
+    let insightPermanentFailures = 0;
+    // Số entity bị bỏ dở vì lượt chạy chạm hạn chót (xem runDeadlineAt bên dưới).
+    let deadlineSkipped = 0;
+
+    // Hạn chót của lượt chạy: khóa `crr:<ruleId>` KHÔNG tự gia hạn, nên mọi thứ có thể
+    // ngủ/chờ phải nằm gọn trong RULE_RUN_MAX_WALL_MS. Quá hạn mà vẫn chạy tiếp = chạy
+    // KHÔNG có khóa → replica khác có thể vào cùng rule → bơm ngân sách hai lần.
+    this.runDeadlineAt = Date.now() + RULE_RUN_MAX_WALL_MS;
 
     try {
       // Chỉ hỗ trợ level CAMPAIGN + ADSET, và cần campaignId để scope.
@@ -304,6 +520,16 @@ export class CampaignRuleRunnerService {
         const customMetrics = await this.loadCustomMetricRegistry(rule);
         const entities = await this.loadEntities(rule);
         for (const entity of entities) {
+          // Chạm hạn chót → DỪNG SẠCH, không bắt đầu entity mới. Thà bỏ sót vài entity
+          // (lượt quét sau xử lý) còn hơn chạy tiếp khi khóa đã có thể hết hạn.
+          if (Date.now() >= this.runDeadlineAt) {
+            deadlineSkipped = entities.length - entitiesScanned;
+            this.logger.warn(
+              `Rule ${rule.id} run ${run.id} chạm hạn chót ${RULE_RUN_MAX_WALL_MS}ms → ` +
+                `bỏ dở ${deadlineSkipped} entity, sẽ quét ở lượt sau.`,
+            );
+            break;
+          }
           entitiesScanned += 1;
           const res = await this.processEntity(
             rule,
@@ -315,6 +541,12 @@ export class CampaignRuleRunnerService {
           );
           matchedCount += res.matched;
           errorsCount += res.errors;
+          if (res.insightFetchError) {
+            insightFailures += 1;
+            if (res.insightFetchError !== 'TRANSIENT') {
+              insightPermanentFailures += 1;
+            }
+          }
         }
       }
     } catch (error) {
@@ -322,20 +554,60 @@ export class CampaignRuleRunnerService {
       this.logger.error(`Rule ${rule.id} run ${run.id} lỗi: ${fatalError}`);
     }
 
+    // Cả lượt chỉ toàn entity chết ở khâu đọc insight → lượt này KHÔNG làm được gì:
+    // đánh FAILED (trước đây vẫn COMPLETED nên nhìn nhật ký tưởng đã chạy xong).
+    const allInsightFailed = entitiesScanned > 0 && insightFailures === entitiesScanned;
+
+    // ĐƯỢC PHÉP THỬ LẠI khi và chỉ khi:
+    //  - không có lỗi fatal (lỗi fatal có thể xảy ra SAU khi vài entity đã đẩy Meta), VÀ
+    //  - MỌI entity đều chết ở khâu ĐỌC insight — khâu này nằm TRƯỚC mọi lời gọi ghi
+    //    (executeBudgetSchedule) ở cả nhánh FIXED lẫn ROLLING ⇒ lượt này chắc chắn CHƯA
+    //    tạo khung nào trên Meta ⇒ chạy lại không thể bơm ngân sách hai lần, VÀ
+    //  - mọi lỗi đều TẠM THỜI (mạng/timeout/rate-limit); lỗi vĩnh viễn (sai cấu hình,
+    //    Meta từ chối) thì thử lại chỉ tốn quota, VÀ
+    //  - chưa chạm trần số lần thử lại (matchedCount===0 là bất biến, kiểm tra cho chắc).
+    const retryable =
+      !fatalError &&
+      allInsightFailed &&
+      insightPermanentFailures === 0 &&
+      matchedCount === 0 &&
+      attempt < SLOT_RETRY_MAX_ATTEMPTS;
+
+    const insightFailMessage = retryable
+      ? 'Meta không phản hồi khi lấy số liệu (lỗi mạng tạm thời) — sẽ tự thử lại slot này ở lượt quét sau.'
+      : allInsightFailed
+        ? 'Không lấy được số liệu từ Meta cho toàn bộ đối tượng của lượt chạy này (xem chi tiết ở từng dòng).'
+        : null;
+
     await this.prisma.campaignRuleRun.update({
       where: { id: run.id },
       data: {
-        status: fatalError ? 'FAILED' : 'COMPLETED',
+        status: fatalError || allInsightFailed ? 'FAILED' : 'COMPLETED',
         finishedAt: new Date(),
         entitiesScanned,
         matchedCount,
         errorsCount,
-        errorMessage: fatalError,
+        errorMessage: fatalError ?? insightFailMessage,
+        // Dấu cho tick sau biết slot này còn được thử lại (Json sẵn có, không thêm cột).
+        ...(retryable
+          ? {
+              ruleSnapshot: {
+                ...ruleSnapshot,
+                [RETRY_META_KEY]: {
+                  retryable: true,
+                  attempt,
+                  stage: 'FETCH_INSIGHT',
+                  entities: insightFailures,
+                },
+              },
+            }
+          : {}),
       },
     });
 
     this.logger.log(
-      `✅ Rule ${rule.id} run ${run.id}: quét ${entitiesScanned}, khớp ${matchedCount}, lỗi ${errorsCount}.`,
+      `✅ Rule ${rule.id} run ${run.id}: quét ${entitiesScanned}, khớp ${matchedCount}, lỗi ${errorsCount}.` +
+        (retryable ? ' ↻ sẽ thử lại slot ở lượt quét sau.' : ''),
     );
   }
 
@@ -376,7 +648,8 @@ export class CampaignRuleRunnerService {
 
   /**
    * Fetch insight live cho 1 entity, đánh giá MỌI task, ghi item tương ứng.
-   * Lỗi fetch insight → tất cả task của entity đó thành FAILED (không làm hỏng entity khác).
+   * Lỗi fetch insight → tất cả task của entity đó thành FAILED (không làm hỏng entity khác)
+   * và trả `insightFetchError` (TRANSIENT/PERMANENT) để executeRun quyết định có thử lại slot.
    */
   private async processEntity(
     rule: any,
@@ -385,7 +658,11 @@ export class CampaignRuleRunnerService {
     timezone: string,
     now: Date,
     customMetrics?: Map<string, CustomMetricEvalDef>,
-  ): Promise<{ matched: number; errors: number }> {
+  ): Promise<{
+    matched: number;
+    errors: number;
+    insightFetchError?: 'TRANSIENT' | 'PERMANENT';
+  }> {
     const level: 'CAMPAIGN' | 'ADSET' = rule.level;
 
     // ---- Cuốn chiếu: bỏ qua đọc insight khi đang GIỮA khung ----
@@ -444,10 +721,16 @@ export class CampaignRuleRunnerService {
     try {
       insight = await this.fetchLiveInsight(level, entity.id);
     } catch (error) {
-      const msg = parseMetaError(error).message;
+      // Giữ NGUYÊN NHÂN GỐC (mã lỗi mạng/url/trace) ở phần lưu trữ để còn debug; phần
+      // hiển thị (errorMessage) là câu tiếng Việt cho nhân viên marketing đọc.
+      const { transient, detail, metaMessage } = describeMetaFailure(error);
       this.logger.warn(
-        `Lấy insight ${level} ${entity.id} lỗi: ${msg} → item FAILED.`,
+        `Lấy insight ${level} ${entity.id} lỗi: ${failureLogText(detail)} → item FAILED` +
+          (transient ? ' (tạm thời — slot sẽ được thử lại).' : ' (lỗi vĩnh viễn — KHÔNG thử lại).'),
       );
+      const userMessage = transient
+        ? 'Meta không phản hồi (lỗi mạng tạm thời) — sẽ thử lại lượt sau.'
+        : `Không lấy được số liệu từ Meta: ${metaMessage}`;
       let errors = 0;
       for (const task of rule.tasks) {
         errors += 1;
@@ -459,11 +742,21 @@ export class CampaignRuleRunnerService {
           status: 'FAILED',
           snapshot: { budgets: this.budgetSnapshot(entity) },
           changePreview: {},
-          evaluation: { matched: false, insightError: msg },
-          errorMessage: `Lỗi lấy insight: ${msg}`,
+          evaluation: {
+            matched: false,
+            // Giữ kiểu string như cũ (FE `RunEvaluation.insightError` đang đọc chuỗi).
+            insightError: detail.message,
+            insightErrorKind: detail.kind,
+            insightErrorDetail: detail,
+          },
+          errorMessage: userMessage,
         });
       }
-      return { matched: 0, errors };
+      return {
+        matched: 0,
+        errors,
+        insightFetchError: transient ? 'TRANSIENT' : 'PERMANENT',
+      };
     }
 
     // Fetch MỖI timeframe DISTINCT còn lại (ngoài today) 1 lần → map để điều kiện đọc
@@ -600,6 +893,8 @@ export class CampaignRuleRunnerService {
           });
         } else {
           errors += 1;
+          // Đã CHẠM Meta rồi mới lỗi → chỉ phân loại + diễn giải, KHÔNG tự thử lại.
+          const execFail = describeExecFailure(result.error);
           await this.createItem({
             runId,
             task,
@@ -610,10 +905,13 @@ export class CampaignRuleRunnerService {
             changePreview,
             evaluation,
             matchedConditionSummary: `${evalSummary} nhưng đẩy Meta thất bại.`,
-            errorMessage:
-              result.error?.message || 'Đẩy budget schedule thất bại.',
+            errorMessage: execFail.message,
             executionAttempts: 1,
-            executionError: result.error,
+            executionError: {
+              ...(result.error ?? {}),
+              kind: execFail.kind,
+              autoRetried: false,
+            },
             metaTraceId: result.metaTraceId,
             metaBudgetScheduleIds: result.scheduleIds,
           });
@@ -750,7 +1048,7 @@ export class CampaignRuleRunnerService {
       return { matched: 1, errors: 0 };
     }
 
-    const { spec, skipReason } = buildRollingSpec(rolling, {
+    const { spec, skipReason, availableSec } = buildRollingSpec(rolling, {
       nowUnix,
       tz: timezone,
       targetBudget,
@@ -766,9 +1064,9 @@ export class CampaignRuleRunnerService {
         entity,
         status: 'SKIPPED',
         snapshot,
-        changePreview: { rolling: { mode: 'ROLLING', skipReason } },
+        changePreview: { rolling: { mode: 'ROLLING', skipReason, availableSec } },
         evaluation,
-        matchedConditionSummary: `${evalSummary} nhưng chưa tạo khung (${skipReason ?? 'không rõ'}).`,
+        matchedConditionSummary: `${evalSummary} nhưng ${describeRollingSkip(skipReason, availableSec)}`,
       });
       return { matched: 1, errors: 0 };
     }
@@ -831,6 +1129,8 @@ export class CampaignRuleRunnerService {
       });
       return { matched: 1, errors: 0 };
     }
+    // Đã CHẠM Meta rồi mới lỗi → chỉ phân loại + diễn giải, KHÔNG tự thử lại.
+    const execFail = describeExecFailure(result.error);
     await this.createItem({
       runId,
       task,
@@ -841,9 +1141,13 @@ export class CampaignRuleRunnerService {
       changePreview,
       evaluation,
       matchedConditionSummary: `${evalSummary} nhưng đẩy Meta thất bại.`,
-      errorMessage: result.error?.message || 'Đẩy budget schedule thất bại.',
+      errorMessage: execFail.message,
       executionAttempts: 1,
-      executionError: result.error,
+      executionError: {
+        ...(result.error ?? {}),
+        kind: execFail.kind,
+        autoRetried: false,
+      },
       metaTraceId: result.metaTraceId,
       metaBudgetScheduleIds: result.scheduleIds,
     });
@@ -946,24 +1250,56 @@ export class CampaignRuleRunnerService {
   }
 
   /** Lõi fetch insight LIVE với tham số thời gian bất kỳ. Trả object phẳng (rỗng nếu không có). */
+  /**
+   * Số lần retry tối đa còn "mua" được bằng thời gian còn lại tới hạn chót của lượt chạy.
+   *
+   * PHÉP TÍNH worst-case cho MỘT lần gọi insight với k lần retry (lấy nhánh RATE-LIMIT
+   * vì nó chậm nhất; công thức sleep của executeMetaApiWithRetry là `sleep × retry`):
+   *   tổng ngủ  = 15s×1 + 15s×2 + 15s×3           (k=3) = 90s
+   *   tổng gọi  = (k+1) lần × 30s timeout axios   (k=3) = 120s
+   *   ⇒ k=3 → 210s | k=2 → 135s | k=1 → 75s | k=0 → 30s
+   *
+   * Chọn k lớn nhất mà worst-case vẫn ≤ thời gian còn lại ⇒ một lần gọi insight KHÔNG
+   * BAO GIỜ kéo lượt chạy vượt hạn chót (= TTL khóa 300s trừ biên an toàn 30s = 270s).
+   * Không còn thời gian → k=0: gọi đúng 1 lần, thà báo lỗi tạm thời (slot sẽ được thử
+   * lại ở lượt sau) còn hơn chạy tiếp khi khóa đã có thể chết.
+   */
+  private retriesWithinDeadline(): number {
+    const remainingMs = this.runDeadlineAt - Date.now();
+    for (let k = 3; k >= 1; k -= 1) {
+      // Tổng ngủ = INSIGHT_RATELIMIT_SLEEP_MS × (1+2+...+k) = ×k(k+1)/2
+      const sleepMs = (INSIGHT_RATELIMIT_SLEEP_MS * k * (k + 1)) / 2;
+      const callMs = (k + 1) * META_CALL_TIMEOUT_MS;
+      if (sleepMs + callMs <= remainingMs) return k;
+    }
+    return 0;
+  }
+
   private async fetchInsightWithParams(
     level: 'CAMPAIGN' | 'ADSET',
     entityId: string,
     timeParams: MetaInsightTimeParams,
     tfLabel: string,
   ): Promise<any> {
-    // Meta hay chập chờn "no response was received" (timeout mạng) → retry NGẮN 2 lần
-    // (3s, 6s) cho lỗi transient. getInsights là đọc-only nên retry an toàn; backoff
-    // ngắn để không kéo dài tick runner (mỗi entity 1 lần/khung/tick).
+    // Meta hay chập chờn "no response was received" (timeout mạng) → retry với backoff.
+    // getInsights là đọc-only nên retry an toàn.
+    //
+    // 🔴 BẮT BUỘC bó theo hạn chót của lượt chạy: mặc định `initialSleepMs` của
+    // executeMetaApiWithRetry là 60s, mà công thức là `sleep × retry` → lỗi RATE-LIMIT
+    // với maxRetries=3 sẽ ngủ 60+120+180 = 360s, DÀI HƠN TTL khóa (300s). Khóa hết hạn
+    // giữa lúc còn đang `await sleep` → replica khác chiếm khóa, chạy cùng rule → BƠM
+    // NGÂN SÁCH HAI LẦN. Vì vậy: backoff rút xuống 15s/30s/45s và số lần retry được
+    // tính lại theo thời gian CÒN LẠI tới hạn chót.
+    const maxRetries = this.retriesWithinDeadline();
     const rows = await executeMetaApiWithRetry(
       () =>
         level === 'CAMPAIGN'
           ? new Campaign(entityId).getInsights(INSIGHT_FIELDS, timeParams)
           : new AdSet(entityId).getInsights(INSIGHT_FIELDS, timeParams),
       {
-        maxRetries: 2,
-        networkSleepMs: 3000,
-        initialSleepMs: 3000,
+        maxRetries,
+        initialSleepMs: INSIGHT_RATELIMIT_SLEEP_MS,
+        networkSleepMs: INSIGHT_NETWORK_SLEEP_MS,
         logger: this.logger,
         context: { scope: 'campaign-rule insight', level, entityId, timeframe: tfLabel },
       },
