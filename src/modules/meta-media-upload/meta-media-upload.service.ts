@@ -1225,6 +1225,25 @@ export class MetaMediaUploadService {
     return canDownload === false;
   }
 
+  /**
+   * Trần thời gian RIÊNG cho 2 lời gọi upload lên Meta.
+   *
+   * `axios.defaults.timeout = 30000` đặt ở main.ts là để chặn lời gọi Graph API ĐỌC
+   * treo vô hạn, nhưng nó áp lên MỌI request dùng axios — kể cả đường upload, vốn
+   * luôn lâu hơn thế:
+   *   - `/images`: body base64 của cả tấm ảnh, đẩy hết lên rồi Meta mới trả lời.
+   *   - `/videos`: gửi `file_url` rồi Meta TỰ TẢI video từ CDN của mình và xử lý,
+   *     giữ kết nối tới khi xong — vài phút với file lớn là bình thường.
+   * Hệ quả prod 06/08/2026: `Meta auto-upload failed ... timeout of 30000ms exceeded`,
+   * record Lark bị đánh lỗi dù Meta có thể đã nhận file.
+   *
+   * Vẫn CÓ trần (không quay lại vô hạn) để một upload treo không giữ mãi slot của
+   * hàng đợi throttle.
+   */
+  private getUploadTimeoutMs() {
+    return Number(process.env.META_UPLOAD_TIMEOUT_MS || 5 * 60 * 1000);
+  }
+
   private async uploadBufferToMeta(params: {
     buffer: Buffer;
     name: string;
@@ -1271,6 +1290,7 @@ export class MetaMediaUploadService {
           `${businessId}/images`,
           {},
           new URLSearchParams(requestParams).toString(),
+          { timeout: this.getUploadTimeoutMs() },
         );
       } else {
         const publicUrl = `${process.env.FRONT_END_DOMAIN || 'https://ads.3fastvn.com'}/cdn/${filename}`;
@@ -1287,6 +1307,7 @@ export class MetaMediaUploadService {
           `${businessId}/videos`,
           {},
           new URLSearchParams(requestParams).toString(),
+          { timeout: this.getUploadTimeoutMs() },
         );
       }
 
