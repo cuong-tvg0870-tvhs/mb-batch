@@ -1594,6 +1594,22 @@ export class DraftAutomationMetaPublisherService {
       Object.keys(oss).length > 0 || !!sourceCreative.asset_feed_spec;
     // "Ghim nội dung" (PINNED_POST, parity với mb-ads buildDraftAdCreative): dùng LẠI đúng
     // bài viết gốc để giữ engagement — ép nhánh POST_ID kể cả khi còn object_story_spec.
+    //
+    // 🔒 VỊ NGỮ GỐC — mb-ads COPY NGUYÊN VĂN biểu thức này vào meta.service.ts
+    // #buildCreativeData (biến `isPostReferenceCreative`) để bỏ qua khối "đích đến cá
+    // nhân hoá". Sửa vị ngữ ở đây BẮT BUỘC sửa cùng lúc bên kia, nếu không cùng một bản
+    // nháp lại rẽ nhánh khác nhau tuỳ ai bấm publish.
+    // Lý do phải chặn: creative tham chiếu bài viết chỉ được mang object_story_id — kèm
+    // asset_feed_spec là Meta từ chối 1815809 ("dữ liệu nội dung bị lặp"). Repo này an
+    // toàn sẵn nhờ return sớm; mb-ads trước đây KHÔNG có → khối personalized_destinations
+    // vẫn gắn asset_feed_spec.{message_extensions, call_ads_configuration,
+    // onsite_destinations} cạnh object_story_id.
+    // ⚠️ Bất đối xứng 23% vs 336 (đo production 2026-08-06): 12.799/55.227 creative có
+    // asset_feed_spec.message_extensions nhưng toggle "Tiện ích trình duyệt" của hệ thống
+    // mới dùng ~336 lần ⇒ field đó phần lớn phản ánh kênh nhắn tin Trang đang có, KHÔNG
+    // phải ý định người dùng. Luồng ĐỌC của mb-ads vẫn CỐ Ý suy `browser_addons.enabled`
+    // từ field này (để UI soi đúng Meta) — chỉ luồng GHI bị bịt. Nháp do CHÍNH cron này
+    // tạo là nhóm rủi ro nhất vì không bao giờ lưu khoá browser_addons.
     if (storyId && (sourceCreative.pinnedPost === true || !hasCustomContent)) {
       return (
         CleanObjectOrArray({
@@ -2489,7 +2505,20 @@ export class DraftAutomationMetaPublisherService {
     }
   }
 
+  // PARITY-LOCKED với mb-ads: src/modules/meta/meta.service.ts, khối xử lý
+  // `personalized_destinations` bên trong buildCreativeData (3 nhánh Shop/Browser
+  // add-ons/Tối ưu website, hiện ~dòng 3637-3807) + helper resolveBrowserAddOnPhoneNumber.
+  // (Bên mb-ads còn MỘT phần KHÔNG có ở repo này và KHÔNG cần parity: phép so sánh
+  // không phân biệt hoa/thường cho message_extensions[].type trong isSubset ~3045 —
+  // repo này không có luồng diff/snapshot creative, luôn TẠO MỚI.)
+  // Đây là 2 ĐƯỜNG PUBLISH khác nhau cho CÙNG 1 bản nháp (đăng tay qua mb-ads vs cron
+  // draft-automation qua mb-batch) — lệch nhánh nào ở đây nghĩa là cùng cấu hình
+  // personalized_destinations cho ra kết quả KHÁC NHAU trên Meta tuỳ ai bấm publish.
+  // Sửa ở repo này BẮT BUỘC soát lại bên mb-ads (và ngược lại).
   private applyPersonalizedDestinations(creativeData: any, config: any) {
+    if (!config) return;
+
+    const optimizeWebsiteEnabled = !!config.optimize_website;
     const websiteUrl = this.resolveCreativeWebsiteUrl(creativeData);
     const shopConfig = config.shop || {
       enabled: false,
@@ -2501,31 +2530,218 @@ export class DraftAutomationMetaPublisherService {
       config.storefront_shop_id ||
       config.onsite_destinations?.[0]?.storefront_shop_id;
 
-    if (shopConfig.enabled && storefrontShopId) {
-      creativeData.asset_feed_spec = creativeData.asset_feed_spec || {};
-      creativeData.asset_feed_spec.onsite_destinations = [
-        { storefront_shop_id: storefrontShopId, auto_optimization: true },
-      ];
+    if (shopConfig.enabled) {
+      if (storefrontShopId) {
+        creativeData.asset_feed_spec = creativeData.asset_feed_spec || {};
+        creativeData.asset_feed_spec.onsite_destinations = [
+          { storefront_shop_id: storefrontShopId, auto_optimization: true },
+        ];
+      } else {
+        this.logger.warn(
+          '[personalized-destinations] "Shop" đang bật nhưng thiếu storefront_shop_id — bỏ qua onsite_destinations.',
+        );
+      }
+    } else if (creativeData.asset_feed_spec) {
+      delete creativeData.asset_feed_spec.onsite_destinations;
     }
 
-    if (config.optimize_website && websiteUrl) {
-      creativeData.destination_spec = {
-        website: {
-          optimization: {
-            status: 'OPT_IN',
-            type: 'website_destination_optimization',
-          },
+    // Browser add-ons: CALL → asset_feed_spec.call_ads_configuration (yêu cầu số điện
+    // thoại hợp lệ, có guard riêng); các loại nhắn tin (WHATSAPP/MESSENGER/…) →
+    // asset_feed_spec.message_extensions. Mỗi nhánh phải xoá key của nhánh kia — thiếu
+    // nhánh này (bug gốc) làm cấu hình Browser add-ons của người dùng ÂM THẦM KHÔNG lên
+    // Meta khi publish qua cron tự động.
+    //
+    // ⚠️ SỬA LẠI CHÚ THÍCH CŨ: bản trước khẳng định hai key "LOẠI TRỪ NHAU trên Meta"
+    // như một quy tắc của Meta — đó là SUY ĐOÁN. Số đo production 2026-08-06 xác nhận
+    // đúng, nhưng là quan sát chứ không phải luật: 12.799 creative có message_extensions,
+    // 336 có call_ads_configuration, ĐÚNG 0 creative có CẢ HAI.
+    //
+    // ✅ ĐÃ ĐÓNG câu hỏi mở "xoá message_extensions có làm mất đích nhắn tin của quảng
+    // cáo click-to-WhatsApp/Messenger không?" → KHÔNG. Join Ad→AdSet→Creative toàn
+    // production, đếm theo lượt ad: 15.441 quảng cáo CTWA/CTM (destinationType MESSENGER
+    // 7.617 / WHATSAPP 4.354 / MESSAGING_INSTAGRAM_DIRECT_MESSENGER 3.243 /
+    // MESSAGING_MESSENGER_WHATSAPP 116 / INSTAGRAM_DIRECT 86 /
+    // MESSAGING_INSTAGRAM_DIRECT_WHATSAPP 17 / MESSAGING_INSTAGRAM_DIRECT_MESSENGER_
+    // WHATSAPP 8) có ĐÚNG 0 quảng cáo mang message_extensions; ngược lại toàn bộ 15.595
+    // lượt ad CÓ message_extensions đều nằm ngoài nhóm nhắn tin (UNDEFINED 15.151 /
+    // destinationType rỗng 366 / WEBSITE 66 / ON_POST 12). Đích nhắn tin CTWA mã hoá
+    // bằng destination_type của NHÓM + call_to_action.value.app_destination
+    // (normalizeMessagingCtaForMeta), và với combo nhiều kênh là
+    // asset_feed_spec.optimization_type='DOF_MESSAGING_DESTINATION' + call_to_actions —
+    // KHÔNG hàm nào trong hai đường đó chạm message_extensions. Vì vậy `delete` ở nhánh
+    // TẮT là ĐÚNG và không thể cắt mất đích nhắn tin.
+    if (config.browser_addons?.enabled) {
+      const browserAddOn = config.browser_addons;
+      const validMessageExtensionTypes = [
+        'WHATSAPP',
+        'MESSENGER',
+        'MESSENGER_FACEBOOK_PAGE',
+        'INSTAGRAM_MESSAGE',
+        'WHATSAPP_FACEBOOK_PAGE',
+        'WHATSAPP_PROMO',
+        'NONE',
+      ];
+      const normalizedType = `${browserAddOn.type || 'NONE'}`.toUpperCase();
+
+      if (normalizedType === 'CALL') {
+        const phoneNumber = this.resolveBrowserAddOnPhoneNumber(browserAddOn);
+
+        if (phoneNumber) {
+          creativeData.asset_feed_spec = creativeData.asset_feed_spec || {};
+          creativeData.asset_feed_spec.call_ads_configuration = {
+            call_destination_type: 'WEBSITE_AND_CALL',
+            phone_number: phoneNumber,
+          };
+          delete creativeData.asset_feed_spec.message_extensions;
+        } else {
+          this.logger.warn(
+            '[personalized-destinations] Browser add-on loại "CALL" đang bật nhưng thiếu số điện thoại — bỏ qua call_ads_configuration.',
+          );
+          if (creativeData.asset_feed_spec) {
+            delete creativeData.asset_feed_spec.call_ads_configuration;
+            // Người dùng đã CHỌN loại CALL → mọi loại NHẮN TIN cũ phải biến mất kể cả
+            // khi nhánh CALL bị bỏ qua vì thiếu số điện thoại. Thiếu dòng này thì
+            // message_extensions của lần lưu trước sống sót → creative lên Meta mang
+            // add-on loại KHÁC thứ người dùng thấy trên UI (và với creative POST_ID còn
+            // kéo lỗi 1815809 vì asset_feed_spec đi kèm object_story_id).
+            delete creativeData.asset_feed_spec.message_extensions;
+          }
+        }
+      } else if (
+        validMessageExtensionTypes.includes(normalizedType) &&
+        normalizedType !== 'NONE'
+      ) {
+        creativeData.asset_feed_spec = creativeData.asset_feed_spec || {};
+        creativeData.asset_feed_spec.message_extensions = [
+          { type: normalizedType },
+        ];
+        delete creativeData.asset_feed_spec.call_ads_configuration;
+      } else {
+        this.logger.warn(
+          `[personalized-destinations] Browser add-on loại "${browserAddOn.type}" không được path Meta API này hỗ trợ — bỏ qua browser add-ons.`,
+        );
+        if (creativeData.asset_feed_spec) {
+          delete creativeData.asset_feed_spec.call_ads_configuration;
+          delete creativeData.asset_feed_spec.message_extensions;
+        }
+      }
+    } else if (creativeData.asset_feed_spec) {
+      delete creativeData.asset_feed_spec.call_ads_configuration;
+      delete creativeData.asset_feed_spec.message_extensions;
+    }
+
+    // ── "Tối ưu đích đến website" → destination_spec.website.optimization ─────────
+    // PARITY mb-ads meta.service.ts (khối cùng tên trong buildCreativeData) — đọc chú
+    // thích đầy đủ ở đó. Tóm tắt bằng chứng: thí nghiệm có kiểm soát trên TKQC
+    // 281916477943407, diff 3 đời creative của ad 120255517228590196 (828765756870210
+    // khoá VẮNG MẶT → 1349235943997738 'OPT_IN' → 1566203988472853 'OPT_OUT') ⇒ Meta ghi
+    // hẳn OPT_OUT, không xoá khoá.
+    //
+    // 🔴 SỬA LỖI: nhánh TẮT trước đây xoá CẢ object destination_spec. Đo 24.040 creative
+    // production có destination_spec: 3 khoá con ĐỘC LẬP — native_commerce_experience
+    // 15.764 / website 15.155 / destination_type 569 (8.484 có native_commerce_experience
+    // mà KHÔNG có website; 497 có destination_type mà không có website).
+    // native_commerce_experience.shop = đích Shops ta KHÔNG quản, destination_type
+    // (SHOPS_MESSAGING / WEBSITE_AND_SHOP / SHOPS_MESSAGING_OPT_OUT) là đích quảng cáo
+    // Shops ⇒ xoá cả object = âm thầm cắt đích của quảng cáo Shops. Nay chỉ ghi/đè nhánh
+    // `website`, giữ nguyên mọi khoá anh em.
+    //
+    // ⚠️ Nhánh TẮT chỉ ghi OPT_OUT KHI creative ĐÃ CÓ destination_spec: bên mb-ads đầu ra
+    // buildCreativeData là publishedSnapshot + vế so sánh hai chiều của
+    // hasCreativeChangedVsSnapshot, thêm khoá mới vô điều kiện sẽ làm 2.063 quảng cáo
+    // đang chạy lệch snapshot → tạo lại creative hàng loạt (reset learning + mất social
+    // proof). Không ghi gì cũng đã đúng: 2.043/2.063 quảng cáo publish với
+    // optimize_website=false được Meta trả về "khoá website vắng mặt", 20 còn lại
+    // 'OPT_OUT' — cả hai đều là TẮT. Repo này BẮT BUỘC giữ y hệt điều kiện đó, nếu không
+    // cùng một bản nháp sẽ cho payload khác nhau tuỳ ai bấm publish.
+    // asObject: nháp là JSON tự do → chặn trường hợp destination_spec/website bị lưu
+    // sai kiểu (chuỗi/mảng) làm phép spread đẻ ra khoá rác "0","1"… gửi lên Meta.
+    const asObject = (value: any) =>
+      value && typeof value === 'object' && !Array.isArray(value)
+        ? value
+        : undefined;
+    const currentDestinationSpec = asObject(creativeData.destination_spec);
+    const withWebsiteOptimization = (status: 'OPT_IN' | 'OPT_OUT') => ({
+      ...(currentDestinationSpec || {}),
+      website: {
+        ...(asObject(currentDestinationSpec?.website) || {}),
+        optimization: {
+          status,
+          type: 'website_destination_optimization',
         },
-      };
+      },
+    });
+
+    if (optimizeWebsiteEnabled) {
+      if (websiteUrl) {
+        creativeData.destination_spec = withWebsiteOptimization('OPT_IN');
+      } else {
+        this.logger.warn(
+          '[personalized-destinations] "Tối ưu website" đang bật nhưng không tìm thấy website URL — bỏ qua destination_spec.',
+        );
+      }
+    } else if (currentDestinationSpec) {
+      creativeData.destination_spec = withWebsiteOptimization('OPT_OUT');
+    }
+
+    if (creativeData.asset_feed_spec) {
+      delete creativeData.asset_feed_spec.personalized_destinations;
     }
   }
 
+  // PARITY-LOCKED với mb-ads meta.service.ts#resolveBrowserAddOnPhoneNumber — chuẩn
+  // hoá số điện thoại Browser add-on "CALL" về dạng `tel:+<mã vùng><số>` Meta yêu cầu.
+  private resolveBrowserAddOnPhoneNumber(browserAddOn: any) {
+    const rawPhoneNumber = `${browserAddOn?.phoneNumber || browserAddOn?.phone_number || ''}`;
+    const rawCountryCode = `${browserAddOn?.countryCode || browserAddOn?.country_code || ''}`;
+    const phoneNumber = rawPhoneNumber.replace(/[^\d+]/g, '');
+    const countryCode = rawCountryCode.replace(/[^\d+]/g, '');
+
+    if (!phoneNumber) return undefined;
+    if (phoneNumber.startsWith('+')) return `tel:${phoneNumber}`;
+
+    if (countryCode) {
+      const normalizedCountryCode = countryCode.startsWith('+')
+        ? countryCode
+        : `+${countryCode}`;
+      return `tel:${normalizedCountryCode}${phoneNumber.replace(/^0+/, '')}`;
+    }
+
+    return `tel:+${phoneNumber.replace(/^0+/, '')}`;
+  }
+
+  // PARITY-LOCKED với mb-ads meta.service.ts#stripOptionalPersonalizedDestinationFields.
   private stripOptionalPersonalizedDestinationFields(creativeData: any) {
     let stripped = false;
 
-    if (creativeData.destination_spec) {
-      delete creativeData.destination_spec;
-      stripped = true;
+    // 🔴 SỬA LỖI (cùng lớp lỗi vừa vá ở applyPersonalizedDestinations ~2653): bản trước
+    // `delete creativeData.destination_spec` — XOÁ CẢ OBJECT. destination_spec có 3 khoá
+    // con ĐỘC LẬP (đo production: native_commerce_experience 15.764 / website 15.155 /
+    // destination_type 569); fallback này chạy khi Meta từ chối creative, tức đúng lúc
+    // payload đang mang dữ liệu thật → xoá cả object là âm thầm cắt đích Shops rồi TẠO
+    // creative bằng payload đã bị cắt. Khoá TUỲ CHỌN duy nhất do khối
+    // personalized_destinations sinh ra là `website.optimization` → chỉ bóc đúng nó, và
+    // chỉ xoá cả destination_spec khi bóc xong KHÔNG CÒN GÌ.
+    const destinationSpec = creativeData.destination_spec;
+    if (
+      destinationSpec &&
+      typeof destinationSpec === 'object' &&
+      !Array.isArray(destinationSpec)
+    ) {
+      const website = destinationSpec.website;
+      if (website && typeof website === 'object' && !Array.isArray(website)) {
+        if ('optimization' in website) {
+          delete website.optimization;
+          stripped = true;
+        }
+        if (Object.keys(website).length === 0) {
+          delete destinationSpec.website;
+        }
+      }
+
+      if (Object.keys(destinationSpec).length === 0) {
+        delete creativeData.destination_spec;
+      }
     }
 
     const assetFeed = creativeData.asset_feed_spec;
@@ -2560,14 +2776,28 @@ export class DraftAutomationMetaPublisherService {
       .join(' ')
       .toLowerCase();
 
-    return [
+    // 🔴 PARITY-LOCKED với mb-ads meta.service.ts#isOptionalPersonalizedDestinationError.
+    // Điều kiện kích hoạt PHẢI khớp đúng thứ stripOptionalPersonalizedDestinationFields
+    // bóc đi (4 khoá asset_feed_spec + destination_spec.website.optimization), nếu không
+    // lần thử lại gửi ĐÚNG payload cũ → hỏng lại → phí 1 lượt gọi Meta.
+    //  • BỎ 'destination_spec' trần: các khoá anh em (native_commerce_experience /
+    //    destination_type) nay KHÔNG còn bị bóc ⇒ chỉ nhận khi thông điệp có dấu hiệu
+    //    đúng nhánh website/optimization.
+    //  • BỎ 'website_and_shop': là GIÁ TRỊ của destination_spec.destination_type, không
+    //    đường nào bóc ⇒ retry phí 100%.
+    const mentionsStrippedField = [
       'call_ads_configuration',
-      'destination_spec',
       'message_extensions',
       'onsite_destinations',
       'personalized_destinations',
-      'website_and_shop',
+      'website_destination_optimization',
     ].some((field) => rawMessage.includes(field));
+
+    return (
+      mentionsStrippedField ||
+      (rawMessage.includes('destination_spec') &&
+        (rawMessage.includes('website') || rawMessage.includes('optimization')))
+    );
   }
 
   private formatMessageTemplate(template: any) {

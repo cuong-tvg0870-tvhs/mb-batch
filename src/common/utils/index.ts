@@ -198,6 +198,31 @@ export const metaErrorToFriendly = (metaError: any): string | null => {
     )
   )
     return 'Một thành phần (Bài viết có sẵn / Pixel / Catalog / Trang) không thuộc Tài khoản quảng cáo hoặc Trang đang chọn. Nếu bạn lên chiến dịch từ MẪU của tài khoản khác, hãy chọn lại đúng Bài viết/Pixel/Trang của tài khoản hiện tại rồi publish lại.';
+  // "Cải thiện nội dung tự động" (Advantage+ creative features): Meta blame thẳng tên
+  // field kỹ thuật — degrees_of_freedom_spec / creative_features_spec (vd code 100
+  // "creative_features_spec: Invalid key", hoặc từ chối vì OPT_IN một tính năng mà thiết
+  // lập quảng cáo không đủ điều kiện — hay gặp nhất là "Hiển thị sản phẩm"
+  // (PRODUCT_BROWSING) bật ở creative KHÔNG gắn Catalog). Là lỗi CẤU HÌNH NHÁP sửa được
+  // → có friendly ⇒ classifyMetaError xếp DRAFT_CONFIG thay vì SYSTEM.
+  //
+  // ⚠️ HAI RÀO CHỐNG BẮT NHẦM (`has` là OR — chỉ cần 1 từ khoá là khớp), GIỮ SONG SONG
+  // với mb-ads common/utils/index.ts:
+  // 1) ĐẶT SAU 2 rule cụ thể hơn (tệp đối tượng Custom/Lookalike, và "không thuộc tài
+  //    khoản") — thông điệp Meta thường GỘP nhiều field, để trước sẽ cướp lỗi của chúng
+  //    và trả sai hướng dẫn + xếp nhầm DRAFT_CONFIG.
+  // 2) `enroll_status` là khoá con CHUNG của nhiều spec khác → không được đứng một mình.
+  if (
+    has('degrees_of_freedom_spec', 'creative_features_spec') ||
+    (has('enroll_status') &&
+      has(
+        'product_browsing',
+        'product_metadata_automation',
+        'standard_enhancements',
+        'creative feature',
+        'advantage',
+      ))
+  )
+    return 'Thiết lập "Cải thiện nội dung tự động" (Advantage+) chưa hợp lệ với quảng cáo này — thường do bật "Hiển thị sản phẩm" cho quảng cáo không gắn Catalog. Hãy TẮT "Hiển thị sản phẩm" ở mẫu quảng cáo bị lỗi (hoặc gắn Catalog/Nhóm sản phẩm cho chiến dịch) rồi publish lại.';
   if (has('pixel', 'dataset', 'promoted object', 'promoted_object'))
     return 'Thiếu Pixel/Dataset hoặc đối tượng quảng bá (promoted object). Vui lòng chọn Pixel/Trang phù hợp với mục tiêu chiến dịch.';
   if (has('audience', 'targeting') && has('control', 'expand', 'invalid'))
