@@ -1,4 +1,7 @@
-import { CampaignRuleRunnerService } from './campaign-rule-runner.service';
+import {
+  CampaignRuleRunnerService,
+  RUN_DEADLINE_STORE,
+} from './campaign-rule-runner.service';
 import {
   INSIGHT_RATELIMIT_SLEEP_MS,
   META_CALL_TIMEOUT_MS,
@@ -15,17 +18,15 @@ import {
  * mặc định 60s (60+120+180 = 360s) dài hơn TTL 300s.
  */
 describe('bất biến hạn chót lượt chạy rule', () => {
-  // retriesWithinDeadline chỉ đọc this.runDeadlineAt nên không cần dựng DI.
-  const makeService = (remainingMs: number): CampaignRuleRunnerService => {
-    const svc = Object.create(
-      CampaignRuleRunnerService.prototype,
-    ) as CampaignRuleRunnerService;
-    (svc as any).runDeadlineAt = Date.now() + remainingMs;
-    return svc;
-  };
+  // retriesWithinDeadline chỉ đọc hạn chót trong RUN_DEADLINE_STORE nên không cần dựng DI.
+  const svc = Object.create(
+    CampaignRuleRunnerService.prototype,
+  ) as CampaignRuleRunnerService;
 
   const retriesFor = (remainingMs: number): number =>
-    (makeService(remainingMs) as any).retriesWithinDeadline();
+    RUN_DEADLINE_STORE.run({ at: Date.now() + remainingMs }, () =>
+      (svc as any).retriesWithinDeadline(),
+    );
 
   /** Worst-case của một lần gọi insight với k retry (nhánh rate-limit, chậm nhất). */
   const worstCaseMs = (k: number): number =>

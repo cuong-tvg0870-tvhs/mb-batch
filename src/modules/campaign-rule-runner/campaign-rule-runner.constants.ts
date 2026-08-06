@@ -56,6 +56,46 @@ export const TICK_WINDOW_MS = 15 * 60 * 1000;
  */
 export const TICK_MAX_WALL_MS = 15 * 60 * 1000;
 
+/**
+ * Trần thời gian một lượt QUÉT tự nguyện dừng, luôn nhỏ hơn TICK_MAX_WALL_MS.
+ *
+ * VÌ SAO: lượt quét chạy quá TICK_MAX_WALL_MS thì tick sau CƯỚP LƯỢT và chạy chồng lên
+ * — hai lượt quét cùng lúc nhân đôi tải Meta mà vẫn không cứu được slot đã rớt cửa sổ.
+ * Dừng sạch trước mốc đó thì tick kế tiếp là lượt DUY NHẤT đang chạy, và nhờ thứ tự
+ * ưu tiên "rule lỡ lâu nhất trước" (xem buildAccountQueues) đám còn dở được xử lý ngay
+ * ở lượt kế — vẫn nằm trong cửa sổ TICK_WINDOW_MS của cùng slot đó.
+ */
+export const TICK_SWEEP_MAX_WALL_MS = TICK_MAX_WALL_MS - 60 * 1000;
+
+/**
+ * Số TKQC được quét SONG SONG trong một lượt tick.
+ *
+ * VÌ SAO (sự cố "rule im lặng không chạy", chẩn đoán 06/08/2026): `runDueRules` trước
+ * đây duyệt TUẦN TỰ toàn bộ rule ACTIVE trong một vòng `for await`. Đo trên prod, một
+ * lượt quét kéo 9 → 46 phút (04/08: slot 09:00 mất 35', slot 11:00 mất 46'), trong khi
+ * cửa sổ bắt slot chỉ 15 phút ⇒ rule nằm cuối hàng RỚT KHỎI cửa sổ và mất hẳn slot đó,
+ * không lỗi, không log, không dòng nhật ký. Số đo: slot 11:00 ngày 06/08 có 164 rule
+ * đủ điều kiện nhưng chỉ 92 chạy được.
+ *
+ * Song song theo TKQC (KHÔNG phải theo rule) là có chủ đích: hạn mức Graph API của Meta
+ * tính THEO ad account, nên giữ mỗi TKQC đúng 1 luồng thì áp lực lên từng account không
+ * đổi so với hiện tại, chỉ có tổng thông lượng tăng. 67 TKQC × tối đa 79 rule/TKQC ⇒
+ * hàng dài nhất vẫn chạy tuần tự và không bị bỏ đói.
+ */
+export const RULE_SCAN_ACCOUNT_CONCURRENCY_DEFAULT = 8;
+
+/**
+ * Đọc LÚC CHẠY chứ không phải lúc nạp module: `ConfigModule` chỉ nạp `.env` vào
+ * `process.env` ở bước bootstrap, tức SAU khi các module đã được import — hằng số tính
+ * ở tầng module sẽ luôn hụt giá trị đặt trong `.env` (chỉ ăn env thật của container).
+ */
+export function ruleScanAccountConcurrency(): number {
+  const raw = Number(process.env.CAMPAIGN_RULE_SCAN_CONCURRENCY);
+  return Number.isFinite(raw) && raw >= 1
+    ? Math.floor(raw)
+    : RULE_SCAN_ACCOUNT_CONCURRENCY_DEFAULT;
+}
+
 /** Dung sai cho lịch INTERVAL: coi là "đến hạn" nếu còn thiếu <= 60s. */
 export const INTERVAL_TOLERANCE_MS = 60 * 1000;
 
@@ -95,6 +135,33 @@ export const INSIGHT_RATELIMIT_SLEEP_MS = 15 * 1000;
 
 /** Backoff cho lỗi MẠNG khi đọc insight: 5s/10s/15s. */
 export const INSIGHT_NETWORK_SLEEP_MS = 5 * 1000;
+
+/**
+ * Số khung hết hạn được dọn tối đa trong MỘT lượt chạy rule.
+ *
+ * Mỗi lần xoá là một lời gọi Graph riêng, nên dọn cả 50 khung có thể ngốn hết hạn chót
+ * lượt chạy (270s) — mà vượt hạn chót là mở đường cho bơm ngân sách hai lần. Trần 25
+ * vừa đủ giải phóng chỗ để tạo khung mới ngay lượt này, phần còn lại dọn nốt ở lượt sau.
+ */
+export const MAX_EXPIRED_PRUNE_PER_RUN = 25;
+
+/**
+ * Thời gian tối thiểu phải chừa lại trước hạn chót lượt chạy để còn kịp làm việc chính
+ * (tạo khung mới). Chạm mốc này thì ngừng dọn, dù còn khung hết hạn.
+ */
+export const PRUNE_MIN_HEADROOM_MS = 60 * 1000;
+
+/**
+ * Kill-switch dọn khung hết hạn (xoá thật trên Meta). Đặt
+ * `CAMPAIGN_RULE_PRUNE_EXPIRED=false` để tắt mà không cần deploy lại code.
+ * Đọc lúc chạy vì `.env` chỉ được nạp ở bước bootstrap (xem ruleScanAccountConcurrency).
+ */
+export function pruneExpiredSchedulesEnabled(): boolean {
+  return (
+    String(process.env.CAMPAIGN_RULE_PRUNE_EXPIRED ?? 'true').toLowerCase() !==
+    'false'
+  );
+}
 
 /** Độ sâu tối đa của cây group điều kiện được Prisma include. */
 export const MAX_GROUP_DEPTH = 6;

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { Injectable, Logger } from '@nestjs/common';
 import { AdSet, Campaign, FacebookAdsApi } from 'facebook-nodejs-business-sdk';
 import {
@@ -14,10 +15,15 @@ import {
   INSIGHT_FIELDS,
   INSIGHT_NETWORK_SLEEP_MS,
   INSIGHT_RATELIMIT_SLEEP_MS,
+  MAX_EXPIRED_PRUNE_PER_RUN,
   MAX_GROUP_DEPTH,
   META_CALL_TIMEOUT_MS,
+  PRUNE_MIN_HEADROOM_MS,
+  pruneExpiredSchedulesEnabled,
   RULE_LOCK_TTL_SECONDS,
   RULE_RUN_MAX_WALL_MS,
+  ruleScanAccountConcurrency,
+  TICK_SWEEP_MAX_WALL_MS,
 } from './campaign-rule-runner.constants';
 import {
   EvalContext,
@@ -28,9 +34,12 @@ import type { CustomMetricEvalDef } from './campaign-rule-custom-metric';
 import {
   buildRollingSpec,
   buildSpecs,
+  deleteBudgetSchedules,
   executeBudgetSchedule,
   fetchBudgetSchedules,
   fetchLiveBudget,
+  selectExpiredOwnedSchedules,
+  type LiveWindow,
   type RollingConfig,
 } from './campaign-rule-executor';
 import { resolveMetric } from './campaign-rule-metric.resolver';
@@ -70,12 +79,49 @@ function describeRollingSkip(skipReason?: string, availableSec?: number): string
 }
 
 /**
+ * Câu tiếng Việt cho nhân viên marketing đọc trong "Nhật ký & duyệt" khi lượt chạy có
+ * dọn khung hết hạn — để việc XOÁ TRÊN META không bao giờ diễn ra âm thầm. Danh sách id
+ * đầy đủ nằm ở `changePreview.prunedExpired`.
+ */
+function describePrune(
+  pruned: { deletedIds: string[]; failedIds: string[]; skipped: number } | null,
+): string {
+  if (!pruned || pruned.deletedIds.length === 0) return '';
+  const parts = [`đã dọn ${pruned.deletedIds.length} khung cũ đã hết hạn`];
+  if (pruned.failedIds.length > 0) parts.push(`${pruned.failedIds.length} khung xoá lỗi`);
+  if (pruned.skipped > 0) parts.push(`còn ${pruned.skipped} khung dọn ở lượt sau`);
+  return ` (${parts.join(', ')} — Meta chỉ cho tối đa 50 khung/đối tượng).`;
+}
+
+/**
  * Khóa trong `CampaignRuleRun.ruleSnapshot` (Json sẵn có — KHÔNG thêm cột) đánh dấu
  * lượt chạy CHẾT VÌ LỖI TẠM THỜI Ở KHÂU ĐỌC INSIGHT, tức chưa hề gọi Meta ghi gì →
  * slot này còn được phép thử lại. Chỉ runner ghi khóa này (mb-ads khi "áp lịch tay"
  * cũng tạo run nhưng KHÔNG bao giờ có khóa này → không bị hiểu nhầm là cần thử lại).
  */
 const RETRY_META_KEY = 'insightRetry';
+
+/**
+ * Hạn chót (epoch ms) của LƯỢT CHẠY RULE hiện tại — chốt chặn chống bơm ngân sách hai lần.
+ *
+ * VÌ SAO LÀ AsyncLocalStorage CHỨ KHÔNG PHẢI FIELD CỦA SERVICE: trước đây `runDueRules`
+ * duyệt rule tuần tự nên chỉ có đúng một lượt chạy tại một thời điểm, để hạn chót ở
+ * `this.runDeadlineAt` là an toàn. Từ khi quét SONG SONG theo TKQC, nhiều lượt chạy cùng
+ * tồn tại trong một process; một field dùng chung sẽ bị lượt sau ghi đè hạn chót của lượt
+ * trước → `retriesWithinDeadline()` tính theo mốc của rule KHÁC → có thể ngủ quá TTL khóa
+ * `crr:<ruleId>` (300s) → replica/lượt khác chiếm khóa và tạo khung chồng nhau.
+ * AsyncLocalStorage gắn hạn chót vào ĐÚNG chuỗi async của từng lượt chạy nên mỗi rule
+ * giữ mốc của riêng nó. Export để test đọc/ghi được mà không phải dựng DI.
+ */
+export const RUN_DEADLINE_STORE = new AsyncLocalStorage<{ at: number }>();
+
+/** Một hàng đợi rule của MỘT ad account — đơn vị được quét song song. */
+interface AccountQueue {
+  accountId: string;
+  rules: any[];
+  /** Mốc chạy gần nhất của rule đói nhất trong hàng (epoch ms; 0 = chưa chạy bao giờ). */
+  starvedSince: number;
+}
 
 /** Chi tiết kỹ thuật của một lỗi gọi Meta — LƯU để debug, KHÔNG hiện lên message chính. */
 interface MetaFailureDetail {
@@ -210,13 +256,14 @@ interface RunnerEntity {
 export class CampaignRuleRunnerService {
   private readonly logger = new Logger(CampaignRuleRunnerService.name);
   private metaInitialized = false;
+
   /**
-   * Mốc thời gian (epoch ms) mà lượt chạy rule hiện tại phải kết thúc trước, để không
-   * vượt TTL của khóa `crr:<ruleId>`. An toàn khi để ở cấp instance vì `runDueRules`
-   * xử lý các rule TUẦN TỰ (vòng `for` có await) — không có 2 lượt chạy chồng nhau
-   * trong cùng một process.
+   * Hạn chót của lượt chạy rule ĐANG ở trong chuỗi async này (xem RUN_DEADLINE_STORE).
+   * Không có store ⇒ không có hạn chót (gọi executeRun ngoài luồng quét, vd từ test).
    */
-  private runDeadlineAt = Number.POSITIVE_INFINITY;
+  private deadlineAt(): number {
+    return RUN_DEADLINE_STORE.getStore()?.at ?? Number.POSITIVE_INFINITY;
+  }
 
   constructor(
     private readonly prisma: PrismaService,
@@ -282,10 +329,30 @@ export class CampaignRuleRunnerService {
     this.metaInitialized = true;
   }
 
-  /** Điểm vào từ scheduler: quét mọi rule ACTIVE, xử lý rule nào đến hạn. */
+  /**
+   * Điểm vào từ scheduler: quét mọi rule ACTIVE, xử lý rule nào đến hạn.
+   *
+   * BA TÍNH CHẤT phải giữ (sự cố "rule im lặng không chạy", 06/08/2026 — xem
+   * RULE_SCAN_ACCOUNT_CONCURRENCY để biết số đo trên prod):
+   *
+   * 1. SONG SONG THEO TKQC. Mỗi ad account là một hàng đợi chạy tuần tự, các hàng chạy
+   *    song song. Hạn mức Graph API tính theo account nên áp lực lên từng account không
+   *    đổi; chỉ tổng thông lượng tăng, đủ để một lượt quét gọn trong cửa sổ slot 15'.
+   *
+   * 2. CÔNG BẰNG. `findMany` KHÔNG có `orderBy` ⇒ Postgres trả gần như cố định theo thứ
+   *    tự heap ⇒ khi lượt quét bị cắt ngắn thì LUÔN LÀ CÙNG một nhóm rule bị bỏ, tức đói
+   *    kinh niên chứ không phải xui ngẫu nhiên. Nay xếp "rule lỡ lâu nhất chạy trước" nên
+   *    rule bị bỏ lượt này chắc chắn nằm đầu hàng lượt sau.
+   *
+   * 3. DỪNG SẠCH TRƯỚC TRẦN. Quá TICK_MAX_WALL_MS thì scheduler cướp lượt và chạy chồng
+   *    lên, nhân đôi tải Meta mà không cứu được gì. Tự dừng ở TICK_SWEEP_MAX_WALL_MS và
+   *    log số rule còn dở — im lặng bỏ dở chính là thứ khiến sự cố này ẩn suốt nhiều ngày.
+   */
   async runDueRules(): Promise<void> {
     this.initMetaApi();
     const now = new Date();
+    const sweepStartedAt = Date.now();
+    const sweepDeadlineAt = sweepStartedAt + TICK_SWEEP_MAX_WALL_MS;
 
     const rules = await this.prisma.campaignRule.findMany({
       where: {
@@ -303,26 +370,154 @@ export class CampaignRuleRunnerService {
     });
 
     if (rules.length === 0) return;
-    this.logger.log(`🔎 Quét ${rules.length} campaign rule ACTIVE...`);
 
-    for (const rule of rules) {
-      try {
-        await this.processRule(rule, now);
-      } catch (error) {
-        this.logger.error(
-          `Rule ${rule.id} (${rule.name}) lỗi: ${error?.message || error}`,
-        );
+    const lastRunAtById = await this.loadLastRunAtMap(rules.map((r) => r.id));
+    const queues = this.buildAccountQueues(rules, lastRunAtById);
+    const workers = Math.min(ruleScanAccountConcurrency(), queues.length);
+    this.logger.log(
+      `🔎 Quét ${rules.length} campaign rule ACTIVE trên ${queues.length} TKQC ` +
+        `(${workers} luồng song song)...`,
+    );
+
+    // tz của account dùng lại trong cả lượt quét — 1149 rule mà chỉ ~67 account.
+    const tzCache = new Map<string, string>();
+    let cursor = 0;
+    let scanned = 0;
+    let unscanned = 0;
+
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        const index = cursor;
+        cursor += 1;
+        if (index >= queues.length) return;
+        const queue = queues[index];
+        for (let i = 0; i < queue.rules.length; i += 1) {
+          if (Date.now() >= sweepDeadlineAt) {
+            unscanned += queue.rules.length - i;
+            break;
+          }
+          const rule = queue.rules[i];
+          try {
+            await this.processRule(rule, now, {
+              // `undefined` (map hỏng) ⇒ processRule tự truy vấn lại. KHÔNG được rơi về
+              // `null`: null nghĩa là "chưa chạy bao giờ" ⇒ mọi rule INTERVAL đến hạn ngay.
+              lastRunAt: lastRunAtById
+                ? (lastRunAtById.get(rule.id) ?? null)
+                : undefined,
+              tzCache,
+            });
+          } catch (error) {
+            this.logger.error(
+              `Rule ${rule.id} (${rule.name}) lỗi: ${error?.message || error}`,
+            );
+          }
+          scanned += 1;
+        }
       }
+    };
+
+    await Promise.all(Array.from({ length: workers }, () => worker()));
+
+    // Hàng đợi chưa đụng tới (worker chưa kịp nhận) cũng là rule chưa được quét.
+    for (let i = Math.min(cursor, queues.length); i < queues.length; i += 1) {
+      unscanned += queues[i].rules.length;
+    }
+    const elapsedSec = Math.round((Date.now() - sweepStartedAt) / 1000);
+    if (unscanned > 0) {
+      this.logger.error(
+        `Lượt quét chạm trần ${TICK_SWEEP_MAX_WALL_MS / 1000}s: mới xử lý ${scanned}/` +
+          `${rules.length} rule, CÒN ${unscanned} rule chưa quét (sẽ được ưu tiên ở lượt ` +
+          `sau vì xếp theo "lỡ lâu nhất trước"). Cân nhắc tăng CAMPAIGN_RULE_SCAN_CONCURRENCY.`,
+      );
+    } else {
+      this.logger.log(`✅ Quét xong ${scanned} rule trong ${elapsedSec}s.`);
     }
   }
 
+  /**
+   * Mốc `scheduledFor` gần nhất của từng rule — MỘT truy vấn gộp thay cho N lần
+   * `getLastRunAt` (1149 rule = 1149 round-trip mỗi lượt quét). Cùng ngữ nghĩa với
+   * getLastRunAt: loại dòng SKIPPED_OUT_OF_DATE_RANGE (dấu trạng thái, không phải lượt chạy).
+   * Trả `null` khi truy vấn hỏng → gọi hàm sẽ tự lùi về đường cũ, KHÔNG được coi là
+   * "chưa chạy bao giờ" (rule INTERVAL sẽ đến hạn ngay lập tức ⇒ chạy sai lịch).
+   */
+  private async loadLastRunAtMap(
+    ruleIds: string[],
+  ): Promise<Map<string, Date | null> | null> {
+    try {
+      const rows = await this.prisma.campaignRuleRun.groupBy({
+        by: ['ruleId'],
+        where: {
+          ruleId: { in: ruleIds },
+          status: { not: 'SKIPPED_OUT_OF_DATE_RANGE' },
+        },
+        _max: { scheduledFor: true },
+      });
+      const map = new Map<string, Date | null>();
+      for (const row of rows) map.set(row.ruleId, row._max.scheduledFor ?? null);
+      return map;
+    } catch (error) {
+      this.logger.warn(
+        `Không nạp được mốc chạy gần nhất theo lô (${
+          error?.message || error
+        }) → lùi về truy vấn từng rule.`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Gom rule thành hàng đợi theo TKQC, xếp "đói nhất trước" ở CẢ HAI cấp: rule trong
+   * hàng, và thứ tự các hàng (vì khi số hàng > số luồng thì hàng nhận sau cũng có thể
+   * không kịp). Rule chưa chạy bao giờ được coi là đói nhất (mốc 0).
+   * Chốt hạ bằng `id` để thứ tự TẤT ĐỊNH — không có tie-break thì hai lượt quét liên
+   * tiếp có thể đảo thứ tự và tái lập đúng kiểu đói kinh niên đang phải sửa.
+   */
+  private buildAccountQueues(
+    rules: any[],
+    lastRunAtById: Map<string, Date | null> | null,
+  ): AccountQueue[] {
+    const starvedSince = (rule: any): number =>
+      lastRunAtById?.get(rule.id)?.getTime() ?? 0;
+
+    const byAccount = new Map<string, any[]>();
+    for (const rule of rules) {
+      const key = rule.accountId ?? '';
+      const list = byAccount.get(key);
+      if (list) list.push(rule);
+      else byAccount.set(key, [rule]);
+    }
+
+    const queues: AccountQueue[] = [];
+    for (const [accountId, list] of byAccount) {
+      list.sort(
+        (a, b) =>
+          starvedSince(a) - starvedSince(b) || String(a.id).localeCompare(b.id),
+      );
+      queues.push({ accountId, rules: list, starvedSince: starvedSince(list[0]) });
+    }
+    queues.sort(
+      (a, b) =>
+        a.starvedSince - b.starvedSince ||
+        a.accountId.localeCompare(b.accountId),
+    );
+    return queues;
+  }
+
   /** Kiểm tra dueness rồi chạy dưới khóa phân tán chống chồng cross-replica. */
-  private async processRule(rule: any, now: Date): Promise<void> {
+  private async processRule(
+    rule: any,
+    now: Date,
+    ctx?: { lastRunAt?: Date | null; tzCache?: Map<string, string> },
+  ): Promise<void> {
     const schedule = rule.schedule;
     if (!schedule) return;
 
-    const timezone = await this.resolveTimezone(rule);
-    const lastRunAt = await this.getLastRunAt(rule.id);
+    const timezone = await this.resolveTimezone(rule, ctx?.tzCache);
+    const lastRunAt =
+      ctx?.lastRunAt !== undefined
+        ? ctx.lastRunAt
+        : await this.getLastRunAt(rule.id);
     const dueness = isRuleDue(schedule, lastRunAt, now, timezone);
 
     let aligned: Date;
@@ -527,6 +722,16 @@ export class CampaignRuleRunnerService {
     now: Date,
     attempt = 0,
   ): Promise<void> {
+    // Mở store hạn chót cho ĐÚNG chuỗi async của lượt chạy này rồi gọi lại chính mình
+    // (một lần duy nhất — nhánh dưới đã có store). Cách này giữ nguyên chữ ký và thân
+    // hàm, thay cho field `runDeadlineAt` cũ vốn bị các lượt chạy song song ghi đè nhau.
+    if (!RUN_DEADLINE_STORE.getStore()) {
+      return RUN_DEADLINE_STORE.run(
+        { at: Date.now() + RULE_RUN_MAX_WALL_MS },
+        () => this.executeRun(rule, timezone, aligned, key, now, attempt),
+      );
+    }
+
     const ruleSnapshot: Record<string, any> = {
       name: rule.name,
       level: rule.level,
@@ -569,10 +774,10 @@ export class CampaignRuleRunnerService {
     // Số entity bị bỏ dở vì lượt chạy chạm hạn chót (xem runDeadlineAt bên dưới).
     let deadlineSkipped = 0;
 
-    // Hạn chót của lượt chạy: khóa `crr:<ruleId>` KHÔNG tự gia hạn, nên mọi thứ có thể
-    // ngủ/chờ phải nằm gọn trong RULE_RUN_MAX_WALL_MS. Quá hạn mà vẫn chạy tiếp = chạy
-    // KHÔNG có khóa → replica khác có thể vào cùng rule → bơm ngân sách hai lần.
-    this.runDeadlineAt = Date.now() + RULE_RUN_MAX_WALL_MS;
+    // Hạn chót của lượt chạy (đặt ở đầu hàm, trong RUN_DEADLINE_STORE): khóa
+    // `crr:<ruleId>` KHÔNG tự gia hạn, nên mọi thứ có thể ngủ/chờ phải nằm gọn trong
+    // RULE_RUN_MAX_WALL_MS. Quá hạn mà vẫn chạy tiếp = chạy KHÔNG có khóa → replica khác
+    // có thể vào cùng rule → bơm ngân sách hai lần.
 
     try {
       // Chỉ hỗ trợ level CAMPAIGN + ADSET, và cần campaignId để scope.
@@ -591,7 +796,7 @@ export class CampaignRuleRunnerService {
         for (const entity of entities) {
           // Chạm hạn chót → DỪNG SẠCH, không bắt đầu entity mới. Thà bỏ sót vài entity
           // (lượt quét sau xử lý) còn hơn chạy tiếp khi khóa đã có thể hết hạn.
-          if (Date.now() >= this.runDeadlineAt) {
+          if (Date.now() >= this.deadlineAt()) {
             deadlineSkipped = entities.length - entitiesScanned;
             this.logger.warn(
               `Rule ${rule.id} run ${run.id} chạm hạn chót ${RULE_RUN_MAX_WALL_MS}ms → ` +
@@ -943,6 +1148,17 @@ export class CampaignRuleRunnerService {
           });
           continue;
         }
+        // Dọn khung hết hạn TRƯỚC khi tạo: Meta chặn 50 khung/entity và không tự dọn
+        // khung đã kết thúc, không dọn thì entity chạy lâu sẽ tắc vĩnh viễn.
+        const pruned = await this.pruneExpiredSchedules({
+          level,
+          entityId: entity.id,
+          nowUnix: Math.floor(Date.now() / 1000),
+        });
+        const prunedNote = describePrune(pruned);
+        const previewWithPrune = pruned
+          ? { ...changePreview, prunedExpired: pruned }
+          : changePreview;
         const result = await executeBudgetSchedule(level, entity.id, specs);
         if (result.ok) {
           await this.createItem({
@@ -952,9 +1168,9 @@ export class CampaignRuleRunnerService {
             entity,
             status: 'EXECUTED',
             snapshot,
-            changePreview,
+            changePreview: previewWithPrune,
             evaluation,
-            matchedConditionSummary: `${evalSummary} → đã đẩy budget schedule.`,
+            matchedConditionSummary: `${evalSummary} → đã đẩy budget schedule.${prunedNote}`,
             executedAt: new Date(),
             executionAttempts: 1,
             metaTraceId: result.metaTraceId,
@@ -971,9 +1187,9 @@ export class CampaignRuleRunnerService {
             entity,
             status: 'FAILED',
             snapshot,
-            changePreview,
+            changePreview: previewWithPrune,
             evaluation,
-            matchedConditionSummary: `${evalSummary} nhưng đẩy Meta thất bại.`,
+            matchedConditionSummary: `${evalSummary} nhưng đẩy Meta thất bại.${prunedNote}`,
             errorMessage: execFail.message,
             executionAttempts: 1,
             executionError: {
@@ -1190,6 +1406,19 @@ export class CampaignRuleRunnerService {
       return { matched: 1, errors: 0 };
     }
 
+    // Dọn khung hết hạn TRƯỚC khi nối khung mới. `live` đã đọc ở trên nên KHÔNG tốn
+    // thêm lời gọi Graph nào cho việc phát hiện — chỉ tốn khi thật sự có khung để xoá.
+    const pruned = await this.pruneExpiredSchedules({
+      level,
+      entityId: entity.id,
+      nowUnix: specNowUnix,
+      live,
+    });
+    const prunedNote = describePrune(pruned);
+    const previewWithPrune = pruned
+      ? { ...changePreview, prunedExpired: pruned }
+      : changePreview;
+
     const result = await executeBudgetSchedule(level, entity.id, [spec]);
     if (result.ok) {
       await this.createItem({
@@ -1199,9 +1428,9 @@ export class CampaignRuleRunnerService {
         entity,
         status: 'EXECUTED',
         snapshot,
-        changePreview,
+        changePreview: previewWithPrune,
         evaluation,
-        matchedConditionSummary: `${evalSummary} → đã nối khung tăng ngân sách.`,
+        matchedConditionSummary: `${evalSummary} → đã nối khung tăng ngân sách.${prunedNote}`,
         executedAt: new Date(),
         executionAttempts: 1,
         metaTraceId: result.metaTraceId,
@@ -1218,9 +1447,9 @@ export class CampaignRuleRunnerService {
       entity,
       status: 'FAILED',
       snapshot,
-      changePreview,
+      changePreview: previewWithPrune,
       evaluation,
-      matchedConditionSummary: `${evalSummary} nhưng đẩy Meta thất bại.`,
+      matchedConditionSummary: `${evalSummary} nhưng đẩy Meta thất bại.${prunedNote}`,
       errorMessage: execFail.message,
       executionAttempts: 1,
       executionError: {
@@ -1248,6 +1477,93 @@ export class CampaignRuleRunnerService {
       select: { metaBudgetScheduleIds: true },
     });
     return new Set(items.flatMap((i) => i.metaBudgetScheduleIds).map(String));
+  }
+
+  /**
+   * Mọi khung mà HỆ THỐNG từng tạo trên entity này, KHÔNG giới hạn theo rule.
+   *
+   * Khác `gatherOwnedScheduleIds` (rule-scoped, dùng để tính `coveredUntil` — "khung của
+   * MÌNH"): ở đây câu hỏi là "khung này có phải do hệ thống đặt không, hay do người dùng
+   * tự đặt trên giao diện Meta". Một entity có thể bị nhiều rule cùng đắp khung (thực tế
+   * prod: nhóm 120238082193720399 có 2 rule), nếu chỉ dọn khung của đúng rule đang chạy
+   * thì phần rác của rule kia vẫn chiếm chỗ và entity vẫn tắc.
+   */
+  private async gatherSystemScheduleIds(entityId: string): Promise<Set<string>> {
+    const items = await this.prisma.campaignRuleRunItem.findMany({
+      where: { entityId, NOT: { metaBudgetScheduleIds: { isEmpty: true } } },
+      select: { metaBudgetScheduleIds: true },
+    });
+    return new Set(items.flatMap((i) => i.metaBudgetScheduleIds).map(String));
+  }
+
+  /**
+   * Dọn khung ĐÃ HẾT HẠN do hệ thống tạo, ngay TRƯỚC khi tạo khung mới.
+   *
+   * Meta chặn 50 khung/entity và không tự dọn khung đã kết thúc (xem
+   * selectExpiredOwnedSchedules). Không dọn thì entity chạy đủ lâu sẽ tắc vĩnh viễn:
+   * mọi lượt khớp điều kiện đều FAILED "Bạn có thể thiết lập đến 50 khoảng thời gian…",
+   * ngân sách không được bơm mà nhật ký nhìn vẫn như rule đang chạy bình thường.
+   *
+   * Trả `null` khi không có gì để dọn (đường phổ biến — không tốn thêm lời gọi nào).
+   * Ngược lại trả danh sách đã xoá để ghi vào nhật ký làm "danh sách đã xoá của hệ thống".
+   */
+  private async pruneExpiredSchedules(params: {
+    level: 'CAMPAIGN' | 'ADSET';
+    entityId: string;
+    nowUnix: number;
+    /** Danh sách khung live nếu caller đã đọc sẵn (nhánh ROLLING) — đỡ 1 lời gọi Graph. */
+    live?: LiveWindow[];
+  }): Promise<{
+    deletedIds: string[];
+    failedIds: string[];
+    skipped: number;
+    oldestEnd: number;
+    newestEnd: number;
+  } | null> {
+    if (!pruneExpiredSchedulesEnabled()) return null;
+    try {
+      const live =
+        params.live ?? (await fetchBudgetSchedules(params.level, params.entityId));
+      if (live.length === 0) return null;
+      const systemIds = await this.gatherSystemScheduleIds(params.entityId);
+      const expired = selectExpiredOwnedSchedules(
+        live,
+        systemIds,
+        params.nowUnix,
+      );
+      if (expired.length === 0) return null;
+
+      // Cũ nhất trước (selectExpiredOwnedSchedules đã sắp), cắt theo trần mỗi lượt.
+      const batch = expired.slice(0, MAX_EXPIRED_PRUNE_PER_RUN);
+      const deadlineAt = this.deadlineAt();
+      const res = await deleteBudgetSchedules(
+        batch.map((w) => w.id),
+        () => Date.now() >= deadlineAt - PRUNE_MIN_HEADROOM_MS,
+      );
+      const skipped =
+        expired.length - batch.length + res.skippedIds.length;
+      this.logger.log(
+        `Dọn khung hết hạn ${params.level} ${params.entityId}: xoá ${res.removed}/` +
+          `${expired.length} khung (lỗi ${res.failedIds.length}, để lại lượt sau ${skipped}).`,
+      );
+      if (res.deletedIds.length === 0 && res.failedIds.length === 0) return null;
+      return {
+        deletedIds: res.deletedIds,
+        failedIds: res.failedIds,
+        skipped,
+        oldestEnd: batch[0].time_end,
+        newestEnd: batch[batch.length - 1].time_end,
+      };
+    } catch (error) {
+      // Dọn dẹp KHÔNG được làm hỏng việc chính: lỗi ở đây chỉ ghi log, lượt chạy đi tiếp
+      // (cùng lắm là gặp lại lỗi trần 50 như trước khi có bản vá này).
+      this.logger.warn(
+        `Dọn khung hết hạn ${params.level} ${params.entityId} lỗi: ${
+          (error as Error)?.message || error
+        }`,
+      );
+      return null;
+    }
   }
 
   /** Fetch insight LIVE khung HÔM NAY cho campaign/adset. Trả object phẳng (rỗng nếu không có). */
@@ -1345,7 +1661,7 @@ export class CampaignRuleRunnerService {
    * lại ở lượt sau) còn hơn chạy tiếp khi khóa đã có thể chết.
    */
   private retriesWithinDeadline(): number {
-    const remainingMs = this.runDeadlineAt - Date.now();
+    const remainingMs = this.deadlineAt() - Date.now();
     for (let k = 3; k >= 1; k -= 1) {
       // Tổng ngủ = INSIGHT_RATELIMIT_SLEEP_MS × (1+2+...+k) = ×k(k+1)/2
       const sleepMs = (INSIGHT_RATELIMIT_SLEEP_MS * k * (k + 1)) / 2;
@@ -1475,16 +1791,28 @@ export class CampaignRuleRunnerService {
     return last?.scheduledFor ?? null;
   }
 
-  /** rule.timezone hoặc, nếu "account", tz của ad account (fallback default). */
-  private async resolveTimezone(rule: any): Promise<string> {
+  /**
+   * rule.timezone hoặc, nếu "account", tz của ad account (fallback default).
+   * `cache` (nếu có) dùng chung trong MỘT lượt quét — ~67 account cho 1149 rule, không
+   * cache thì mỗi rule tốn một round-trip DB chỉ để lấy lại cùng một chuỗi.
+   */
+  private async resolveTimezone(
+    rule: any,
+    cache?: Map<string, string>,
+  ): Promise<string> {
     if (rule.timezone && rule.timezone !== 'account') return rule.timezone;
+    const cached = cache?.get(rule.accountId);
+    if (cached) return cached;
     try {
       const account = await this.prisma.account.findUnique({
         where: { id: rule.accountId },
         select: { timezone: true },
       });
-      return account?.timezone || DEFAULT_TIMEZONE;
+      const tz = account?.timezone || DEFAULT_TIMEZONE;
+      cache?.set(rule.accountId, tz);
+      return tz;
     } catch {
+      // KHÔNG cache fallback: lỗi DB thoáng qua mà nhớ lại thì cả lượt quét dùng sai tz.
       return DEFAULT_TIMEZONE;
     }
   }

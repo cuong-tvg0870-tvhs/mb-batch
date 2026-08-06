@@ -437,20 +437,70 @@ export async function fetchLiveBudget(
  */
 export async function deleteBudgetSchedules(
   ids: string[],
-): Promise<{ removed: number; errors: string[]; failedIds: string[] }> {
+  // Chốt chặn thời gian: mỗi lần xoá là một lời gọi Graph (tối đa 30s). Xoá hàng chục
+  // khung có thể kéo lượt chạy vượt TTL khóa `crr:<ruleId>` → khóa chết giữa chừng →
+  // bơm ngân sách hai lần. Caller truyền hàm này để dừng sạch khi sắp hết giờ; phần
+  // chưa đụng tới trả về trong `skippedIds` (vẫn còn trên Meta, dọn nốt ở lượt sau).
+  shouldStop?: () => boolean,
+): Promise<{
+  removed: number;
+  errors: string[];
+  failedIds: string[];
+  skippedIds: string[];
+  deletedIds: string[];
+}> {
   let removed = 0;
   const errors: string[] = [];
   const failedIds: string[] = [];
-  for (const id of ids) {
+  const deletedIds: string[] = [];
+  const skippedIds: string[] = [];
+  for (const [index, id] of ids.entries()) {
+    if (shouldStop?.()) {
+      skippedIds.push(...ids.slice(index));
+      break;
+    }
     try {
       await new HighDemandPeriod(id).delete([]);
       removed += 1;
+      deletedIds.push(id);
     } catch (e) {
       errors.push(parseMetaError(e).message);
       failedIds.push(id);
     }
   }
-  return { removed, errors, failedIds };
+  return { removed, errors, failedIds, skippedIds, deletedIds };
+}
+
+/**
+ * Khung ĐÃ KẾT THÚC và do HỆ THỐNG tạo — tập ứng viên DUY NHẤT được phép xoá, xếp cũ
+ * nhất trước.
+ *
+ * VÌ SAO CẦN (prod 06/08/2026): Meta chặn tối đa 50 "khoảng thời gian có nhu cầu cao"
+ * trên mỗi entity (lỗi code 100 PERMANENT, message "Bạn có thể thiết lập đến 50 khoảng
+ * thời gian có nhu cầu cao") và KHÔNG tự dọn khung đã hết hạn — chúng nằm lại như object
+ * cho tới khi bị xoá. Xác minh bằng Graph API: 2 campaign kín đúng 50/50 mà cả 50 đều đã
+ * kết thúc, khung cũ nhất từ 10/2025 ⇒ rule tắc hoàn toàn, mọi lượt khớp đều FAILED.
+ *
+ * HAI ĐIỀU KIỆN không được nới:
+ *  - `time_end < now`: khung còn hiệu lực/tương lai mà xoá là can thiệp vào ngân sách
+ *    đang chạy. Khung đã kết thúc thì Meta đã đưa ngân sách về gốc, xoá là vô hại.
+ *  - `ownedIds`: chỉ khung do hệ thống tạo (id có trong nhật ký của mình). Khung người
+ *    dùng tự đặt trên giao diện Meta KHÔNG phải của mình để đụng vào.
+ */
+export function selectExpiredOwnedSchedules(
+  live: LiveWindow[],
+  ownedIds: Set<string>,
+  nowUnix: number,
+): LiveWindow[] {
+  return live
+    .filter(
+      (w) =>
+        ownedIds.has(w.id) &&
+        Number.isFinite(w.time_end) &&
+        w.time_end > 0 &&
+        w.time_end < nowUnix,
+    )
+    .sort((a, b) => a.time_end - b.time_end);
 }
 
 /**

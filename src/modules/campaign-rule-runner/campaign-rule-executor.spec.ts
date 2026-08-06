@@ -48,6 +48,12 @@ describe('deleteBudgetSchedules — best-effort + failedIds (giữ ownership khi
   it('danh sách rỗng → không gọi Meta', async () => {
     const r = await deleteBudgetSchedules([]);
     expect(mockDelete).not.toHaveBeenCalled();
-    expect(r).toEqual({ removed: 0, errors: [], failedIds: [] });
+    expect(r).toEqual({
+      removed: 0,
+      errors: [],
+      failedIds: [],
+      skippedIds: [],
+      deletedIds: [],
+    });
   });
 });
