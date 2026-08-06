@@ -210,12 +210,19 @@ function costPerArr(insight: any, field: string): number | null {
  *   - Họ website (Website purchases, Website purchase value, Cost per website purchase,
  *     Website purchase ROAS) = `offsite_conversion.fb_pixel_purchase` — chỉ purchase trên
  *     website qua Meta pixel.
+ *   - Họ Meta    (Meta purchases / "Lượt mua hàng trên Meta") = `onsite_conversion.purchase`
+ *     — purchase xảy ra TRÊN Meta (Shop/tin nhắn), KHÔNG qua website. Đây là phần bù của
+ *     họ website trong omni: đối chiếu prod 7 ngày (CampaignInsight.actions):
+ *     omni_purchase 29.675 = offsite_conversion.fb_pixel_purchase 17.270 +
+ *     onsite_conversion.purchase 12.399 (+ app 6). KHÔNG dùng `onsite_app_purchase`
+ *     (12.405) vì nó đã gộp thêm purchase trong app → lệch cột Ads Manager.
  * Lịch sử: trước đây tính (purchase + onsite_conversion.purchase) / spend theo "chuẩn công
  * ty" (khớp card/Engine 2) nên LỆCH số Meta; đã đổi sang khớp Meta theo yêu cầu — số rule
  * giờ trùng Ads Manager (nhưng có thể khác con số trên card).
  */
 const OMNI_PURCHASE_AT = ['omni_purchase', 'purchase'];
 const WEB_PURCHASE_AT = ['offsite_conversion.fb_pixel_purchase'];
+const META_PURCHASE_AT = ['onsite_conversion.purchase'];
 
 /**
  * ROAS đọc THẲNG field Meta (`purchase_roas` / `website_purchase_roas`) — mỗi field là
@@ -326,6 +333,26 @@ export function resolveMetric(
   if (key === 'cost_per_website_purchase' || key === 'cost_per_unique_website_purchase') {
     return pickCost(insight, WEB_PURCHASE_AT);
   }
+  // --- Họ MUA HÀNG TRÊN META (onsite: Shop/tin nhắn) ---
+  if (key === 'meta_purchases') return pickAction(insight?.actions, META_PURCHASE_AT);
+  if (key === 'meta_purchase_value') {
+    return pickAction(insight?.action_values, META_PURCHASE_AT);
+  }
+  if (key === 'cost_per_meta_purchase') return pickCost(insight, META_PURCHASE_AT);
+  if (key === 'meta_purchase_roas') {
+    // Meta KHÔNG trả field ROAS riêng cho onsite (đối chiếu prod: `purchase_roas` chỉ có
+    // action_type `omni_purchase`, `website_purchase_roas` chỉ có
+    // `offsite_conversion.fb_pixel_purchase`) → TỰ TÍNH giá trị đơn Meta / chi tiêu.
+    // spend<=0 → null (không coi chia-0 là hợp lệ, giống pickCost).
+    const value = pickAction(insight?.action_values, META_PURCHASE_AT);
+    const spend = toNumber(insight?.spend);
+    return value != null && spend != null && spend > 0 ? value / spend : null;
+  }
+  if (key === 'average_meta_purchase_value') {
+    const value = pickAction(insight?.action_values, META_PURCHASE_AT);
+    const count = pickAction(insight?.actions, META_PURCHASE_AT);
+    return value != null && count != null && count > 0 ? value / count : null;
+  }
   if (key === 'average_website_purchase_value') {
     // Giá trị mua TB trên website = Website purchase value / Website purchases.
     // count<=0 → null (KHÔNG coi chia-0 là hợp lệ — giống pickCost).
@@ -386,6 +413,12 @@ export const BUDGET_SCHEDULE_SUPPORTED_METRICS: readonly string[] = [
   'cost_per_website_purchase',
   'cost_per_unique_website_purchase',
   'average_website_purchase_value',
+  // Họ mua hàng TRÊN META (onsite_conversion.purchase) — Shop/tin nhắn.
+  'meta_purchases',
+  'meta_purchase_value',
+  'cost_per_meta_purchase',
+  'meta_purchase_roas',
+  'average_meta_purchase_value',
   // cost_per_result: resolver ĐÃ có nhánh riêng từ trước nhưng bị SÓT khỏi danh sách
   // này → trước đây không dùng được làm base custom metric dù vẫn chấm được. Vá parity.
   'cost_per_result',
