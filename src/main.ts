@@ -20,17 +20,45 @@ axios.defaults.timeout = 30000;
 // (rule runner, insight-sync, media-sync...) đều bắt tay TCP+TLS mới → tốn thời
 // gian + dễ dồn cục vào phút cron chẵn. keepAlive tái dùng socket giữa các request.
 // maxSockets=128: trần chủ động tránh cạn ephemeral port, cao hơn nhu cầu thực tế của job song song.
-// (ép any: TS coi `globalAgent` trên namespace import là binding chỉ-đọc, Node cho phép gán.)
-(http as any).globalAgent = new http.Agent({
-  keepAlive: true,
-  keepAliveMsecs: 30000,
-  maxSockets: 128,
-});
-(https as any).globalAgent = new https.Agent({
-  keepAlive: true,
-  keepAliveMsecs: 30000,
-  maxSockets: 128,
-});
+//
+// TUYỆT ĐỐI KHÔNG gán đè `http.globalAgent = new Agent(...)`.
+// `import * as http` + esModuleInterop ⇒ tsc emit `__importStar(require('http'))`,
+// tạo một BẢN SAO namespace mà `__createBinding` định nghĩa từng thuộc tính bằng
+// `Object.defineProperty(..., { get })` — CHỈ CÓ GETTER. Gán vào bản sao đó ném
+// `TypeError: Cannot set property globalAgent of #<Object> which has only a getter`
+// NGAY LÚC NẠP MODULE, trước cả bootstrap, nên không log nào của app kịp chạy.
+// (`#<Object>` chứ không phải `#<Module>` chính là dấu vết của bản sao này — bản
+// thân Node vẫn cho gán `http.globalAgent` bình thường.)
+// Không bẫy được ở máy dev: `tsc --noEmit` không THỰC THI, và local không ai chạy
+// `dist/src/main.js`. Chỉ container mới nạp đúng file đó.
+// Sự cố prod 05/08/2026: container mb-batch crash-loop 1102 lần, mb-batch chết 25 giờ
+// (meta-sync + rule runner + automation) mà pipeline CI/CD vẫn báo xanh.
+const KEEP_ALIVE = { keepAlive: true, keepAliveMsecs: 30000, maxSockets: 128 };
+
+// Đường chính: mọi call Graph API đi qua instance axios singleton ở trên.
+axios.defaults.httpAgent = new http.Agent(KEEP_ALIVE);
+axios.defaults.httpsAgent = new https.Agent(KEEP_ALIVE);
+
+// Phần còn lại (client MinIO, http thuần...) vẫn dùng agent mặc định của Node → sửa
+// TẠI CHỖ trên instance sẵn có. `keepAlive`/`keepAliveMsecs` là property THẬT của
+// Agent lúc chạy (constructor gán từ options, nên sửa `agent.options` sau đó vô tác
+// dụng) nhưng @types/node không khai báo → phải nới kiểu.
+// try/catch là BÀI HỌC từ chính sự cố trên: đây chỉ là tinh chỉnh hiệu năng, không
+// đáng để làm chết cả service nếu một bản Node sau này khoá các thuộc tính này lại.
+type TunableAgent = http.Agent & { keepAlive?: boolean; keepAliveMsecs?: number };
+try {
+  for (const agent of [http.globalAgent, https.globalAgent] as TunableAgent[]) {
+    agent.keepAlive = KEEP_ALIVE.keepAlive;
+    agent.keepAliveMsecs = KEEP_ALIVE.keepAliveMsecs;
+    agent.maxSockets = KEEP_ALIVE.maxSockets;
+  }
+} catch (error) {
+  console.warn(
+    `Không chỉnh được keep-alive cho globalAgent (bỏ qua, axios đã có agent riêng): ${
+      (error as Error)?.message ?? error
+    }`,
+  );
+}
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
