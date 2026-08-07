@@ -223,6 +223,20 @@ export const metaErrorToFriendly = (metaError: any): string | null => {
       ))
   )
     return 'Thiết lập "Cải thiện nội dung tự động" (Advantage+) chưa hợp lệ với quảng cáo này — thường do bật "Hiển thị sản phẩm" cho quảng cáo không gắn Catalog. Hãy TẮT "Hiển thị sản phẩm" ở mẫu quảng cáo bị lỗi (hoặc gắn Catalog/Nhóm sản phẩm cho chiến dịch) rồi publish lại.';
+  // Mã 3 "Application does not have the capability to make this API call" — Meta từ chối
+  // vì ỨNG DỤNG thiếu năng lực, không phải người dùng cấu hình sai.
+  // Thông điệp gốc KHÔNG kèm tên field nào nên `has(...)` vô dụng — phải bắt theo MÃ.
+  // Đã tái hiện 07-08-2026: `asset_feed_spec.message_extensions` (sinh từ
+  // `personalized_destinations.browser_addons`, giao diện gọi là "Tiện ích liên hệ nhanh")
+  // → đúng mã 3, với cả WHATSAPP lẫn MESSENGER; bỏ field đó ra thì tạo creative bình thường.
+  // Parity mb-ads (common/utils/index.ts) — sửa một bên phải sửa bên kia.
+  // ⚠️ CẬP NHẬT 07-08-2026 (cuối ngày): mã 3 KHÔNG chỉ đến từ "Tiện ích liên hệ nhanh".
+  // Cả nhánh `destination_spec.native_commerce_experience` cũng bị chặn (`.product_browsing`
+  // = công tắc "Duyệt sản phẩm", và `.shop`); riêng `destination_spec.website.optimization`
+  // thì gửi bình thường. Thông điệp gốc không kèm tên field nên phải liệt kê CẢ HAI công
+  // tắc — thiếu một cái là người dùng đi tắt nhầm rồi publish lại vẫn lỗi y nguyên.
+  if (Number(metaError?.code) === 3)
+    return 'Meta từ chối vì ứng dụng chưa được cấp quyền dùng tính năng này — KHÔNG phải do bạn chọn sai tài khoản hay Trang. Trong hộp "Điểm đến cá nhân hoá" của mẫu quảng cáo, hãy TẮT một trong hai công tắc sau rồi publish lại: "Tiện ích liên hệ nhanh" hoặc "Duyệt sản phẩm" (nếu bật cả hai thì tắt cả hai). Muốn dùng thật thì phải xin Meta cấp quyền cho ứng dụng — một lần xin là mở được cả hai.';
   if (has('pixel', 'dataset', 'promoted object', 'promoted_object'))
     return 'Thiếu Pixel/Dataset hoặc đối tượng quảng bá (promoted object). Vui lòng chọn Pixel/Trang phù hợp với mục tiêu chiến dịch.';
   if (has('audience', 'targeting') && has('control', 'expand', 'invalid'))

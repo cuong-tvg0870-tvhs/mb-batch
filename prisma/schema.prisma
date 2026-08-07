@@ -2511,18 +2511,63 @@ model ProductCatalog {
   name             String
   fallbackImageUrl String?
   businessId       String? // Business Manager ID (plain string)
+  /// @deprecated LUÔN NULL — KHÔNG đọc cột này để suy ra "catalog thuộc TKQC nào".
+  /// CẢ HAI writer đều ghi đè `accountId: null` ở CẢ nhánh create LẪN update mỗi lần
+  /// sync (mb-ads `syncCatalogs` meta.service.ts:~4997-5010; mb-batch entity-sync bản
+  /// sao 1:1), nên giá trị thật không bao giờ tồn tại quá một vòng cron. Ánh xạ
+  /// TKQC ↔ catalog segment nằm ở `CpasPartnership`. KHÔNG drop: 2 writer dùng chung DB.
   accountId        String? // Ad Account ID (plain string)
 
-  productSets     ProductSet[]
-  productFeeds    ProductFeed[]
-  userCatalogs    UserProductCatalog[]
-  projectCatalogs ProjectProductCatalog[]
+  // ===== Collaborative Ads (CPAS) — nhận diện "catalog segment của nhà bán lẻ" =====
+  // Meta trả catalog về hệ thống qua 3 edge khác nhau (owned_product_catalogs /
+  // client_product_catalogs / assigned_product_catalogs) nhưng `syncCatalogs` hiện gộp
+  // PHẲNG vào một map → mất thông tin catalog đến từ đâu, và không có cách nào phân biệt
+  // "catalog của mình" với "catalog segment đối tác chia sẻ sang" (điều kiện tiên quyết
+  // của CPAS). 3 cột dưới đây phục hồi đúng phần thông tin ĐÃ được fetch nhưng đang bị vứt đi.
+  //
+  // isCatalogSegment: catalog này có phải catalog segment do nhà bán lẻ chia sẻ không.
+  //   NULL = CHƯA XÁC ĐỊNH (mọi hàng cũ, và hàng sync bằng code cũ) — KHÔNG đồng nghĩa false.
+  //   Nguồn: field `is_catalog_segment`. Tài liệu Meta KHÔNG liệt kê field này, nhưng ĐÃ ĐO
+  //   THẬT 07-08-2026 trên business 1916878948527753: Meta trả về đủ 44/44 catalog trên CẢ
+  //   HAI edge owned_product_catalogs và client_product_catalogs → dùng thẳng được, không
+  //   cần vòng qua `GET /{catalog_id}/collaborative_ads_share_settings` (edge đó có tài liệu
+  //   và cũng truy cập được, dùng làm nguồn đối chiếu khi cần chắc chắn tuyệt đối).
+  isCatalogSegment Boolean?
+  /// Edge nào đã trả về catalog này: 'OWNED' | 'CLIENT' | 'ASSIGNED' (một catalog có thể
+  /// đến từ nhiều edge). 'CLIENT' là tín hiệu mạnh nhất của catalog đối tác.
+  sourceEdges      String[] @default([])
+  /// Tên Business sở hữu catalog (đã fetch sẵn qua `business{id,name}` trong catalogFields
+  /// nhưng đang bị bỏ đi). Dùng để marketer nhìn thấy "catalog này của nhà bán lẻ nào".
+  ownerBusinessName String?
+  /// Mốc sync gần nhất — phân biệt "chưa từng sync lại bằng code mới" với "đã sync và
+  /// xác định là không phải segment".
+  lastSyncedAt     DateTime?
+
+  // ===== CHỈ điền được cho segment DO CHÍNH MÌNH TẠO (vai NHÀ BÁN LẺ) =====
+  // Khi mình gọi `POST /owned_product_catalogs` thì mình TỰ BIẾT parent_catalog_id và
+  // catalog_segment_filter vì chính mình truyền lên — ghi lại tại thời điểm tạo.
+  // Segment do ĐỐI TÁC chia sẻ sang (vai NHÃN HÀNG) thì 2 cột này LUÔN NULL: tài liệu
+  // Meta không xác nhận `parent_catalog_id` đọc ngược được từ node ProductCatalog.
+  // => NULL nghĩa là "không biết", TUYỆT ĐỐI không suy ra "segment không có cha".
+  parentCatalogId      String?
+  /// JSON rule đã dùng để cắt segment (tham số `catalog_segment_filter`). Meta mô tả nó
+  /// đúng một câu "A JSON-encoded rule" và KHÔNG liệt kê schema — nên lưu nguyên văn
+  /// những gì mình gửi đi, đừng cố parse thành cột.
+  catalogSegmentFilter Json?
+
+  productSets      ProductSet[]
+  productFeeds     ProductFeed[]
+  userCatalogs     UserProductCatalog[]
+  projectCatalogs  ProjectProductCatalog[]
+  cpasPartnerships CpasPartnership[]
+  cpasShares       CpasCatalogSegmentShare[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([businessId])
   @@index([accountId])
+  @@index([isCatalogSegment])
 }
 
 model ProductSet {
@@ -2551,6 +2596,123 @@ model ProductFeed {
   updatedAt DateTime @updatedAt
 
   @@index([catalogId])
+}
+
+/// Trạng thái quan hệ hợp tác CPAS giữa 1 TKQC của mình và 1 catalog segment của nhà bán lẻ.
+/// PENDING  = đã khai báo trong hệ thống nhưng CHƯA xác minh được bằng Meta API.
+/// ACTIVE   = đã đọc được share settings hợp lệ (được phép chạy quảng cáo).
+/// REVOKED  = nhà bán lẻ đã thu hồi quyền (segment biến mất khỏi share settings).
+/// ERROR    = gọi Meta lỗi (thiếu scope / token hỏng) — xem `lastError`, KHÔNG suy ra là REVOKED.
+enum CpasPartnershipStatus {
+  PENDING
+  ACTIVE
+  REVOKED
+  ERROR
+}
+
+/// CHIỀU NHẬN (vai NHÃN HÀNG): ánh xạ TKQC của MÌNH ↔ catalog segment ĐỐI TÁC chia sẻ sang.
+/// Chiều ngược lại (vai NHÀ BÁN LẺ, mình cắt segment chia cho brand) nằm ở
+/// `CpasCatalogSegmentShare` — CỐ Ý tách 2 bảng, xem giải thích ở model đó.
+///
+/// TẠI SAO CẦN BẢNG RIÊNG: Meta ràng buộc mỗi TKQC chỉ chọn được catalog segment của
+/// ĐÚNG nhà bán lẻ đã liên kết với TKQC đó, nhưng hệ thống hiện KHÔNG lưu ánh xạ này ở
+/// bất kỳ đâu — `ProductCatalog.accountId` luôn bị cả 2 writer ghi `null` mỗi lần sync
+/// (xem chú thích ở cột đó), và dropdown catalog là GLOBAL (không nhận accountId). Không
+/// có bảng này thì marketer chọn nhầm segment → Meta trả lỗi lúc publish thay vì chặn sớm.
+///
+/// Các cột phản chiếu ĐÚNG hợp đồng `POST /{catalog_segment_id}/agencies` trong tài liệu
+/// Meta (business / permitted_tasks / utm_settings / enabled_collab_terms), để sau này đọc
+/// ngược từ `GET /{catalog_id}/collaborative_ads_share_settings` là map thẳng được.
+///
+/// `accountId` là SCALAR, CỐ Ý không @relation sang Account — theo đúng tiền lệ
+/// `AutomationRuleAdAccount`: không thêm back-relation vào model Account cũ.
+///
+/// ADDITIVE: bảng + enum HOÀN TOÀN MỚI → không writer nào đang chạy biết tới nó, nên áp
+/// migration này lên prod trước khi deploy backend là an toàn tuyệt đối. Bảng RỖNG được
+/// hiểu là "chưa khai báo gì" và tầng UI phải FAIL-OPEN (không chặn), không phải "cấm hết".
+model CpasPartnership {
+  id String @id @default(cuid())
+
+  /// TKQC của mình sẽ chạy quảng cáo CPAS (scalar, không FK — xem giải thích trên).
+  accountId String
+  /// Catalog segment do nhà bán lẻ chia sẻ. FK sang ProductCatalog vì segment CŨNG LÀ
+  /// một node ProductCatalog trên Meta (có edge /product_sets bình thường) và đã đi vào
+  /// bảng đó sẵn qua `client_product_catalogs`.
+  segmentCatalogId String
+  segmentCatalog   ProductCatalog @relation(fields: [segmentCatalogId], references: [id], onDelete: Cascade)
+
+  /// Business của nhà bán lẻ (chủ segment) — hiển thị cho marketer biết đang chạy cho ai.
+  retailerBusinessId   String?
+  retailerBusinessName String?
+
+  status CpasPartnershipStatus @default(PENDING)
+
+  /// permitted_tasks Meta trả về: 'ADVERTISE' | 'MANAGE'. Thiếu 'ADVERTISE' = không chạy được QC.
+  permittedTasks     String[] @default([])
+  /// enabled_collab_terms: 'ENFORCE_CREATE_NEW_AD_ACCOUNT' | 'ENFORCE_SHARE_AD_PERFORMANCE_ACCESS'.
+  enabledCollabTerms String[] @default([])
+  /// utm_settings (campaign_source / campaign_medium / campaign_name) do nhà bán lẻ ép.
+  utmSettings        Json?
+
+  /// Mốc xác minh gần nhất bằng Meta API + lỗi gần nhất (nếu có). `lastError` khác NULL
+  /// KHÔNG có nghĩa quan hệ đã mất — có thể chỉ là token thiếu scope.
+  lastVerifiedAt DateTime?
+  lastError      String?
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([accountId, segmentCatalogId])
+  @@index([accountId])
+  @@index([segmentCatalogId])
+}
+
+/// CHIỀU CHIA SẺ ĐI (vai NHÀ BÁN LẺ): segment MÌNH cắt ra từ catalog của mình rồi chia
+/// cho Business của nhãn hàng, qua `POST /{catalog_segment_id}/agencies`.
+///
+/// TẠI SAO TÁCH KHỎI `CpasPartnership` thay vì thêm cột `direction`: hai chiều có khoá
+/// chống trùng KHÁC NHAU — chiều nhận là (TKQC của mình, segment), chiều chia sẻ là
+/// (segment, Business đối tác). Gộp một bảng thì cột phân biệt buộc phải nullable, mà
+/// Postgres coi mỗi NULL là một giá trị KHÁC NHAU nên UNIQUE mất tác dụng đúng ở chiều
+/// có NULL; cách vá là partial unique index (`WHERE direction = ...`) — thứ Prisma không
+/// khai báo được trong schema, dẫn tới drift vĩnh viễn giữa schema và DB thật. Hai bảng
+/// thì mỗi bảng giữ được NOT NULL sạch và UNIQUE thật sự có hiệu lực.
+/// Vòng đời cũng khác: một bên là quyền MÌNH ĐƯỢC CẤP, một bên là quyền MÌNH CẤP ĐI.
+///
+/// ADDITIVE: bảng mới hoàn toàn. Rỗng = "chưa chia sẻ gì", không được hiểu là cấm.
+model CpasCatalogSegmentShare {
+  id String @id @default(cuid())
+
+  /// Segment MÌNH sở hữu (đã tạo bằng `POST /owned_product_catalogs`). Xem
+  /// `ProductCatalog.parentCatalogId` / `catalogSegmentFilter` để biết nó cắt từ đâu.
+  segmentCatalogId String
+  segmentCatalog   ProductCatalog @relation(fields: [segmentCatalogId], references: [id], onDelete: Cascade)
+
+  /// Business của NHÃN HÀNG được chia sẻ — chính là tham số `business` của
+  /// `POST /{catalog_segment_id}/agencies`.
+  partnerBusinessId   String
+  partnerBusinessName String?
+
+  status CpasPartnershipStatus @default(PENDING)
+
+  /// permitted_tasks đã cấp: 'ADVERTISE' | 'MANAGE'.
+  permittedTasks     String[] @default([])
+  /// enabled_collab_terms đã ép: 'ENFORCE_CREATE_NEW_AD_ACCOUNT' | 'ENFORCE_SHARE_AD_PERFORMANCE_ACCESS'.
+  enabledCollabTerms String[] @default([])
+  /// utm_settings mình ép nhãn hàng gắn (campaign_source / campaign_medium / campaign_name).
+  utmSettings        Json?
+
+  lastVerifiedAt DateTime?
+  lastError      String?
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([segmentCatalogId, partnerBusinessId])
+  @@index([segmentCatalogId])
+  @@index([partnerBusinessId])
 }
 
 model SavedFilter {

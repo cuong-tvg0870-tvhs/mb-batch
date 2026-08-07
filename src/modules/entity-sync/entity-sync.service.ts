@@ -274,8 +274,11 @@ export class EntitySyncService {
 
     try {
       const api = new FacebookAdsApi(accessToken);
+      // `is_catalog_segment`: không có trong tài liệu Meta nhưng ĐÃ ĐO THẬT 07-08-2026,
+      // Meta trả đủ 44/44 catalog trên cả owned lẫn client. Dùng để nhận diện catalog
+      // segment của nhà bán lẻ (Collaborative Ads / CPAS). Parity mb-ads syncCatalogs.
       const catalogFields =
-        'id,name,product_sets.limit(100){id,name,filter},business{id,name},product_feeds.limit(100){id,name,country,schedule}';
+        'id,name,is_catalog_segment,product_sets.limit(100){id,name,filter},business{id,name},product_feeds.limit(100){id,name,country,schedule}';
       const catalogParams = () => ({ limit: 100, fields: catalogFields });
 
       const [ownedRes, clientRes, assignedRes] = await Promise.allSettled([
@@ -284,29 +287,60 @@ export class EntitySyncService {
         api.call('GET', ['me', 'assigned_product_catalogs'], catalogParams()),
       ]);
 
+      // ⚠️ CRON NÀY LÀ NGUỒN LÀM MỚI TỰ ĐỘNG DUY NHẤT (endpoint tay ở mb-ads chỉ chạy khi
+      // có người bấm). Nếu chỉ deploy mb-ads mà không deploy file này, bản cũ sẽ ghi đè
+      // row ProductCatalog và XOÁ MẤT nhãn segment sau 24h. Phải deploy CÙNG ĐỢT.
       const catalogsMap = new Map<string, any>();
-      for (const res of [ownedRes, clientRes, assignedRes]) {
+      const edgeOf = new Map<string, Set<string>>();
+      const edges: Array<['OWNED' | 'CLIENT' | 'ASSIGNED', PromiseSettledResult<any>]> =
+        [
+          ['OWNED', ownedRes],
+          ['CLIENT', clientRes],
+          ['ASSIGNED', assignedRes],
+        ];
+      for (const [edge, res] of edges) {
         // api.call trả về unknown → cast để đọc .data (giống mb-ads syncCatalogs).
         const value = res.status === 'fulfilled' ? (res.value as any) : null;
-        if (!Array.isArray(value?.data)) continue;
-        for (const item of value.data) catalogsMap.set(item.id, item);
+        if (!Array.isArray(value?.data)) {
+          // Promise.allSettled nuốt lỗi im lặng — thiếu scope sẽ rớt hẳn một edge mà
+          // không ai biết. Ghi vào stats để còn lần được trong nhật ký chạy.
+          const msg = `Catalog sync: edge ${edge} không lấy được dữ liệu`;
+          stats.errors.push(msg);
+          ctx?.warn(msg);
+          continue;
+        }
+        for (const item of value.data) {
+          catalogsMap.set(item.id, {
+            ...(catalogsMap.get(item.id) || {}),
+            ...item,
+          });
+          if (!edgeOf.has(item.id)) edgeOf.set(item.id, new Set());
+          edgeOf.get(item.id)!.add(edge);
+        }
       }
 
       const catalogs = Array.from(catalogsMap.values());
+      const syncedAt = new Date();
       for (const catalog of catalogs) {
+        // Vắng mặt ≠ false → giữ NULL nghĩa là "chưa xác định".
+        const isCatalogSegment =
+          typeof catalog.is_catalog_segment === 'boolean'
+            ? catalog.is_catalog_segment
+            : null;
+        const catalogFacts = {
+          name: catalog.name,
+          businessId: catalog.business?.id || null,
+          ownerBusinessName: catalog.business?.name || null,
+          isCatalogSegment,
+          sourceEdges: Array.from(edgeOf.get(catalog.id) || []).sort(),
+          lastSyncedAt: syncedAt,
+          // GIỮ accountId: null — cột chết, ánh xạ TKQC ↔ catalog ở CpasPartnership.
+          accountId: null,
+        };
         await this.prisma.productCatalog.upsert({
           where: { id: catalog.id },
-          update: {
-            name: catalog.name,
-            businessId: catalog.business?.id || null,
-            accountId: null,
-          },
-          create: {
-            id: catalog.id,
-            name: catalog.name,
-            businessId: catalog.business?.id || null,
-            accountId: null,
-          },
+          update: catalogFacts,
+          create: { id: catalog.id, ...catalogFacts },
         });
         stats.catalogs += 1;
 

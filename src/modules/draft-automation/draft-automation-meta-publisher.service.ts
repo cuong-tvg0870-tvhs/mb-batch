@@ -23,8 +23,43 @@ import {
   accountCanPromotePage,
   pageIdFromStory,
 } from '../../common/utils/promote-pages.util';
+import { AppConfigReader } from '../app-config/app-config.reader';
 import { PrismaService } from '../prisma/prisma.service';
 import { activatePendingAutomationForCampaign } from './pending-automation-activator';
+
+// ── Knob "Tiện ích liên hệ nhanh" (asset_feed_spec.message_extensions) ──────────────
+// mb-batch KHÔNG có registry (registry chỉ tồn tại ở mb-ads:
+// src/modules/app-config/app-config.registry.ts ~163) nên key + mặc định + NHÃN được
+// chép nguyên văn xuống đây để hai repo không lệch chữ. Sửa một bên phải soi bên kia.
+//
+//   key    = 'quick_contact_capability'   type = string   default = 'UNKNOWN'
+//   label  = 'Năng lực "Tiện ích liên hệ nhanh" (Meta cấp cho ứng dụng)'
+//
+// GẮN THEO ỨNG DỤNG, KHÔNG THEO TÀI KHOẢN QUẢNG CÁO — đã đo chéo 07-08-2026 trên
+// act_1016912473495319 và act_1262628191933179: CẢ HAI đều bị Meta từ chối với
+// `(#3) Application does not have the capability to make this API call.`
+// ⇒ knob TOÀN HỆ THỐNG, đừng biến thành cấu hình per-TKQC.
+//
+// Ba trạng thái, CỐ Ý không dùng boolean:
+//   'UNKNOWN'     – chưa biết (mặc định). KHÔNG gỡ, KHÔNG chặn gì → giữ nguyên 100%
+//                   hành vi cũ, deploy knob này không làm ai mất tính năng đang dùng được.
+//   'AVAILABLE'   – Meta chấp nhận → gửi bình thường (y như UNKNOWN).
+//   'UNAVAILABLE' – gỡ message_extensions TRƯỚC khi gọi Meta (FE khoá công tắc kèm lý do).
+// Việc DÒ LẠI (probe) là của mb-ads — do admin bấm; mb-batch tuyệt đối không tự dò.
+const QUICK_CONTACT_CAPABILITY_KEY = 'quick_contact_capability';
+const QUICK_CONTACT_CAPABILITY_LABEL =
+  'Năng lực "Tiện ích liên hệ nhanh" (Meta cấp cho ứng dụng)';
+const QUICK_CONTACT_CAPABILITY_DEFAULT = 'UNKNOWN';
+
+/**
+ * ⛔ CỜ TẠM 07-08-2026 — bật = KHÔNG gỡ `asset_feed_spec.message_extensions` dù knob đang
+ * `UNAVAILABLE`. Chủ hệ thống yêu cầu: thà thấy lỗi Meta thật còn hơn để hệ thống âm thầm
+ * bỏ tiện ích của người dùng rồi báo đăng thành công.
+ * Đặt `false` để trả lại hành vi gỡ tự động.
+ * ⚠️ mb-ads có cờ CÙNG TÊN (`MetaService.TAM_TAT_GO_QUICK_CONTACT`) — phải đổi CẢ HAI
+ * cùng lúc, lệch nhau thì cùng một bản nháp đăng tay và cron cho ra payload khác nhau.
+ */
+const TAM_TAT_GO_QUICK_CONTACT = true;
 
 type PublishStepStatus =
   | 'pending'
@@ -40,7 +75,12 @@ export class DraftAutomationMetaPublisherService {
   );
   private initialized = false;
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    // Đọc/ghi knob quick_contact_capability. DraftAutomationModule đã imports
+    // AppConfigModule sẵn nên không phải sửa wiring.
+    private readonly appConfig: AppConfigReader,
+  ) {}
 
   private init() {
     if (this.initialized) return;
@@ -534,13 +574,30 @@ export class DraftAutomationMetaPublisherService {
 
             const creativeData = this.buildCreativeData(adPayload);
             // Toggle "Hiển thị sản phẩm": OPT_OUT mặc định để tránh lỗi "tạo nội
-            // dung động mà không có ID nhóm sản phẩm". Chỉ tác động ở bước tạo
-            // creative, không đụng diff/snapshot. KHÔNG áp cho POST_ID (bài viết có sẵn).
+            // dung động mà không có ID nhóm sản phẩm". Hàm này cũng ghi toggle "Duyệt
+            // sản phẩm" (product_browsing) vì nó là nơi duy nhất được chạm
+            // degrees_of_freedom_spec. Chỉ tác động ở bước tạo creative, không đụng
+            // diff/snapshot. KHÔNG áp cho POST_ID (bài viết có sẵn).
+            // ⚠️ LỆCH PARITY CÓ SẴN (không do thay đổi này tạo ra): mb-ads gọi hàm tương
+            // ứng KHÔNG có guard object_story_id (meta.service.ts ~3462) ⇒ với creative
+            // tham chiếu bài viết, đăng tay qua mb-ads có degrees_of_freedom_spec (kể cả
+            // product_browsing) còn cron này thì không. Ai gỡ/đổi guard phải sửa CẢ HAI.
             if (!creativeData.object_story_id)
               this.applyProductExtensionsPreference(
                 creativeData,
                 adPayload.creative,
               );
+            // 🔴 GỌI RIÊNG, NGOÀI cả guard `object_story_id` lẫn guard catalog bên trong
+            // applyProductExtensionsPreference — parity với mb-ads (meta.service.ts, ngay
+            // sau applyProductExtensionsPreference). Hai guard đó là của "Hiển thị sản
+            // phẩm"; để "Duyệt sản phẩm" thừa hưởng chúng thì toggle bị NUỐT IM LẶNG với
+            // catalog ad và với quảng cáo dùng bài viết có sẵn: người dùng bật được, nháp
+            // lưu đúng, publish không lỗi, mà Meta không nhận gì.
+            this.applyProductBrowsingPreference(creativeData, adPayload.creative);
+            // Catalog ad BẮT BUỘC instagram_user_id, nếu không Meta từ chối ở bước tạo AD
+            // (#100 subcode 1772103). Parity mb-ads
+            // MetaService.attachInstagramActorForCatalogCreative.
+            await this.attachInstagramActorForCatalogCreative(creativeData);
             // Đích nhắn tin combo (Messenger + Instagram…) → creative BẮT BUỘC khai
             // asset_feed_spec DOF_MESSAGING_DESTINATION, nếu không Meta từ chối tạo Ad
             // (subcode 2446493). destination_type ĐÃ CHỐT nằm ở adSetData. Parity mb-ads.
@@ -983,8 +1040,25 @@ export class DraftAutomationMetaPublisherService {
     const metaPayload = { ...(payload || {}) };
     delete metaPayload.id;
     delete metaPayload.advantage_catalog;
+    // Chỉ xoá field PHẲNG (metadata nháp); `promoted_object` lồng bên trong được spread
+    // giữ nguyên — đó mới là chỗ Meta nhận catalog id cho catalog ad.
     delete metaPayload.product_catalog_id;
     delete metaPayload.bid_amount;
+
+    // LƯỚI AN TOÀN (parity mb-ads MetaService.buildCampaignCreatePayload): Meta BẮT BUỘC
+    // `is_adset_budget_sharing_enabled` khi campaign KHÔNG có ngân sách cấp chiến dịch —
+    // thiếu thì từ chối tạo, lỗi #100 subcode 4834011. Đã tái hiện thật 07-08-2026.
+    // Nháp do automation sinh ra không đi qua FE nên KHÔNG chắc có field này ⇒ mặc định
+    // false. Có CBO thì để nguyên, không gửi thừa.
+    const hasCampaignBudget =
+      metaPayload.daily_budget !== undefined ||
+      metaPayload.lifetime_budget !== undefined;
+    if (
+      !hasCampaignBudget &&
+      metaPayload.is_adset_budget_sharing_enabled === undefined
+    ) {
+      metaPayload.is_adset_budget_sharing_enabled = false;
+    }
 
     // BACKSTOP lịch chạy quá khứ cấp CHIẾN DỊCH (CBO lifetime). Meta dùng start_time/
     // stop_time ở campaign khi ngân sách trọn đời nằm ở đây; mốc bê từ mẫu có thể đã QUA →
@@ -1659,6 +1733,12 @@ export class DraftAutomationMetaPublisherService {
       // Toggle UI "Hiển thị sản phẩm" — không gửi raw lên Meta; dịch sang
       // degrees_of_freedom_spec ở bước tạo creative (applyProductExtensionsPreference).
       'show_products',
+      // Product set của Tiện ích sản phẩm — cũng chỉ là field nháp; giá trị thật đi lên
+      // qua creative_sourcing_spec.associated_product_set_id do
+      // applyProductExtensionsPreference đặt. An toàn khi strip ở đây vì hàm đó đọc từ
+      // `adPayload.creative` (bản gốc), không đọc từ creativeData đã dọn.
+      'productExtensionsSetId',
+      'product_extensions_set_id',
     ];
     for (const field of uiOnlyFields) delete creativeData[field];
 
@@ -1961,9 +2041,26 @@ export class DraftAutomationMetaPublisherService {
     adAccount: AdAccount,
     creativeData: any,
   ) {
+    // CỔNG "Tiện ích liên hệ nhanh" đặt Ở ĐÂY chứ không nằm trong
+    // applyPersonalizedDestinations (2673): khối đó SYNC và PARITY-LOCKED nguyên văn với
+    // mb-ads, còn đọc knob thì phải await. Đây lại là điểm gọi Meta tạo creative DUY NHẤT
+    // của toàn mb-batch nên gỡ ở đây phủ 100% đường publish tự động — và quan trọng hơn:
+    // payload sau khi gỡ GIỐNG HỆT payload mb-ads gửi, tức parity KẾT QUẢ vẫn nguyên vẹn
+    // dù chỗ đặt gate hai bên khác nhau.
+    // ⛔ Cờ tạm đặt Ở ĐÂY (nơi gọi), CỐ Ý không đặt bên trong hàm gate — parity với
+    // mb-ads. Đặt trong hàm sẽ biến thân hàm thành code chết và làm đỏ test khoá hành vi,
+    // dẫn người sửa sau tới chỗ "sửa cho test xanh" bằng cách gỡ cờ.
+    if (!TAM_TAT_GO_QUICK_CONTACT) {
+      await this.applyQuickContactCapabilityGate(creativeData);
+    }
+
     try {
       return await adAccount.createAdCreative(['id'], creativeData);
     } catch (error) {
+      // TỰ HỌC: mã 3 + payload vừa gửi CÓ message_extensions ⇒ Meta chưa cấp năng lực
+      // cho ứng dụng. Ghi knob trước khi ném lỗi (nuốt lỗi ghi, không đổi lỗi user thấy).
+      await this.learnQuickContactUnavailable(error, creativeData);
+
       const fallbackCreativeData = this.clone(creativeData);
       const didStrip =
         this.stripOptionalPersonalizedDestinationFields(fallbackCreativeData);
@@ -1976,6 +2073,116 @@ export class DraftAutomationMetaPublisherService {
         'Meta rejected optional personalized destination fields. Retrying creative creation without them.',
       );
       return adAccount.createAdCreative(['id'], fallbackCreativeData);
+    }
+  }
+
+  /** Payload sắp gửi Meta có mang "Tiện ích liên hệ nhanh" hay không. */
+  private hasQuickContactMessageExtensions(creativeData: any) {
+    const assetFeed = creativeData?.asset_feed_spec;
+    return !!(
+      assetFeed &&
+      typeof assetFeed === 'object' &&
+      !Array.isArray(assetFeed) &&
+      'message_extensions' in assetFeed
+    );
+  }
+
+  /**
+   * (A) GỠ KHI UNAVAILABLE — xoá `asset_feed_spec.message_extensions` TRƯỚC khi gọi Meta.
+   *
+   * VÌ SAO GỠ Ở BACKEND CHỨ KHÔNG CHỈ KHOÁ CÔNG TẮC Ở FE: production có 122 SystemAd ĐÃ
+   * mang sẵn cờ bật (nhóm CUSTOM 57 nháp từ 31-07 publish 0 cái). Khoá công tắc chỉ chặn
+   * người dùng BẬT MỚI; mọi lượt cron chạy lại nháp cũ vẫn gãy mã 3 như cũ. Gỡ ở đây làm
+   * chúng đăng được, chỉ mất phần tiện ích — đó mới là mục đích chính.
+   *
+   * UNKNOWN/AVAILABLE → KHÔNG đụng gì (giữ nguyên hành vi cũ). Chỉ 'UNAVAILABLE' mới gỡ.
+   * Đọc knob CHỈ KHI payload thật sự có field (đường nóng: đại đa số creative không có
+   * → không tốn lượt đọc DB nào; reader còn cache 30s).
+   * Lỗi đọc knob = fail-open (getString đã nuốt lỗi DB về default 'UNKNOWN') → hỏng DB
+   * cấu hình không bao giờ tự ý cắt tính năng của người dùng.
+   */
+  private async applyQuickContactCapabilityGate(creativeData: any) {
+    if (!this.hasQuickContactMessageExtensions(creativeData)) return;
+
+    const capability = (
+      await this.appConfig.getString(
+        QUICK_CONTACT_CAPABILITY_KEY,
+        QUICK_CONTACT_CAPABILITY_DEFAULT,
+      )
+    )
+      .trim()
+      .toUpperCase();
+    if (capability !== 'UNAVAILABLE') return;
+
+    const assetFeed = creativeData.asset_feed_spec;
+    delete assetFeed.message_extensions;
+    // asset_feed_spec rỗng thì XOÁ LUÔN: gửi `asset_feed_spec: {}` là gửi thừa một khoá
+    // vô nghĩa, và với creative tham chiếu bài viết (object_story_id) Meta còn từ chối
+    // hẳn (1815809). Chỉ xoá khi KHÔNG CÒN KHOÁ NÀO — các khoá anh em
+    // (optimization_type/call_to_actions của đích nhắn tin combo, onsite_destinations,
+    // call_ads_configuration…) phải sống nguyên.
+    if (Object.keys(assetFeed).length === 0)
+      delete creativeData.asset_feed_spec;
+
+    this.logger.warn(
+      `[quick-contact] ${QUICK_CONTACT_CAPABILITY_KEY}=UNAVAILABLE → đã gỡ asset_feed_spec.message_extensions khỏi payload trước khi gọi Meta (quảng cáo vẫn lên, chỉ mất "Tiện ích liên hệ nhanh").`,
+    );
+  }
+
+  /**
+   * (B) TỰ HỌC — publish thất bại mã 3 TRONG KHI payload có message_extensions ⇒ đặt knob
+   * 'UNAVAILABLE'. Từ lượt sau (cả mb-ads lẫn mb-batch) field này bị gỡ tự động, không
+   * tốn thêm lời gọi Meta nào để dò.
+   *
+   * ĐIỀU KIỆN "CÓ message_extensions" LÀ BẮT BUỘC — chống KHOÁ OAN: mã 3 là mã CHUNG
+   * ("Application does not have the capability to make this API call"), Meta còn trả nó
+   * cho những năng lực khác chẳng liên quan gì tới tiện ích liên hệ nhanh. Thiếu vế này
+   * thì một lỗi mã 3 bất kỳ sẽ khoá tính năng của cả hệ thống.
+   *
+   * Kiểm trên creativeData SAU khi gate (A) đã chạy — tức đúng payload ĐÃ GỬI. Nếu knob
+   * đã UNAVAILABLE thì field đã bị gỡ ⇒ không tự học lại (ghi lại cùng giá trị cũng vô hại
+   * nhưng thừa một lượt ghi DB).
+   *
+   * NUỐT LỖI TUYỆT ĐỐI: đây là việc phụ. Ghi knob hỏng (mất DB, race…) KHÔNG được đổi lỗi
+   * người dùng nhìn thấy, càng không được nuốt mất lỗi gốc — caller vẫn ném `error` như cũ.
+   */
+  private async learnQuickContactUnavailable(error: any, creativeData: any) {
+    try {
+      if (!this.hasQuickContactMessageExtensions(creativeData)) return;
+      if (Number(parseMetaError(error)?.code) !== 3) return;
+
+      // 🔴 CHỈ tự học khi knob còn 'UNKNOWN' — parity với mb-ads
+      // (`rememberQuickContactUnavailable`). Hai giá trị kia đều là QUYẾT ĐỊNH CỦA NGƯỜI
+      // (admin đặt tay, hoặc "Dò lại năng lực"), máy không được đè lên:
+      //   • 'UNAVAILABLE' → đã khoá rồi, ghi lại là thừa một lượt ghi DB.
+      //   • 'AVAILABLE'   → admin CỐ Ý muốn vẫn gửi message_extensions để nhìn thấy lỗi
+      //     thật thay vì để hệ thống âm thầm gỡ field. Thiếu chốt này thì cron chỉ cần
+      //     gãy một lần là đè knob về UNAVAILABLE — admin mở bao nhiêu lần cũng vô ích,
+      //     mà lại rất khó lần ra vì thủ phạm nằm ở repo KHÁC với nơi họ vừa bấm mở.
+      const capability = (
+        await this.appConfig.getString(
+          QUICK_CONTACT_CAPABILITY_KEY,
+          QUICK_CONTACT_CAPABILITY_DEFAULT,
+        )
+      )
+        .trim()
+        .toUpperCase();
+      if (capability !== 'UNKNOWN') return;
+
+      await this.appConfig.setString(
+        QUICK_CONTACT_CAPABILITY_KEY,
+        'UNAVAILABLE',
+        QUICK_CONTACT_CAPABILITY_LABEL,
+      );
+      this.logger.warn(
+        `[quick-contact] Meta trả mã 3 trong khi payload có asset_feed_spec.message_extensions → đã đặt ${QUICK_CONTACT_CAPABILITY_KEY}='UNAVAILABLE'. Các quảng cáo sau sẽ tự gỡ field này; muốn mở lại thì admin bấm "Dò lại năng lực" bên mb-ads.`,
+      );
+    } catch (learnErr) {
+      this.logger.warn(
+        `[quick-contact] Không ghi được ${QUICK_CONTACT_CAPABILITY_KEY}: ${
+          (learnErr as any)?.message || learnErr
+        }`,
+      );
     }
   }
 
@@ -2137,32 +2344,162 @@ export class DraftAutomationMetaPublisherService {
    *
    * Chỉ gọi ở bước tạo creative, KHÔNG đưa vào buildCreativeData để tránh lọt vào
    * diff/snapshot khiến creative cũ bị tạo lại oan.
+   *
+   * Hàm này cũng là nơi ghi toggle "Duyệt sản phẩm"
+   * (`personalized_destinations.product_browsing`) — vì đây là NƠI DUY NHẤT được phép
+   * chạm degrees_of_freedom_spec, xem khối chú thích ngay tại chỗ ghi bên dưới.
    */
+  /**
+   * Toggle "Duyệt sản phẩm" (`product_browsing`) — mục thứ 3 của hộp "Điểm đến cá nhân
+   * hoá" bên Meta Business. Bản song sinh của `MetaService.applyProductBrowsingPreference`
+   * ở mb-ads; sửa một bên nhớ sửa bên kia.
+   *
+   * TÁCH RIÊNG khỏi `applyProductExtensionsPreference` CÓ CHỦ Ý, đừng gộp lại cho gọn:
+   * hàm kia có HAI cái chặn (`isCatalogProductCreative` bên trong, và guard
+   * `!object_story_id` ở nơi gọi) — cả hai đều là chặn của "Hiển thị sản phẩm". Gộp chung
+   * thì toggle này bị NUỐT IM LẶNG với catalog ad và với quảng cáo dùng bài viết có sẵn:
+   * người dùng bật được, nháp lưu đúng, publish báo thành công, mà Meta không nhận gì.
+   *
+   * Chỉ ghi khi người dùng BẬT. Tắt/chưa đặt ⇒ KHÔNG đụng gì, để nhánh OPT_OUT mặc định
+   * của `applyProductExtensionsPreference` lo (giữ nguyên hành vi cũ cho nháp chưa chạm).
+   *
+   * Đo thật 07-08-2026 (act_1262628191933179): `product_browsing` OPT_IN gửi MỘT MÌNH
+   * được Meta nhận và echo đúng, KHÔNG cần nguồn sản phẩm; bật cùng `product_extensions`
+   * cũng được ⇒ hai tính năng độc lập.
+   */
+  private applyProductBrowsingPreference(
+    creativeData: any,
+    sourceCreative: any,
+  ) {
+    const enabled =
+      sourceCreative?.personalized_destinations?.product_browsing?.enabled ===
+      true;
+    if (!enabled) return;
+
+    // 🔴 ĐÚNG FIELD: `destination_spec.native_commerce_experience.product_browsing` —
+    // parity với mb-ads `applyProductBrowsingPreference`. Đo 07-08-2026 bằng cách để
+    // giao diện Meta tự ghi rồi đọc lại (creative `2568103560315023`).
+    // ⛔ TỪNG GHI NHẦM vào `degrees_of_freedom_spec.creative_features_spec.product_browsing`
+    // — Meta NHẬN và echo lại nhưng Ads Manager vẫn hiện Off ⇒ không phải công tắc thật.
+    // ⚠️ Sẽ lỗi mã 3 tới khi Meta cấp năng lực cho ứng dụng (cùng bức tường với
+    // asset_feed_spec.message_extensions).
+    const dest = creativeData.destination_spec || {};
+    creativeData.destination_spec = {
+      ...dest,
+      native_commerce_experience: {
+        ...(dest.native_commerce_experience || {}),
+        product_browsing: {
+          enroll_status: 'OPT_IN',
+          action_metadata: { type: 'MANUAL' },
+        },
+      },
+    };
+  }
+
   private applyProductExtensionsPreference(
     creativeData: any,
     sourceCreative: any,
   ) {
     if (this.isCatalogProductCreative(sourceCreative)) return;
 
-    const showProducts = sourceCreative?.show_products === true;
+    const productSetId = this.resolveProductExtensionsSetId(sourceCreative);
+    // Chỉ bật khi có toggle VÀ có product set: bật mà không có nguồn sản phẩm thì Meta
+    // tự chọn, kết quả không tất định. Parity mb-ads.
+    const showProducts =
+      sourceCreative?.show_products === true && !!productSetId;
+
+    // Toggle "Duyệt sản phẩm" — nằm trong `personalized_destinations`, hình dạng bắt
+    // chước Y HỆT `browser_addons: { enabled: boolean }` (chưa từng lưu = undefined,
+    // đã lưu-mà-tắt = false). Ở luồng GHI này hai trạng thái đó cho ra CÙNG kết quả (giữ
+    // nguyên hành vi cũ), CHỈ `=== true` mới đổi payload — nên đọc bằng so sánh chặt,
+    // đừng đổi thành truthy. Đọc từ `sourceCreative` (adPayload.creative bản gốc) vì
+    // buildCreativeData đã bóc `personalized_destinations` khỏi creativeData. Parity mb-ads.
+    const productBrowsingEnabled =
+      sourceCreative?.personalized_destinations?.product_browsing?.enabled ===
+      true;
 
     const dof = creativeData.degrees_of_freedom_spec || {};
     const features = dof.creative_features_spec || {};
 
-    // creative_features_spec yêu cầu KEY theo enum HOA của Meta (lỗi #100 liệt kê
-    // tập hợp lệ). Ba feature phụ thuộc catalog/sản phẩm cần product set → opt out
-    // cho creative KHÔNG gắn catalog để tránh lỗi "tạo nội dung động mà không có ID
-    // nhóm sản phẩm". Phải khớp mb-ads (MetaService.applyProductExtensionsPreference).
-    features.PRODUCT_BROWSING = {
+    // ĐO THẬT 07-08-2026 (POST creative lên TKQC test rồi GET lại rồi xoá): key phải là
+    // `product_extensions` CHỮ THƯỜNG. Bản cũ ghi `PRODUCT_BROWSING` CHỮ HOA — Meta VẪN
+    // NHẬN không báo lỗi nhưng chuẩn hoá thành `product_browsing`, tức bật NHẦM tính
+    // năng (duyệt sản phẩm trong Shop) trong khi `product_extensions` vẫn OPT_OUT.
+    // Ba feature phụ thuộc catalog vẫn OPT_OUT khi tắt để tránh lỗi "tạo nội dung động
+    // mà không có ID nhóm sản phẩm" — chưa rõ key nào chặn lỗi đó nên giữ đủ cả ba.
+    // (NGOẠI LỆ DUY NHẤT: product_browsing khi người dùng CHỦ ĐỘNG bật toggle "Duyệt sản
+    // phẩm" — xem hai khối chú thích ngay dưới; đo trên TKQC test thì OPT_IN một mình
+    // không sinh lỗi, nhưng nếu lỗi đó quay lại thì đây là nghi phạm số một.)
+    // Phải khớp mb-ads (MetaService.applyProductExtensionsPreference).
+    features.product_extensions = {
       enroll_status: showProducts ? 'OPT_IN' : 'OPT_OUT',
     };
     if (!showProducts) {
-      features.STANDARD_ENHANCEMENTS_CATALOG = { enroll_status: 'OPT_OUT' };
-      features.PRODUCT_METADATA_AUTOMATION = { enroll_status: 'OPT_OUT' };
+      // 🔴 product_browsing ở ĐÂY KHÔNG phải ý định người dùng — nó là mặc định TẮT đi
+      // kèm hai feature phụ thuộc catalog để chặn lỗi "tạo nội dung động mà không có ID
+      // nhóm sản phẩm" (chưa rõ key nào chặn nên giữ đủ cả ba, đừng tỉa). Chỉ ghi khi
+      // toggle "Duyệt sản phẩm" KHÔNG bật; toggle bật thì nhánh OPT_IN bên dưới lo.
+      // Bỏ điều kiện này = mặc định cũ đè chết toggle mới.
+      if (!productBrowsingEnabled) {
+        features.product_browsing = { enroll_status: 'OPT_OUT' };
+      }
+      features.standard_enhancements_catalog = { enroll_status: 'OPT_OUT' };
+      features.product_metadata_automation = { enroll_status: 'OPT_OUT' };
+    }
+
+    // ── Toggle "Duyệt sản phẩm" BẬT → OPT_IN, BẤT KỂ showProducts ────────────────────
+    // Ý nghĩa (theo mô tả của Meta trên giao diện): người dùng bấm nút kêu gọi hành động
+    // thì sang trải nghiệm DUYỆT SẢN PHẨM trên Facebook/Instagram thay vì mở website.
+    // KHÁC HẲN "Hiển thị sản phẩm" (product_extensions — danh sách sản phẩm hiện DƯỚI
+    // quảng cáo) ở ngay phía trên.
+    // ĐO THẬT 07-08-2026 (POST → GET → DELETE trên act_1262628191933179):
+    //   • product_browsing:{enroll_status:'OPT_IN'} gửi MỘT MÌNH → Meta NHẬN, GET lại
+    //     echo đúng 'OPT_IN'. KHÔNG cần nguồn sản phẩm (khác hẳn product_extensions,
+    //     thứ bắt buộc phải có product set mới tất định) ⇒ không gate theo showProducts.
+    //   • product_browsing OPT_IN và product_extensions OPT_IN BẬT CÙNG LÚC ĐƯỢC, Meta
+    //     echo cả hai ⇒ hai tính năng ĐỘC LẬP, không loại trừ nhau.
+    //   • Meta còn TỰ THÊM creative_sourcing_spec.destination_screenshot_spec và echo về
+    //     ~82 feature (đa số OPT_OUT) ⇒ TUYỆT ĐỐI không diff nguyên khối
+    //     degrees_of_freedom_spec giữa nháp và live.
+    // Production hiện có 5.650/56.283 creative live mang product_browsing OPT_IN (10%).
+    // Đặt SAU khối trên để bảng điều kiện đọc thẳng từ trên xuống; hai nhánh đã loại trừ
+    // nhau bằng `!productBrowsingEnabled` nên không có chuyện ghi đè ngầm.
+    // Parity mb-ads (MetaService.applyProductExtensionsPreference) — sửa bên này BẮT BUỘC
+    // soát bên kia, nếu không cùng một bản nháp cho payload khác nhau tuỳ ai bấm publish.
+    if (productBrowsingEnabled) {
+      features.product_browsing = { enroll_status: 'OPT_IN' };
     }
 
     dof.creative_features_spec = features;
     creativeData.degrees_of_freedom_spec = dof;
+
+    if (showProducts) {
+      // SPREAD-MERGE, KHÔNG gán đè: creative_sourcing_spec còn chứa site_links_spec /
+      // destination_screenshot_spec… của quảng cáo đang chạy (Meta còn tự thêm
+      // destination_screenshot_spec). Gán đè = xoá tiện ích đang chạy → lệch
+      // publishedSnapshot → tạo lại creative → reset learning + mất social proof.
+      creativeData.creative_sourcing_spec = {
+        ...(creativeData.creative_sourcing_spec ||
+          sourceCreative?.creative_sourcing_spec ||
+          {}),
+        associated_product_set_id: String(productSetId),
+      };
+    }
+  }
+
+  /**
+   * Product set cho Tiện ích sản phẩm. KHÔNG đọc productSetId/product_set_id — hai tên
+   * đó thuộc catalog ad (DPA) và sẽ khiến isCatalogProductCreative trả true. Parity mb-ads.
+   */
+  private resolveProductExtensionsSetId(
+    sourceCreative: any,
+  ): string | undefined {
+    const raw =
+      sourceCreative?.productExtensionsSetId ||
+      sourceCreative?.product_extensions_set_id ||
+      sourceCreative?.creative_sourcing_spec?.associated_product_set_id;
+    const value = raw === undefined || raw === null ? '' : String(raw).trim();
+    return value === '' ? undefined : value;
   }
 
   // Đích nhắn tin "combo" (nhiều kênh trong 1 nhóm) → tập app_destination cần khai
@@ -2248,6 +2585,43 @@ export class DraftAutomationMetaPublisherService {
 
     // KHÔNG thêm standard_enhancements: Meta đã NGỪNG field này (subcode 3858504),
     // phải chọn từng tính năng — đã do applyProductExtensionsPreference đặt. Parity mb-ads.
+  }
+
+  /**
+   * Gắn `object_story_spec.instagram_user_id` cho creative CATALOG.
+   * BẢN SAO 1:1 của mb-ads MetaService.attachInstagramActorForCatalogCreative — sửa một
+   * bên PHẢI sửa bên kia.
+   *
+   * buildCreativeData cố ý xoá field Instagram (đúng cho QC thường, Meta tự suy từ Trang),
+   * nhưng catalog ad thì thiếu là Meta TỪ CHỐI Ở BƯỚC TẠO AD — tức lỗi rơi vào lúc muộn
+   * nhất, sau khi đã tạo campaign + ad set + creative. Lỗi #100 subcode 1772103.
+   * Đo thật 07-08-2026: cùng creative catalog, không có field → tạo ad LỖI; có → OK.
+   * Nguồn id: Fanpage.rawPayload.instagram_business_account.id (entity-sync đã fetch sẵn).
+   */
+  private async attachInstagramActorForCatalogCreative(creativeData: any) {
+    if (!creativeData?.product_set_id) return;
+    const oss = creativeData.object_story_spec;
+    if (!oss || oss.instagram_user_id) return;
+    const pageId = oss.page_id;
+    if (!pageId) return;
+
+    try {
+      const fanpage = await this.prisma.fanpage.findUnique({
+        where: { id: String(pageId) },
+        select: { rawPayload: true },
+      });
+      const igId = (fanpage?.rawPayload as any)?.instagram_business_account?.id;
+      if (igId) {
+        oss.instagram_user_id = String(igId);
+      } else {
+        this.logger.warn(
+          `[catalog-creative] Trang ${pageId} chưa có instagram_business_account trong DB — quảng cáo danh mục có thể bị Meta từ chối (#100/1772103).`,
+        );
+      }
+    } catch (e) {
+      // Tra cứu hỏng KHÔNG được làm hỏng publish — để Meta phán quyết.
+      this.logger.error('[catalog-creative] tra Instagram của Trang lỗi', e as any);
+    }
   }
 
   private normalizeCatalogCreativeForMeta(
@@ -2518,6 +2892,9 @@ export class DraftAutomationMetaPublisherService {
   private applyPersonalizedDestinations(creativeData: any, config: any) {
     if (!config) return;
 
+    // ⛔ ĐÃ THỬ VÀ BÁC BỎ 07-08-2026 — ĐỪNG LÀM LẠI: từng cho "Duyệt sản phẩm" kéo theo
+    // "Tối ưu đích đến website". SAI — ảnh Ads Manager cho thấy Product browsing = On
+    // trong khi Optimize website destination = Off ⇒ hai thứ ĐỘC LẬP.
     const optimizeWebsiteEnabled = !!config.optimize_website;
     const websiteUrl = this.resolveCreativeWebsiteUrl(creativeData);
     const shopConfig = config.shop || {

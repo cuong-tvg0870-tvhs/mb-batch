@@ -107,6 +107,11 @@ export const ADSET_FIELDS = [
   AdSet.Fields.promoted_object,
   AdSet.Fields.attribution_spec,
   AdSet.Fields.is_incremental_attribution_enabled,
+  // Parity mb-ads (meta-field.ts ADSET_FIELDS). Hai writer ghi CÙNG cột
+  // `AdSet.rawPayload`; thiếu field ở một bên thì mỗi lần bên đó đồng bộ là field biến
+  // mất khỏi payload, và mb-ads — vốn ĐEM field này ra so khi diff nháp↔live
+  // (meta.service.ts, khối "chiến lược vòng đời khách hàng") — sẽ thấy "lệch" oan.
+  AdSet.Fields.existing_customer_budget_percentage,
   AdSet.Fields.frequency_control_specs,
   AdSet.Fields.is_dynamic_creative,
   AdSet.Fields.instagram_user_id,
