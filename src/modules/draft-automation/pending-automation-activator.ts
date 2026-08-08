@@ -9,6 +9,10 @@ import {
   fetchBudgetSchedulesStrict,
 } from '../campaign-rule-runner/campaign-rule-executor';
 import {
+  canonicalRuleInterval,
+  DEFAULT_RULE_INTERVAL,
+} from '../campaign-rule-runner/campaign-rule-runner.constants';
+import {
   CAMPAIGN_TARGET_SENTINEL,
   normalizePendingAutomation,
   PendingAutomationEntry,
@@ -601,11 +605,33 @@ async function createConditionalRule(
 
     if (rule.schedule) {
       const s = rule.schedule;
+      // VÁ nhịp quét rác cho nháp CŨ (đường ghi duy nhất trong mb-batch chưa qua lớp vá
+      // "lúc lưu" của mb-ads). PARITY: mirror sanitizeRuleScanInterval trong mb-ads
+      // (src/modules/draft-campaign/pending-automation.util.ts) — sửa 1 bên phải sửa bên
+      // kia. `type === 'SPECIFIC'` KHÔNG dùng interval (prod có 184 rule SPECIFIC với
+      // interval NULL) → tuyệt đối không đụng, chỉ chuẩn hoá khi type === 'INTERVAL'.
+      let interval: string | null = s.interval ?? null;
+      if (s.type === 'INTERVAL') {
+        const canon = canonicalRuleInterval(s.interval);
+        if (canon === null) {
+          logger.warn(
+            `Nhịp quét ${JSON.stringify(s.interval)} của quy tắc "${
+              rule.name ?? '(chưa đặt tên)'
+            }" (camp ${scope.campaignId}${
+              scope.adSetId ? `, adSet ${scope.adSetId}` : ''
+            }) khi kích hoạt "Tự động hoá sau khi lên Camp" không tra được trong INTERVAL_MS ` +
+              `→ dùng ${DEFAULT_RULE_INTERVAL}. Rule vẫn được tạo, chỉ khác nhịp quét.`,
+          );
+          interval = DEFAULT_RULE_INTERVAL;
+        } else {
+          interval = canon;
+        }
+      }
       await tx.campaignRuleSchedule.create({
         data: {
           ruleId: created.id,
           type: s.type ?? undefined,
-          interval: s.interval ?? null,
+          interval,
           specificSlots:
             s.specificSlots == null
               ? Prisma.JsonNull

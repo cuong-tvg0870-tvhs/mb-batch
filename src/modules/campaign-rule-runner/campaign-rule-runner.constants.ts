@@ -180,6 +180,31 @@ export const INTERVAL_MS: Record<string, number> = {
 };
 
 /**
+ * Nhịp quét mặc định khi `interval` của lịch INTERVAL không tra được trong `INTERVAL_MS`
+ * (thiếu/null/rác/sai hoa-thường). PARITY: khớp `DEFAULT_RULE_INTERVAL` bên mb-ads
+ * (src/common/campaign-rule-interval.ts) — đổi một bên phải đổi bên kia.
+ */
+export const DEFAULT_RULE_INTERVAL = '60m';
+
+/**
+ * Dạng CHUẨN của một chuỗi nhịp quét INTERVAL, hoặc null nếu `INTERVAL_MS` ở trên không
+ * hiểu (đây LÀ nguồn sự thật cho tập giá trị hợp lệ — không chép lại danh sách riêng).
+ *
+ * Trim + hạ chữ vì " 60M " là ý định rõ ràng của người gửi, NHƯNG phải ghi xuống DB đúng
+ * dạng chuẩn "60m": `INTERVAL_MS['60M']` vẫn ra `undefined` ⇒ vẫn chết im lặng (xem
+ * `intervalMs()` ở campaign-rule-schedule.util.ts — tra thẳng, không tự chuẩn hoá).
+ *
+ * PARITY: mirror `canonicalRuleInterval` bên mb-ads
+ * (src/common/campaign-rule-interval.ts). Sửa ở đây phải sửa cả bên kia.
+ */
+const INTERVAL_KEY_SET = new Set<string>(Object.keys(INTERVAL_MS));
+export function canonicalRuleInterval(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const canon = value.trim().toLowerCase();
+  return INTERVAL_KEY_SET.has(canon) ? canon : null;
+}
+
+/**
  * Fields insight request từ Meta cho MỖI entity (level campaign/adset).
  * Chỉ khung TODAY (date_preset=today) cho v1.
  */
